@@ -10,4 +10,4 @@ BUSY is GitHub coordination evidence, not an MCP-owned lock or lease. Workers re
 
 Child processes must not inherit unrelated provider/API/MCP secrets. `.env` and runtime state stay untracked.
 
-`npm test` must pass before deployment. The smoke test must prove OAuth refresh reuse, stable actor identity across restart, session recovery, no MCP `instructions` injection, no server/workspace path in the tool list or skill loaders, and child-secret filtering.
+`npm test` must pass before deployment. The smoke test must prove OAuth refresh reuse, stateless transport continuity across an idle gap and process restart, stable actor identity, no MCP `instructions` injection, no server/workspace path in the tool list or skill loaders, and child-secret filtering.
