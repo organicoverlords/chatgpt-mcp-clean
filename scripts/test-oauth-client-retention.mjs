@@ -41,6 +41,14 @@ async function issueTokens(provider, client) {
 try {
   const provider = new LocalOAuthProvider(resourceUrl, "owner@example.com", storePath);
   const retained = await provider.clientsStore.registerClient(metadata("retained-client"));
+  const opencode = await provider.clientsStore.registerClient(metadata("opencode", "http://127.0.0.1:19876/callback"));
+  const traycer = await provider.clientsStore.registerClient(metadata("traycer", "https://platform.traycer.ai/oauth/callback"));
+  assert.equal(opencode.redirect_uris[0], "http://127.0.0.1:19876/callback");
+  assert.equal(traycer.redirect_uris[0], "https://platform.traycer.ai/oauth/callback");
+  await assert.rejects(
+    provider.clientsStore.registerClient(metadata("untrusted", "https://evil.example/oauth/callback")),
+    /Only ChatGPT, loopback PKCE, or Traycer HTTPS OAuth callbacks are accepted/,
+  );
   const tokens = await issueTokens(provider, retained);
   assert.ok(tokens.access_token);
   assert.ok(tokens.refresh_token);

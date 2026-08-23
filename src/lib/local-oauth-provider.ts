@@ -47,6 +47,25 @@ function isChatGptRedirect(value: string): boolean {
       /^\/connector\/oauth\/[A-Za-z0-9_-]+$/.test(u.pathname) && !u.search && !u.hash && !u.username && !u.password;
   } catch { return false; }
 }
+function isLoopbackRedirect(value: string): boolean {
+  try {
+    const u = new URL(value);
+    const hostname = u.hostname.toLowerCase();
+    return u.protocol === "http:" && ["localhost", "127.0.0.1", "::1", "[::1]"].includes(hostname) &&
+      Boolean(u.port) && !u.search && !u.hash && !u.username && !u.password;
+  } catch { return false; }
+}
+function isTraycerRedirect(value: string): boolean {
+  try {
+    const u = new URL(value);
+    const hostname = u.hostname.toLowerCase();
+    return u.protocol === "https:" && (hostname === "traycer.ai" || hostname.endsWith(".traycer.ai")) &&
+      !u.search && !u.hash && !u.username && !u.password;
+  } catch { return false; }
+}
+function isAllowedRedirect(value: string): boolean {
+  return isChatGptRedirect(value) || isLoopbackRedirect(value) || isTraycerRedirect(value);
+}
 export class LocalOAuthProvider implements OAuthServerProvider {
   private clients = new Map<string, OAuthClientInformationFull>();
   private access = new Map<string, TokenRecord>();
@@ -65,7 +84,7 @@ export class LocalOAuthProvider implements OAuthServerProvider {
       registerClient: async (raw) => {
         const client = raw as OAuthClientInformationFull;
         if (client.token_endpoint_auth_method !== "none") throw new InvalidClientMetadataError("Only public PKCE clients are accepted");
-        if (!client.redirect_uris?.length || !client.redirect_uris.every(isChatGptRedirect)) throw new InvalidClientMetadataError("Only exact ChatGPT OAuth callbacks are accepted");
+        if (!client.redirect_uris?.length || !client.redirect_uris.every(isAllowedRedirect)) throw new InvalidClientMetadataError("Only ChatGPT, loopback PKCE, or Traycer HTTPS OAuth callbacks are accepted");
         if (client.grant_types?.some((g) => g !== "authorization_code" && g !== "refresh_token")) throw new InvalidClientMetadataError("Unsupported grant type");
         if (client.response_types?.some((r) => r !== "code")) throw new InvalidClientMetadataError("Unsupported response type");
         const full = { ...client, client_id: client.client_id || randomUUID(), client_id_issued_at: client.client_id_issued_at || Math.floor(Date.now() / 1000) };
