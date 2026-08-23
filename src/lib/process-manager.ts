@@ -5,7 +5,11 @@ import { isAbsolute, resolve } from "node:path";
 import type { Readable } from "node:stream";
 
 const MAX_CAPTURE_CHARS = 4_000_000;
-const DEFAULT_TIMEOUT_SECONDS = 120;
+// Keep foreground HTTP calls below the connector/Funnel response timeout. Long
+// work must use start_process + read_output so the initial MCP call returns
+// immediately instead of leaving a request open until the connector gives up.
+export const MAX_FOREGROUND_TIMEOUT_SECONDS = 60;
+const DEFAULT_TIMEOUT_SECONDS = MAX_FOREGROUND_TIMEOUT_SECONDS;
 const COMPLETED_RETENTION_MS = 30 * 60 * 1000;
 const MAX_COMPLETED_PROCESSES = 64;
 type CapturedChild = ChildProcessByStdio<null, Readable, Readable>;
@@ -120,6 +124,7 @@ export class ProcessManager {
 
   async execute(command: string, workingDirectory?: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<CommandResult> {
     const cwd = normalizedCwd(workingDirectory);
+    const boundedTimeoutSeconds = Math.min(Math.max(1, timeoutSeconds), MAX_FOREGROUND_TIMEOUT_SECONDS);
     const child = powershell(command, cwd);
     let stdout = "";
     let stderr = "";
@@ -163,7 +168,7 @@ export class ProcessManager {
       if (settled) return;
       timedOut = true;
       void taskkillTree(child.pid ?? -1).catch(() => undefined);
-    }, Math.max(1, timeoutSeconds) * 1000);
+    }, boundedTimeoutSeconds * 1000);
     try {
       return await result;
     } finally {
@@ -266,5 +271,4 @@ export class ProcessManager {
     return state;
   }
 }
-
 

@@ -17,7 +17,7 @@ $ServerName = 'shell-mcp'
 $Tailscale = 'C:\Program Files\Tailscale\tailscale.exe'
 $State = Join-Path $Root '.state\keepalive'
 New-Item -ItemType Directory -Force $State | Out-Null
-$stdout = Join-Path $State 'server.stdout.log'; $stderr = Join-Path $State 'server.stderr.log'; $log = Join-Path $State 'supervisor.log'
+$log = Join-Path $State 'supervisor.log'
 $PidFile = Join-Path $State 'child.pid'
 
 # Hardening knobs.
@@ -25,10 +25,13 @@ $MaxLogBytes   = 5MB   # rotate supervisor.log past this
 $MaxArchives   = 5     # keep this many server.std*.log archives
 $RepeatFlush   = 60    # re-emit a stuck repeating message every N occurrences (~15min at 15s)
 $BackoffMax    = 300   # cap the restart backoff at 5 minutes
+$OwnerFailureThreshold = 3 # require consecutive failed local probes before reclaiming a live owned listener
+$HealthRecheckSeconds = 2   # final confirmation delay immediately before an owned-listener reclaim
 
 $script:lastMsg = $null
 $script:repeat = 0
 $script:failStreak = 0
+$script:ownedHealthFailures = 0
 
 function RotateIfLarge([string]$Path) {
     try {
@@ -102,20 +105,16 @@ function IsOwnedMcpListener([int]$ProcessId) {
     } catch { return $false }
 }
 
-# Archiving is best-effort. The outgoing server's redirected stdout/stderr handles are
-# often still open when we rotate, and Move-Item then fails with a sharing violation.
-# Under $ErrorActionPreference='Stop' that terminated the whole supervisor and left the
-# server down with nothing to restart it -- the single largest source of "the MCP just
-# stopped". A locked log is never a reason to stop supervising.
+# Each child receives unique redirected stdout/stderr paths. Windows keeps those handles
+# open for the lifetime of the child, so reusing or moving a fixed path during recovery
+# can produce sharing violations and obscure the real control-channel state.
+function ChildLogPath([string]$Prefix) {
+    $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss-fff')
+    return (Join-Path $State "$Prefix.$stamp.$([guid]::NewGuid().ToString('N')).log")
+}
+
+# Pruning is best-effort. A locked log is never a reason to stop supervising.
 function ArchiveServerLogs {
-    $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
-    foreach ($pair in @(@($stdout, "server.stdout.$stamp.log"), @($stderr, "server.stderr.$stamp.log"))) {
-        try {
-            if (Test-Path $pair[0]) { Move-Item $pair[0] (Join-Path $State $pair[1]) -Force -ErrorAction Stop }
-        } catch {
-            Log "could not archive $(Split-Path $pair[0] -Leaf) (in use); continuing"
-        }
-    }
     try {
         foreach ($prefix in @('server.stdout.','server.stderr.')) {
             Get-ChildItem $State -Filter "$prefix*.log" -ErrorAction SilentlyContinue |
@@ -126,12 +125,17 @@ function ArchiveServerLogs {
 }
 
 function StartServer {
-    if (Healthy) { $script:failStreak = 0; return }
+    if (Healthy) { $script:failStreak = 0; $script:ownedHealthFailures = 0; return }
     $owner = PortOwner
     if ($owner) {
         if (-not (IsOwnedMcpListener $owner)) { Log "port occupied by foreign PID $owner while health is down; not killing it"; return }
-        Start-Sleep -Seconds 2
-        if (Healthy) { $script:failStreak = 0; return }
+        $script:ownedHealthFailures++
+        if ($script:ownedHealthFailures -lt $OwnerFailureThreshold) {
+            Log "owned MCP listener PID $owner failed local health probe ($($script:ownedHealthFailures)/$OwnerFailureThreshold); retaining it"
+            return
+        }
+        Start-Sleep -Seconds $HealthRecheckSeconds
+        if (Healthy) { $script:failStreak = 0; $script:ownedHealthFailures = 0; return }
         if ((PortOwner) -ne $owner) { return }
         Log "reclaiming unhealthy owned MCP listener PID $owner"
         Stop-Process -Id $owner -Force -ErrorAction SilentlyContinue
@@ -139,6 +143,8 @@ function StartServer {
         if (PortOwner) { Log "owned MCP listener PID $owner did not release port"; return }
     }
     ArchiveServerLogs
+    $stdout = ChildLogPath 'server.stdout'
+    $stderr = ChildLogPath 'server.stderr'
     Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $Root 'start.ps1'),'-SkipBuild','-Port',[string]$Port) -WorkingDirectory $Root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr | Out-Null
 
     # Wait for the listener and record its PID, so a later reclaim does not depend on
@@ -151,6 +157,7 @@ function StartServer {
     if ($listener) {
         Set-Content $PidFile ([string]$listener) -Encoding ASCII
         $script:failStreak = 0
+        $script:ownedHealthFailures = 0
         Log "started clean MCP child (listener PID $listener)"
     } else {
         $script:failStreak++
