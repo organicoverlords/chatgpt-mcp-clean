@@ -11,6 +11,10 @@ export function registerWorkflowSkills(server: McpServer) {
     out("orchestration_skill", { name: "orchestration", content: await read("orchestration", "SKILL.md") })
   );
 
+  server.registerTool("orchestration_status", { description: "Compatibility alias that returns the orchestration workflow. Read-only; does not inspect state.", inputSchema: {} }, async () =>
+    out("orchestration_status", { name: "orchestration", content: await read("orchestration", "SKILL.md") })
+  );
+
   server.registerTool("incident_report_skill", { description: "Return the incident-report workflow and verification contract. Read-only; does not create an incident.", inputSchema: {} }, async () =>
     out("incident_report_skill", {
       name: "incident-report",
