@@ -13,6 +13,18 @@ Do not read every project AGENTS.md just to orient. Reconstruct live state from 
 
 Account separately for the fixed timed GPT fleet and ad-hoc ChatGPT, Claude and local workers discovered from current evidence. Unknown ownership stays unknown. Clear BUSY only when stale/dead is supported by live evidence.
 
+## Independent evidence
+
+Never inherit another actor's evidence status. Worker reports, handoffs, tables, computed metrics, test summaries, logs, screenshots, proof receipts, PR/issue comments, commit messages, automation outputs, and another assistant's `verified` statements are claims or evidence locators, not accepted evidence. Before repeating a substantive claim as fact, independently reopen the primary source or reproduce the relevant calculation, test, runtime behavior, or artifact. If that independent check has not happened, report it as `NOT_PROVEN`, worker-reported, or not checked.
+
+End-to-end acceptance does not inherit from intermediate success. Capture success, file existence, image ingestion, `image_asset_pointer`, MCP transport success, build success, or a worker saying it inspected an artifact do not prove the intended user-visible result. Acceptance is `PROVEN` only when the actual intended end-to-end outcome is independently observed at the required final surface.
+
+## Tool routing
+
+Normal orchestration and worker startup use live local repo/machine state plus one bounded `@MCP1` sync. Use `@MCP1` for actor identity, BUSY/issue synchronization, bounded local Git/GitHub access, and normal transport. Do not use `@github` for routine startup orientation, broad branch/PR/history sweeps, or duplicate reads that `@MCP1`/local repo state already provide.
+
+If `@MCP1` is unavailable or unusable, manually switch to `@Remote Desktop Commander` as the primary backup route. Keep `@github` available as a narrow debugging/fallback route when the normal control paths are unavailable or when the GitHub app itself is the thing being diagnosed. A backup route must not become a second parallel orientation pass.
+
 ## Roadmap stewardship — orchestrator-owned
 
 Roadmap continuity and GitHub queue quality are 100% orchestrator responsibilities. Workers implement bounded product scopes; they are not responsible for keeping the whole project supplied with coherent future work.
@@ -49,4 +61,4 @@ After orientation, roadmap/GitHub reconciliation and the checkpoint report, choo
 
 After implementing/validating that scope, update GitHub and roadmap state as warranted, report meaningful new evidence, then return to orientation/reconciliation and continue while useful work remains. Do not go idle merely because a report was emitted or one worker pass finished.
 
-`MCP1` is the connector used for transport and shared actor/BUSY synchronization only. Do not turn `MCP1` into the scheduler, worker registry, policy engine, roadmap database, or orchestration state authority. GitHub and live repo/machine state remain durable truth.
+`@MCP1` is the normal connector used for transport and shared actor/BUSY synchronization only. Do not turn `@MCP1` into the scheduler, worker registry, policy engine, roadmap database, or orchestration state authority. GitHub and live repo/machine state remain durable truth; `@github` is a fallback/debug app route, not the normal orientation path.
