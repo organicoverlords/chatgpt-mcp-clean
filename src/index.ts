@@ -27,7 +27,7 @@ const paths=["/mcp",...(/^\/mcp\/[A-Za-z0-9_-]{16,128}$/.test(legacy)?[legacy]:[
 const pathSet=new Set(paths);
 
 const app=express();app.set("trust proxy","loopback");app.use(express.json({limit:"10mb"}));
-app.use("/authorize",(req,res,next)=>{const login=(req.header("tailscale-user-login")||"").trim().toLowerCase();if(req.header("tailscale-funnel-request")||login!==OWNER){res.status(403).send("Owner authorization required");return}next()});
+app.use("/authorize",(req,res,next)=>{const login=(req.header("tailscale-user-login")||"").trim().toLowerCase();if(login && login!==OWNER){res.status(403).send("Owner authorization required");return}next()});
 app.get("/.well-known/openid-configuration",(_req,res)=>res.json({issuer:publicOrigin.href,authorization_endpoint:new URL("/authorize",publicOrigin).href,token_endpoint:new URL("/token",publicOrigin).href,registration_endpoint:new URL("/register",publicOrigin).href,response_types_supported:["code"],grant_types_supported:["authorization_code","refresh_token"],token_endpoint_auth_methods_supported:["none"],code_challenge_methods_supported:["S256"],scopes_supported:["mcp"]}));
 app.use(mcpAuthRouter({provider:oauth,issuerUrl:publicOrigin,resourceServerUrl:resource,scopesSupported:["mcp"],resourceName:"Local MCP"}));
 const bearer=requireBearerAuth({verifier:oauth,requiredScopes:["mcp"],resourceMetadataUrl:getOAuthProtectedResourceMetadataUrl(resource)});
