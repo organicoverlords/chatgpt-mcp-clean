@@ -1,5 +1,7 @@
 ﻿import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
 import type { Readable } from "node:stream";
 
 const MAX_CAPTURE_CHARS = 4_000_000;
@@ -42,13 +44,37 @@ function appendCapture(current: string, chunk: Buffer | string): { value: string
   return { value: next.slice(-MAX_CAPTURE_CHARS), truncated: true };
 }
 
+// Absolute path so a mangled PATH in an inherited environment cannot turn into a
+// spawn failure. Falls back to bare resolution only if SystemRoot is unset.
+const POWERSHELL_EXE = process.env.SystemRoot
+  ? `${process.env.SystemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+  : "powershell.exe";
+
+// spawn() reports ENOENT when the *cwd* does not exist, and node attributes it to the
+// executable -- "spawn powershell.exe ENOENT" for a bad working_directory sends callers
+// hunting a PATH problem that does not exist. Validate the directory up front and fail
+// with a message that names the real cause.
 function normalizedCwd(workingDirectory?: string): string {
-  return workingDirectory || process.cwd();
+  if (!workingDirectory) return process.cwd();
+  if (!isAbsolute(workingDirectory)) {
+    throw new Error(`working_directory must be an absolute path, received "${workingDirectory}"`);
+  }
+  const resolved = resolve(workingDirectory);
+  let stats;
+  try {
+    stats = statSync(resolved);
+  } catch {
+    throw new Error(`working_directory does not exist: "${resolved}"`);
+  }
+  if (!stats.isDirectory()) {
+    throw new Error(`working_directory is not a directory: "${resolved}"`);
+  }
+  return resolved;
 }
 
 function powershell(command: string, cwd: string): CapturedChild {
   return spawn(
-    "powershell.exe",
+    POWERSHELL_EXE,
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
     {
       cwd,

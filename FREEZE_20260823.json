@@ -1,5 +1,5 @@
 {
-  "freeze": "FREEZE_20260823",
+  "freeze": "FREEZE_20260823.1",
   "frozen_at": "2026-08-23",
   "status": "verified-stable",
   "server_name": "shell-mcp",
@@ -7,14 +7,12 @@
   "entrypoint": "dist/index.js",
   "launcher": "start.ps1",
   "supervisor": "keepalive.ps1",
-
   "runtime": {
     "node": "v26.4.0",
     "npm": "11.17.0",
     "typescript": "7.0.2",
     "mcp_sdk": "1.24.3"
   },
-
   "binding": {
     "host": "127.0.0.1",
     "port": 3000,
@@ -22,7 +20,6 @@
     "public_origin": "https://kone.tailbf0440.ts.net",
     "exposure": "Tailscale Funnel proxies / -> http://127.0.0.1:3000"
   },
-
   "tools": [
     "execute_command",
     "start_process",
@@ -32,7 +29,6 @@
     "busy_claim",
     "busy_release"
   ],
-
   "verification": {
     "smoke": {
       "command": "node scripts/smoke.mjs",
@@ -65,9 +61,15 @@
         "GET /mcp": "405 + Allow: POST"
       }
     },
-    "self_heal": "Killing the listener PID is recovered automatically by keepalive.ps1 in ~35s, with the new PID recorded to .state/keepalive/child.pid."
+    "self_heal": "Killing the listener PID is recovered automatically by keepalive.ps1 in ~35s, with the new PID recorded to .state/keepalive/child.pid.",
+    "cwd_contract": {
+      "omitted": "uses server cwd",
+      "absolute existing directory": "runs",
+      "nonexistent": "working_directory does not exist: <path>",
+      "relative": "working_directory must be an absolute path, received <value>",
+      "path to a file": "working_directory is not a directory: <path>"
+    }
   },
-
   "defects_fixed_in_this_freeze": [
     {
       "id": "health-probe-identity",
@@ -110,13 +112,20 @@
       "was": "Asserted GET /mcp returns 200 + text/event-stream.",
       "impact": "The server is intentionally stateless POST-only and returns 405, so the assertion threw and the entire remainder of the suite never ran. No working regression signal existed.",
       "now": "Asserts the intended contract: 405 + Allow: POST."
+    },
+    {
+      "id": "misleading-enoent-on-bad-working-directory",
+      "file": "src/lib/process-manager.ts",
+      "was": "normalizedCwd() returned workingDirectory unchecked and spawn() was given a cwd that may not exist.",
+      "impact": "spawn() reports ENOENT when the *cwd* is missing and node attributes it to the executable, so any bad working_directory surfaced as 'spawn powershell.exe ENOENT'. This sent callers hunting a nonexistent PATH/PowerShell problem. Reproduced: nonexistent and relative working_directory both produced it while PowerShell resolved fine.",
+      "now": "working_directory must be absolute, must exist, and must be a directory; each failure returns a message naming the real cause and the offending path. powershell.exe is additionally resolved through %SystemRoot% so a mangled inherited PATH cannot masquerade as the same error."
     }
   ],
-
   "operational_notes": [
     "dist/ is gitignored but is what actually runs; a fresh clone needs `npm install && npm run build` before start.ps1 -SkipBuild is valid.",
     "dist/index.js was rebuilt from src at freeze time and verified byte-identical to the running binary.",
     ".env and .state/ are gitignored and contain the OAuth store, the legacy MCP path secret, and runtime claims. They are not in this repo and must be backed up separately.",
     "The previous MCP install lived under %LOCALAPPDATA%\\Temp and lost untracked files to Windows Storage Sense. This repo is deliberately outside Temp; do not relocate it back."
-  ]
+  ],
+  "supersedes": "FREEZE_20260823 (tag freeze-20260823)"
 }
