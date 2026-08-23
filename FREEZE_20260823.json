@@ -1,5 +1,5 @@
 {
-  "freeze": "FREEZE_20260823.3",
+  "freeze": "FREEZE_20260823.4",
   "frozen_at": "2026-08-23",
   "status": "verified-stable",
   "server_name": "shell-mcp",
@@ -78,6 +78,12 @@
         "stale lock reclaimed",
         "live lock fails fast instead of hanging"
       ]
+    },
+    "full_suite": {
+      "smoke": "PASS",
+      "stress": "PASS",
+      "concurrency": "PASS",
+      "run": "node scripts/smoke.mjs && node scripts/stress.mjs && node scripts/concurrency-busy.mjs 16"
     }
   },
   "defects_fixed_in_this_freeze": [
@@ -161,8 +167,16 @@
     "The previous MCP install lived under %LOCALAPPDATA%\\Temp and lost untracked files to Windows Storage Sense. This repo is deliberately outside Temp; do not relocate it back.",
     "Install supervisor persistence with: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\install-keepalive-task.ps1 (no admin required; -Uninstall removes it). Deliberately non-elevated: an elevated listener reports a blank CommandLine to a non-elevated WMI query, which breaks keepalive.ps1's port-reclaim ownership check."
   ],
-  "supersedes": "FREEZE_20260823.2 (tag freeze-20260823.2)",
-  "known_gaps": [
-    "The supervisor has no OS-level persistence until scripts/install-keepalive-task.ps1 is run. It registers a non-elevated logon Scheduled Task 'ShellMcpKeepAlive'. Until then the supervisor dies with whatever shell launched it and does not start at logon."
-  ]
+  "supersedes": "FREEZE_20260823.3 (tag freeze-20260823.3)",
+  "known_gaps": [],
+  "persistence": {
+    "scheduled_task": "ShellMcpKeepAlive",
+    "state": "registered and verified",
+    "principal": "KONE\\Lauri, RunLevel Limited (non-elevated), Interactive logon",
+    "trigger": "at logon; RestartCount 3 at 1-minute intervals; no execution time limit",
+    "install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\install-keepalive-task.ps1",
+    "uninstall": "same script with -Uninstall",
+    "why_not_elevated": "The server binds 127.0.0.1:3000 and needs no admin. An elevated listener reports a blank CommandLine to a non-elevated WMI query, which is what made keepalive.ps1 misclassify its own server as foreign and refuse to reclaim the port.",
+    "verified": "Whole stack killed (supervisor + server, port 3000 confirmed free), then Start-ScheduledTask rebuilt it end to end in ~4s: supervisor up, server healthy, child.pid recorded and matching the listener."
+  }
 }
