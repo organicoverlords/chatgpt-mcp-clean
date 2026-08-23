@@ -13,7 +13,7 @@ const REFRESH_TTL_SEC = 7 * 24 * 60 * 60;
 const CODE_TTL_MS = 60_000;
 const REFRESH_REUSE_GRACE_MS = 120_000;
 const MAX_CLIENTS = 64;
-const SUPPORTED_SCOPES = new Set(["mcp"]);
+const SUPPORTED_SCOPES = new Set(["mcp", "offline_access"]);
 
 interface CodeRecord {
   clientId: string;

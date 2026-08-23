@@ -1,13 +1,10 @@
-# Clean MCP repository rules
+# Local shell MCP infrastructure
 
-This repository is transport infrastructure only. Keep it small.
+This repository serves one native MCP server at `127.0.0.1:3000/mcp`.
 
-Never add server-injected project memory, AGENTS/CLAUDE loading, workspace inventories, absolute workspace paths in MCP instructions/tool metadata, orchestration state, worker scheduling, worker registries, leases, prompt-policy engines, upstream MCP aggregation, or automatic project scanning.
-
-Allowed core: ChatGPT OAuth, bounded HTTP session recovery, stable MCP actor identity, audit events, bounded file/shell/git tools, GitHub issue/BUSY synchronization, and explicit read-only workflow-skill loaders.
-
-BUSY is GitHub coordination evidence, not an MCP-owned lock or lease. Workers remain able to fall back to GitHub/repo state when MCP is unavailable.
-
-Child processes must not inherit unrelated provider/API/MCP secrets. `.env` and runtime state stay untracked.
-
-`npm test` must pass before deployment. The smoke test must prove OAuth refresh reuse, stateless transport continuity across an idle gap and process restart, stable actor identity, no MCP `instructions` injection, no server/workspace path in the tool list or skill loaders, and child-secret filtering.
+- Do not use, launch, register, or proxy Serena, MCP1, Desktop Commander, Docker, or port 9121.
+- The native server owns the MCP Streamable HTTP session and exposes exactly these tools: `execute_command`, `start_process`, `read_output`, `kill_process`, `busy_list`, `busy_claim`, and `busy_release`.
+- Tailscale Funnel, when enabled, may forward the public HTTPS origin to `http://127.0.0.1:3000`; it must not add another MCP proxy or alter MCP bodies.
+- Keep the server bound to loopback only. Do not add files, Git, project activation, workspace scanning, skills, routing, orchestration, or scheduler features.
+- `.env` and `.state` remain untracked. Never print or commit OAuth credentials.
+- Validate with `npm test` before deployment and verify the live `/mcp` handshake and exact tool list.

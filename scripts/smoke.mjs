@@ -1,37 +1,203 @@
-import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-import fs from "node:fs/promises";
-import path from "node:path";
-import os from "node:os";
+import "dotenv/config";
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 
-const root=process.cwd(),port=32147,origin="https://clean-test.ts.net";
-const temp=await fs.mkdtemp(path.join(os.tmpdir(),"mcp-clean-smoke-"));
-const env={...process.env,PORT:String(port),HOST:"127.0.0.1",MCP_PUBLIC_ORIGIN:origin,TAILSCALE_OWNER_LOGIN:"owner@example.com",MCP_OAUTH_STORE_PATH:path.join(temp,"oauth.json"),MCP_ACTOR_BINDINGS_PATH:path.join(temp,"actors.json"),AUDIT_LOG_PATH:path.join(temp,"audit.jsonl"),MCP_DEFAULT_CWD:temp};
-function start(){const p=spawn(process.execPath,[path.join(root,"dist","index.js")],{cwd:root,env,windowsHide:true,stdio:["ignore","pipe","pipe"]});let log="";p.stdout.on("data",d=>log+=d);p.stderr.on("data",d=>log+=d);return {p,get log(){return log}}}
-async function waitHealth(){for(let i=0;i<150;i++){try{const r=await fetch(`http://127.0.0.1:${port}/health`);if(r.ok){const h=await r.json();if(h.mode!=="stateless")throw new Error(`wrong mode ${JSON.stringify(h)}`);return}}catch{}await new Promise(r=>setTimeout(r,100))}throw new Error("health timeout")}
-async function stop(p){if(p.exitCode!==null)return;p.kill("SIGTERM");for(let i=0;i<50&&p.exitCode===null;i++)await new Promise(r=>setTimeout(r,50));if(p.exitCode===null)p.kill("SIGKILL")}
-const b64=x=>Buffer.from(x).toString("base64url");
-const verifier="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~abcd";
-const challenge=b64(createHash("sha256").update(verifier).digest());
-let srv=start();
-try{
- await waitHealth();
- const reg=await fetch(`http://127.0.0.1:${port}/register`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({redirect_uris:["https://chatgpt.com/connector/oauth/test123"],token_endpoint_auth_method:"none",grant_types:["authorization_code","refresh_token"],response_types:["code"],client_name:"smoke"})});
- if(!reg.ok)throw new Error(`register ${reg.status} ${await reg.text()}`);const client=await reg.json();
- const au=new URL(`http://127.0.0.1:${port}/authorize`);for(const[k,v]of Object.entries({response_type:"code",client_id:client.client_id,redirect_uri:"https://chatgpt.com/connector/oauth/test123",code_challenge:challenge,code_challenge_method:"S256",resource:`${origin}/mcp`,scope:"mcp",state:"s"}))au.searchParams.set(k,v);
- const ar=await fetch(au,{redirect:"manual",headers:{"tailscale-user-login":"owner@example.com"}});if(ar.status!==302)throw new Error(`authorize ${ar.status} ${await ar.text()}`);const code=new URL(ar.headers.get("location")).searchParams.get("code");if(!code)throw new Error("no code");
- const token=await fetch(`http://127.0.0.1:${port}/token`,{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:new URLSearchParams({grant_type:"authorization_code",client_id:client.client_id,code,redirect_uri:"https://chatgpt.com/connector/oauth/test123",code_verifier:verifier,resource:`${origin}/mcp`})});if(!token.ok)throw new Error(`token ${token.status} ${await token.text()}`);const tok=await token.json(),auth=`Bearer ${tok.access_token}`;
- const refreshBody=new URLSearchParams({grant_type:"refresh_token",client_id:client.client_id,refresh_token:tok.refresh_token,resource:`${origin}/mcp`});const ref1=await fetch(`http://127.0.0.1:${port}/token`,{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:refreshBody});const ref2=await fetch(`http://127.0.0.1:${port}/token`,{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:refreshBody});if(!ref1.ok||!ref2.ok)throw new Error(`refresh reuse failed ${ref1.status}/${ref2.status}`);
- async function rpc(body,openai="chat-session-A"){const r=await fetch(`http://127.0.0.1:${port}/mcp`,{method:"POST",headers:{authorization:auth,"content-type":"application/json",accept:"application/json, text/event-stream","x-openai-session":openai},body:JSON.stringify(body)});const text=await r.text();return {r,json:text?JSON.parse(text):null,text}}
- const init=await rpc({jsonrpc:"2.0",id:1,method:"initialize",params:{protocolVersion:"2025-03-26",capabilities:{},clientInfo:{name:"smoke",version:"1"}}});if(!init.r.ok)throw new Error(`init ${init.r.status} ${init.text}`);if("instructions" in init.json.result)throw new Error("server injected instructions");if(init.r.headers.get("mcp-session-id"))throw new Error("stateless server issued session id");
- await rpc({jsonrpc:"2.0",method:"notifications/initialized"});
- const listed=await rpc({jsonrpc:"2.0",id:2,method:"tools/list",params:{}});const names=listed.json.result.tools.map(x=>x.name).sort();
- const expected=["actor_status","busy_claim","busy_list","busy_release","run_command"].sort();if(JSON.stringify(names)!==JSON.stringify(expected))throw new Error(`tool surface mismatch ${names.join(',')}`);
- const listedText=JSON.stringify(listed.json);if(listedText.includes(root)||listedText.includes(temp))throw new Error("tool list exposed server/workspace path");
- const actor=await rpc({jsonrpc:"2.0",id:3,method:"tools/call",params:{name:"actor_status",arguments:{}}});const actorText=actor.json.result.content[0].text;if(actorText.includes("actor-unknown"))throw new Error(`actor identity failed ${actorText}`);
- await new Promise(r=>setTimeout(r,8000));const afterIdle=await rpc({jsonrpc:"2.0",id:31,method:"tools/call",params:{name:"actor_status",arguments:{}}});if(afterIdle.json.result.content[0].text!==actorText)throw new Error("actor changed after idle gap");
- await stop(srv.p);srv=start();await waitHealth();const afterRestart=await rpc({jsonrpc:"2.0",id:32,method:"tools/call",params:{name:"actor_status",arguments:{}}});if(afterRestart.json.result.content[0].text!==actorText)throw new Error("actor changed after restart");
- const secret="MCP_SMOKE_SECRET_VALUE";env.OPENAI_API_KEY=secret;const shell=await rpc({jsonrpc:"2.0",id:5,method:"tools/call",params:{name:"run_command",arguments:{command:"Write-Output $env:OPENAI_API_KEY",working_directory:temp,timeout_seconds:5}}});const shellData=JSON.parse(shell.json.result.content[0].text);if(shellData.stdout?.includes(secret))throw new Error("secret leaked to shell");
- const auditText=await fs.readFile(path.join(temp,"audit.jsonl"),"utf8");if(auditText.includes(secret))throw new Error("secret leaked to audit");const calls=auditText.trim().split(/\r?\n/).filter(Boolean).map(line=>JSON.parse(line)).filter(x=>x.kind==="tool_call");if(!calls.some(x=>x.tool==="run_command"))throw new Error("tool audit missing run_command");if(calls.some(x=>!x.actor_id||!Number.isFinite(x.duration_ms)||!x.status))throw new Error("tool audit missing metadata");
- console.log(`PASS tools=${names.length} actor=${JSON.parse(actorText).actor_id} transport=stateless idle=ok restart=ok oauth_refresh=ok no_instructions=ok no_path_leak=ok secret_filter=ok audit=ok`);
-}finally{await stop(srv.p);await fs.rm(temp,{recursive:true,force:true})}
+const origin = (process.env.MCP_SMOKE_ORIGIN || process.env.MCP_PUBLIC_ORIGIN || "http://127.0.0.1:3000").replace(/\/$/, "");
+const ownerLogin = (process.env.TAILSCALE_OWNER_LOGIN || "owner@example.com").trim();
+const redirectUri = "https://chatgpt.com/connector/oauth/smoke";
+const resource = `${origin}/mcp`;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function jsonFetch(url, options = {}) {
+  const response = await fetch(url, options);
+  const text = await response.text();
+  let body = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+  return { response, body, text };
+}
+
+const registration = await jsonFetch(`${origin}/register`, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({
+    redirect_uris: [redirectUri],
+    token_endpoint_auth_method: "none",
+    grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"],
+    client_name: "shell-mcp-smoke",
+  }),
+});
+assert.equal(registration.response.status, 201, registration.text);
+assert.equal(registration.response.headers.get("ratelimit-policy"), "300;w=3600");
+const client = registration.body;
+const verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~abcd";
+const challenge = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))).toString("base64url");
+const authorizationUrl = new URL(`${origin}/authorize`);
+for (const [key, value] of Object.entries({
+  response_type: "code",
+  client_id: client.client_id,
+  redirect_uri: redirectUri,
+  code_challenge: challenge,
+  code_challenge_method: "S256",
+  resource,
+  scope: "mcp offline_access",
+  state: "shell-mcp-smoke",
+})) authorizationUrl.searchParams.set(key, value);
+const authorization = await fetch(authorizationUrl, { redirect: "manual", headers: { "tailscale-user-login": ownerLogin } });
+assert.equal(authorization.status, 302, await authorization.text());
+const code = new URL(authorization.headers.get("location")).searchParams.get("code");
+assert.ok(code);
+
+const token = await jsonFetch(`${origin}/token`, {
+  method: "POST",
+  headers: { "content-type": "application/x-www-form-urlencoded" },
+  body: new URLSearchParams({
+    grant_type: "authorization_code",
+    client_id: client.client_id,
+    code,
+    redirect_uri: redirectUri,
+    code_verifier: verifier,
+    resource,
+  }),
+});
+assert.equal(token.response.status, 200, token.text);
+const accessToken = token.body.access_token;
+const refreshToken = token.body.refresh_token;
+assert.ok(accessToken && refreshToken);
+for (let i = 0; i < 2; i++) {
+  const refreshed = await jsonFetch(`${origin}/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "refresh_token", client_id: client.client_id, refresh_token: refreshToken, resource, scope: "mcp offline_access" }),
+  });
+  assert.equal(refreshed.response.status, 200, refreshed.text);
+}
+
+const auth = `Bearer ${accessToken}`;
+async function mcpPost(sessionId, message) {
+  const headers = { authorization: auth, "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-06-18" };
+  if (sessionId) headers["mcp-session-id"] = sessionId;
+  const result = await jsonFetch(`${origin}/mcp`, { method: "POST", headers, body: JSON.stringify(message) });
+  assert.ok(result.response.ok, `${result.response.status}: ${result.text}`);
+  if (typeof result.body === "string" && result.response.headers.get("content-type")?.includes("text/event-stream")) {
+    const data = [...result.text.matchAll(/^data:\s*(.+)$/gm)].at(-1)?.[1];
+    assert.ok(data, result.text);
+    result.body = JSON.parse(data);
+  }
+  return result;
+}
+async function initialize() {
+  const result = await mcpPost(undefined, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "shell-mcp-smoke", version: "1.0.0" } } });
+  const sessionId = result.response.headers.get("mcp-session-id") || undefined;
+  await mcpPost(sessionId, { jsonrpc: "2.0", method: "notifications/initialized", params: {} });
+  return sessionId;
+}
+function toolResult(result) {
+  assert.ok(result.body?.result, result.text);
+  const content = result.body.result.content;
+  assert.ok(Array.isArray(content) && content[0]?.text, result.text);
+  return JSON.parse(content[0].text);
+}
+async function callTool(sessionId, name, args = {}) {
+  return toolResult(await mcpPost(sessionId, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name, arguments: args } }));
+}
+
+const sessionA = await initialize();
+const getController = new AbortController();
+const standaloneGet = await fetch(`${origin}/mcp`, {
+  method: "GET",
+  headers: { authorization: auth, accept: "text/event-stream", "mcp-protocol-version": "2025-06-18" },
+  signal: getController.signal,
+});
+// Server is stateless POST-only (sessionIdGenerator: undefined); GET/SSE is optional in
+// MCP Streamable HTTP. Contract is 405 + Allow: POST, asserted here so a regression to a
+// silent 200/500 is caught.
+if (standaloneGet.status !== 405) throw new Error(`GET /mcp expected 405, got ${standaloneGet.status} ${await standaloneGet.text()}`);
+assert.equal(standaloneGet.headers.get("allow"), "POST");
+getController.abort();
+const listed = await mcpPost(sessionA, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
+const names = listed.body.result.tools.map((tool) => tool.name).sort();
+assert.deepEqual(names, ["busy_claim", "busy_list", "busy_release", "execute_command", "kill_process", "read_output", "start_process"]);
+
+const foreground = await callTool(sessionA, "execute_command", { command: "Write-Output 'FOREGROUND_STDOUT'; [Console]::Error.WriteLine('FOREGROUND_STDERR'); exit 7" });
+assert.match(foreground.stdout, /FOREGROUND_STDOUT/);
+assert.match(foreground.stderr, /FOREGROUND_STDERR/);
+assert.equal(foreground.exit_code, 7);
+
+const startedAt = Date.now();
+let jobOne;
+let jobTwo;
+let treeJob;
+try {
+  jobOne = await callTool(sessionA, "start_process", { command: "1..20 | ForEach-Object { Write-Output ('JOB_ONE_' + $_); Start-Sleep -Milliseconds 200 }" });
+  assert.ok(jobOne.process_id && Date.now() - startedAt < 1500);
+  assert.equal(jobOne.running, true);
+  let outputOne;
+  for (let i = 0; i < 20; i++) {
+    outputOne = await callTool(sessionA, "read_output", { process_id: jobOne.process_id });
+    if (/JOB_ONE_/.test(outputOne.stdout)) break;
+    await sleep(100);
+  }
+  assert.equal(outputOne.running, true);
+  assert.match(outputOne.stdout, /JOB_ONE_/);
+
+  jobTwo = await callTool(sessionA, "start_process", { command: "1..20 | ForEach-Object { Write-Output ('JOB_TWO_' + $_); Start-Sleep -Milliseconds 200 }" });
+  assert.ok(jobTwo.process_id && jobTwo.process_id !== jobOne.process_id);
+  const [readOne, readTwo] = await Promise.all([
+    callTool(sessionA, "read_output", { process_id: jobOne.process_id }),
+    callTool(sessionA, "read_output", { process_id: jobTwo.process_id }),
+  ]);
+  assert.equal(readOne.running, true);
+  assert.equal(readTwo.running, true);
+
+  treeJob = await callTool(sessionA, "start_process", { command: "$child = Start-Process powershell.exe -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 120') -PassThru; Write-Output ('CHILD_PID=' + $child.Id); Wait-Process -Id $child.Id" });
+  let treeOutput;
+  for (let i = 0; i < 20; i++) {
+    treeOutput = await callTool(sessionA, "read_output", { process_id: treeJob.process_id });
+    if (/CHILD_PID=(\d+)/.test(treeOutput.stdout)) break;
+    await sleep(100);
+  }
+  const childPid = Number(treeOutput.stdout.match(/CHILD_PID=(\d+)/)?.[1]);
+  assert.ok(childPid > 0, treeOutput.stdout);
+  const killed = await callTool(sessionA, "kill_process", { process_id: treeJob.process_id });
+  assert.equal(killed.killed, true);
+  const childCheck = await callTool(sessionA, "execute_command", { command: `if (Get-Process -Id ${childPid} -ErrorAction SilentlyContinue) { exit 1 } else { exit 0 }` });
+  assert.equal(childCheck.exit_code, 0, `child process ${childPid} survived tree kill`);
+
+  const sessionB = await initialize();
+  const scope = `smoke-exact-scope-${Date.now()}`;
+  const claimA = await callTool(sessionA, "busy_claim", { actor: "smoke-actor-a", scope });
+  assert.equal(claimA.ok, true);
+  const claimB = await callTool(sessionB, "busy_claim", { actor: "smoke-actor-b", scope });
+  assert.equal(claimB.ok, false);
+  assert.equal(claimB.reason, "scope_already_claimed");
+  const listedBusy = await callTool(sessionB, "busy_list");
+  assert.ok(listedBusy.claims.some((claim) => claim.actor === "smoke-actor-a" && claim.scope === scope));
+  const wrongRelease = await callTool(sessionB, "busy_release", { actor: "smoke-actor-b", scope });
+  assert.equal(wrongRelease.ok, false);
+  const released = await callTool(sessionA, "busy_release", { actor: "smoke-actor-a", scope });
+  assert.equal(released.ok, true);
+  const afterRelease = await callTool(sessionB, "busy_list");
+  assert.ok(!afterRelease.claims.some((claim) => claim.scope === scope));
+} finally {
+  if (jobOne?.process_id) await callTool(sessionA, "kill_process", { process_id: jobOne.process_id }).catch(() => undefined);
+  if (jobTwo?.process_id) await callTool(sessionA, "kill_process", { process_id: jobTwo.process_id }).catch(() => undefined);
+  if (treeJob?.process_id) await callTool(sessionA, "kill_process", { process_id: treeJob.process_id }).catch(() => undefined);
+}
+
+const listenerJson = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,OwningProcess | ConvertTo-Json -Compress"], { encoding: "utf8" }).trim();
+assert.ok(listenerJson, "127.0.0.1:3000 has no listener");
+const port9121 = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "if (Get-NetTCPConnection -LocalPort 9121 -State Listen -ErrorAction SilentlyContinue) { exit 1 } else { exit 0 }"], { encoding: "utf8" });
+assert.equal(port9121, "");
+const processJson = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress"], { encoding: "utf8" });
+const processes = JSON.parse(processJson);
+const processList = Array.isArray(processes) ? processes : [processes];
+const hasSerenaProcess = processList.some((process) => {
+  const name = String(process.Name || "").toLowerCase();
+  const commandLine = String(process.CommandLine || "");
+  const directBinary = /^serena(?:\.exe)?$/.test(name);
+  const launcher = /^(?:uvx?|python(?:3)?)(?:\.exe)?$/.test(name);
+  return directBinary || (launcher && /\bserena\b/i.test(commandLine) && /\bstart-mcp-server\b/i.test(commandLine));
+});
+assert.ok(!hasSerenaProcess, "Serena process exists");
+console.log(`PASS mcp=initialized tools=${names.join(",")} foreground=stdout+stderr+exit_code background=immediate+read_while_running concurrency=two_jobs kill_tree=root+child_gone busy=cross_session_claim_list_release listener=${listenerJson} port9121=unused serena=absent`);

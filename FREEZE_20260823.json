@@ -1,0 +1,122 @@
+{
+  "freeze": "FREEZE_20260823",
+  "frozen_at": "2026-08-23",
+  "status": "verified-stable",
+  "server_name": "shell-mcp",
+  "repo_root": "C:\\Users\\Lauri\\AppData\\Local\\ChatGPTMcpClean",
+  "entrypoint": "dist/index.js",
+  "launcher": "start.ps1",
+  "supervisor": "keepalive.ps1",
+
+  "runtime": {
+    "node": "v26.4.0",
+    "npm": "11.17.0",
+    "typescript": "7.0.2",
+    "mcp_sdk": "1.24.3"
+  },
+
+  "binding": {
+    "host": "127.0.0.1",
+    "port": 3000,
+    "note": "src/index.ts hard-fails on any other host/port. Freeing port 3000 is a precondition, not an option.",
+    "public_origin": "https://kone.tailbf0440.ts.net",
+    "exposure": "Tailscale Funnel proxies / -> http://127.0.0.1:3000"
+  },
+
+  "tools": [
+    "execute_command",
+    "start_process",
+    "read_output",
+    "kill_process",
+    "busy_list",
+    "busy_claim",
+    "busy_release"
+  ],
+
+  "verification": {
+    "smoke": {
+      "command": "node scripts/smoke.mjs",
+      "result": "PASS",
+      "covers": [
+        "oauth register/authorize/token/refresh",
+        "initialize + tools/list exact 7-tool set",
+        "foreground stdout+stderr+exit_code",
+        "background immediate return + read_while_running",
+        "two-job concurrency",
+        "kill_process tree teardown (root+child gone)",
+        "cross-session busy claim/list/release"
+      ]
+    },
+    "stress": {
+      "command": "node scripts/stress.mjs",
+      "result": "PASS",
+      "measured": {
+        "burst": "100 concurrent tools/list, 0 errors, p99 384ms",
+        "sustained": "400 req @ concurrency 25, 0 errors, ~381 req/s, p99 109ms",
+        "exec": "12 concurrent execute_command real shell spawns, 0 errors",
+        "leak_check": "active_requests returns to 0; RSS plateaus ~225MB across 1578 requests (V8 steady state, not a leak)"
+      },
+      "abuse_contract": {
+        "unauthenticated": 401,
+        "bad_bearer": 401,
+        "malformed_json": 400,
+        "body_over_4mb": 413,
+        "unknown_tool": "JSON-RPC error",
+        "GET /mcp": "405 + Allow: POST"
+      }
+    },
+    "self_heal": "Killing the listener PID is recovered automatically by keepalive.ps1 in ~35s, with the new PID recorded to .state/keepalive/child.pid."
+  },
+
+  "defects_fixed_in_this_freeze": [
+    {
+      "id": "health-probe-identity",
+      "file": "keepalive.ps1",
+      "was": "Healthy() accepted any {\"status\":\"ok\"} on port 3000.",
+      "impact": "A different server (codex-mcp-server) squatting port 3000 satisfied the probe, so the supervisor never started shell-mcp and pointed the public Funnel at the wrong process, producing a 401/400 storm and a 15-second failure-log loop.",
+      "now": "Healthy() and PublicHealthy() additionally require name == 'shell-mcp'."
+    },
+    {
+      "id": "port-reclaim-deadlock",
+      "file": "keepalive.ps1",
+      "was": "IsOwnedMcpListener() identified its own server only by reading the process CommandLine.",
+      "impact": "An elevated listener reports a blank CommandLine to a non-elevated WMI query, so the supervisor classified its own server as foreign and refused to reclaim the port. Required manual admin intervention.",
+      "now": "The listener PID is recorded to .state/keepalive/child.pid after a confirmed-healthy start and is treated as owned."
+    },
+    {
+      "id": "supervisor-log-spam",
+      "file": "keepalive.ps1",
+      "was": "One log line per poll for a stuck condition, forever.",
+      "impact": "~600 identical lines in 2 hours; real events were unreadable.",
+      "now": "Consecutive identical messages collapse into a periodic 'repeated N times' heartbeat; supervisor.log rotates at 5MB; server.std*.log archives are pruned to the newest 5."
+    },
+    {
+      "id": "no-restart-backoff",
+      "file": "keepalive.ps1",
+      "was": "A server that never becomes healthy was relaunched every 15s indefinitely.",
+      "now": "Exponential backoff on consecutive failures, capped at 300s."
+    },
+    {
+      "id": "busy_list-schema-dialect",
+      "file": "src/server.ts, src/index.ts",
+      "was": "busy_list omitted inputSchema, so it advertised {\"type\":\"object\",\"properties\":{}} with no $schema dialect while all six other tools declared draft-07.",
+      "impact": "Suspected cause of a strict client surfacing all 7 tools and then disabling the connector on the first live busy_list call.",
+      "now": "busy_list declares an explicit empty inputSchema and emits draft-07 like the rest. Because a declared schema makes the SDK reject an omitted `arguments` key, POST /mcp normalises tools/call arguments to {} when absent, so both call forms are accepted.",
+      "caveat": "The client-side disable was never reproduced locally; busy_list always returned 200 over HTTP. The dialect mismatch is the leading hypothesis, not a confirmed root cause."
+    },
+    {
+      "id": "stale-smoke-expectation",
+      "file": "scripts/smoke.mjs",
+      "was": "Asserted GET /mcp returns 200 + text/event-stream.",
+      "impact": "The server is intentionally stateless POST-only and returns 405, so the assertion threw and the entire remainder of the suite never ran. No working regression signal existed.",
+      "now": "Asserts the intended contract: 405 + Allow: POST."
+    }
+  ],
+
+  "operational_notes": [
+    "dist/ is gitignored but is what actually runs; a fresh clone needs `npm install && npm run build` before start.ps1 -SkipBuild is valid.",
+    "dist/index.js was rebuilt from src at freeze time and verified byte-identical to the running binary.",
+    ".env and .state/ are gitignored and contain the OAuth store, the legacy MCP path secret, and runtime claims. They are not in this repo and must be backed up separately.",
+    "The previous MCP install lived under %LOCALAPPDATA%\\Temp and lost untracked files to Windows Storage Sense. This repo is deliberately outside Temp; do not relocate it back."
+  ]
+}

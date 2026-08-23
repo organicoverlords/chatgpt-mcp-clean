@@ -3,3 +3,9 @@ dist/
 .env
 .state/
 *.log
+
+# Local scratch: contains a nested git checkout, must not become a gitlink.
+work/
+# Timestamped safety copies made during repair; history is the real record.
+*.bak-*
+*.prehardening-*
