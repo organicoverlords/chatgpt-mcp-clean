@@ -135,7 +135,7 @@ app.get("/.well-known/openid-configuration", (_req, res) => res.json({
   registration_endpoint: new URL("/register", publicOrigin).href,
   response_types_supported: ["code"],
   grant_types_supported: ["authorization_code", "refresh_token"],
-  token_endpoint_auth_methods_supported: ["none"],
+  token_endpoint_auth_methods_supported: ["client_secret_post", "none"],
   code_challenge_methods_supported: ["S256"],
   scopes_supported: ["mcp", "offline_access"],
 }));

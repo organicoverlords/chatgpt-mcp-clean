@@ -43,8 +43,14 @@ try {
   const retained = await provider.clientsStore.registerClient(metadata("retained-client"));
   const opencode = await provider.clientsStore.registerClient(metadata("opencode", "http://127.0.0.1:19876/callback"));
   const traycer = await provider.clientsStore.registerClient(metadata("traycer", "https://platform.traycer.ai/oauth/callback"));
+  const traycerConfidential = await provider.clientsStore.registerClient({
+    ...metadata("traycer-confidential", "https://platform.traycer.ai/oauth/callback"),
+    token_endpoint_auth_method: "client_secret_post",
+  });
   assert.equal(opencode.redirect_uris[0], "http://127.0.0.1:19876/callback");
   assert.equal(traycer.redirect_uris[0], "https://platform.traycer.ai/oauth/callback");
+  assert.equal(traycerConfidential.token_endpoint_auth_method, "client_secret_post");
+  assert.ok(traycerConfidential.client_secret);
   await assert.rejects(
     provider.clientsStore.registerClient(metadata("untrusted", "https://evil.example/oauth/callback")),
     /Only ChatGPT, loopback PKCE, or Traycer HTTPS OAuth callbacks are accepted/,

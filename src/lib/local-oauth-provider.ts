@@ -83,11 +83,18 @@ export class LocalOAuthProvider implements OAuthServerProvider {
       getClient: (clientId) => this.getClient(clientId),
       registerClient: async (raw) => {
         const client = raw as OAuthClientInformationFull;
-        if (client.token_endpoint_auth_method !== "none") throw new InvalidClientMetadataError("Only public PKCE clients are accepted");
+        const tokenEndpointAuthMethod = client.token_endpoint_auth_method || "none";
+        if (tokenEndpointAuthMethod !== "none" && tokenEndpointAuthMethod !== "client_secret_post") throw new InvalidClientMetadataError("Unsupported token endpoint authentication method");
         if (!client.redirect_uris?.length || !client.redirect_uris.every(isAllowedRedirect)) throw new InvalidClientMetadataError("Only ChatGPT, loopback PKCE, or Traycer HTTPS OAuth callbacks are accepted");
         if (client.grant_types?.some((g) => g !== "authorization_code" && g !== "refresh_token")) throw new InvalidClientMetadataError("Unsupported grant type");
         if (client.response_types?.some((r) => r !== "code")) throw new InvalidClientMetadataError("Unsupported response type");
-        const full = { ...client, client_id: client.client_id || randomUUID(), client_id_issued_at: client.client_id_issued_at || Math.floor(Date.now() / 1000) };
+        const full = {
+          ...client,
+          token_endpoint_auth_method: tokenEndpointAuthMethod,
+          client_id: client.client_id || randomUUID(),
+          client_id_issued_at: client.client_id_issued_at || Math.floor(Date.now() / 1000),
+          ...(tokenEndpointAuthMethod === "client_secret_post" ? { client_secret: freshToken() } : {}),
+        };
         this.prune();
         this.makeClientRoom();
         this.clients.set(full.client_id, full);
