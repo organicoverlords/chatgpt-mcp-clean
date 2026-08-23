@@ -1,28 +1,52 @@
 ---
 name: orchestration
-description: Reconstruct live project and worker state, reconcile GitHub/BUSY and the five timed workers, report direction and progress, then continue the highest-value work.
+description: Reconstruct live project and worker state, maintain roadmap/GitHub health, reconcile the timed fleet and ad-hoc workers, report direction and progress, then continue substantive work.
 ---
 
 # Orchestration
 
-This workflow is for the orchestrator, not ordinary workers. Re-running it must converge rather than duplicate workers, issues, BUSY markers, branches, or worktrees.
+This workflow is for the orchestrator, not ordinary workers. Re-running it must converge rather than duplicate workers, issues, PRs, BUSY markers, branches, or worktrees. Reporting is a checkpoint inside the work loop, never the end of the loop.
 
 ## Orient
 
-Do not read every project AGENTS.md just to orient. Reconstruct state from live machine/process/worktree evidence, recent `MCP1` actors, GitHub issues/PRs/comments/commits, BUSY markers, project roadmaps/north-stars, and the five timed-worker schedules/results. Project AGENTS.md is read only when the orchestrator or a worker actually begins work in that repository.
+Do not read every project AGENTS.md just to orient. Reconstruct live state from machine/process/worktree evidence, recent `MCP1` actors, GitHub issues/PRs/comments/commits, BUSY markers, project roadmaps/north-stars/design/research documents, and the five timed-worker schedules/results. Project AGENTS.md is read when the orchestrator or a worker actually begins repository mutation.
 
-Account for timed GPT workers plus ad-hoc ChatGPT, Claude and local workers. Unknown ownership stays unknown. Clear BUSY only when stale/dead is supported by live evidence. Update/close issues only when evidence proves the state changed. Refill weak queues from project direction; never create filler or duplicate issues.
+Account separately for the fixed timed GPT fleet and ad-hoc ChatGPT, Claude and local workers discovered from current evidence. Unknown ownership stays unknown. Clear BUSY only when stale/dead is supported by live evidence.
+
+## Roadmap stewardship — orchestrator-owned
+
+Roadmap continuity and GitHub queue quality are 100% orchestrator responsibilities. Workers implement bounded product scopes; they are not responsible for keeping the whole project supplied with coherent future work.
+
+For every active project, inspect the current north star, authoritative design documents, research records, phase/roadmap documents, implemented state, open issues and recent merged work. Determine which phase is actually current, what acceptance remains, and what the next product phases are.
+
+If a documented next phase exists, keep GitHub populated with concrete non-duplicate issues that implement it. Each issue should state the player/product outcome, bounded implementation scope, relevant design authority, and acceptance evidence appropriate to the work. Seed enough high-value independent work to keep the available worker fleet productive without manufacturing filler.
+
+If the roadmap stops, is stale, contradicts current product truth, or omits the next phase, do not wait for the user to design the continuation. Derive the next phase from the project's north star, design records, research evidence, current implementation and explicit user direction. Update or write the missing roadmap/design phase in the repository, then seed GitHub with the corresponding issues. Research externally when the design record is insufficient for a material technical/product decision.
+
+Keep the roadmap and GitHub synchronized with reality. Close completed issues when evidence proves completion; rewrite stale issue wording when the intended product remains but implementation/acceptance changed; close or supersede duplicate/obsolete issues; remove stale BUSY; and preserve historical evidence rather than deleting useful context.
+
+PR hygiene is also orchestrator-owned. Inspect open and recently merged PRs, merge ready validated PRs when current repository authority permits, close or supersede obsolete/duplicate PRs, identify abandoned heads, and ensure active implementation has an appropriate bounded PR path. Never merge merely to improve metrics and never treat PR state as product proof.
 
 ## Report
 
-Give one compact dashboard: overall direction and milestones, evidence-based progress percentages, checkmarks for healthy/completed items, warnings/errors, active workers and scopes, meaningful completed work, BUSY ownership, queue health, and material machine state. Do not dump raw logs or JSON.
+Give one compact dashboard focused on direction, progress and activity. Separate the five timed workers from other live/ad-hoc workers. Name work in plain English, not only issue numbers.
+
+Include evidence-based overall and per-lane progress percentages with gradient progress bars; current worker/activity state; meaningful proof or remaining acceptance; and compact stack progress.
+
+Include a small delivery/health strip when data is available: 2-hour and 24-hour commits/merged PRs, open PR count, a clearly defined flow metric, recent-change quality signal from real validation evidence, and GitHub health covering issue queue, stale/duplicate work, BUSY and PR hygiene. Metrics are diagnostics, not targets; do not reward churn or fabricate quality scores when evidence is unavailable.
+
+A report is followed immediately by reconciliation and substantive work unless every useful path is genuinely blocked or requires an explicit user decision.
 
 ## Converge
 
-Target five armed and staggered timed GPT workers plus any external workers accounted for, no duplicate work, no stale BUSY, healthy issue queues, and no unnecessary worktrees. Preserve unique/uncommitted work. Workers own their BUSY lifecycle; the orchestrator cleans only abandoned stale markers.
+Target five armed and staggered timed GPT workers plus all external workers accounted for, no duplicate work, no stale BUSY, a healthy roadmap-backed issue queue, clean PR disposition, and no unnecessary worktrees. Preserve unique/uncommitted work. Workers own their BUSY lifecycle; the orchestrator cleans only abandoned stale markers.
+
+Queue health means workers can continue from authoritative product direction without inventing architecture or waiting for the user to seed tasks. It does not mean maintaining a large arbitrary issue count.
 
 ## Continue
 
-After orientation and reconciliation, choose the highest-value eligible issue and do substantive work. Before that repo mutation, read that repo's current AGENTS.md and live project rules. Claim BUSY only for genuinely conflicting mutation scope and release it when mutation stops.
+After orientation, roadmap/GitHub reconciliation and the checkpoint report, choose the highest-value eligible scope and do substantive work. Before repository mutation, read that repo's current AGENTS.md and live project rules. Claim BUSY only for genuinely conflicting mutation scope and release it when mutation stops.
 
-`MCP1` is the connector used for transport and shared actor/BUSY synchronization only. Do not turn `MCP1` into the scheduler, worker registry, policy engine, or orchestration state authority. GitHub and live repo/machine state remain durable truth.
+After implementing/validating that scope, update GitHub and roadmap state as warranted, report meaningful new evidence, then return to orientation/reconciliation and continue while useful work remains. Do not go idle merely because a report was emitted or one worker pass finished.
+
+`MCP1` is the connector used for transport and shared actor/BUSY synchronization only. Do not turn `MCP1` into the scheduler, worker registry, policy engine, roadmap database, or orchestration state authority. GitHub and live repo/machine state remain durable truth.
