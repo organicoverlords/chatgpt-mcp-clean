@@ -1,5 +1,5 @@
 {
-  "freeze": "FREEZE_20260823.2",
+  "freeze": "FREEZE_20260823.3",
   "frozen_at": "2026-08-23",
   "status": "verified-stable",
   "server_name": "shell-mcp",
@@ -68,6 +68,16 @@
       "nonexistent": "working_directory does not exist: <path>",
       "relative": "working_directory must be an absolute path, received <value>",
       "path to a file": "working_directory is not a directory: <path>"
+    },
+    "concurrency": {
+      "command": "node scripts/concurrency-busy.mjs 16",
+      "result": "PASS",
+      "covers": [
+        "no lost updates across 16 processes",
+        "exactly one winner for a contested scope",
+        "stale lock reclaimed",
+        "live lock fails fast instead of hanging"
+      ]
     }
   },
   "defects_fixed_in_this_freeze": [
@@ -134,6 +144,14 @@
       "impact": "A claim written by any other writer -- a second server instance, or an agent on a fallback path writing busy-claims.json directly -- was invisible to busy_list and was destroyed by the next persist(). For a mutual-exclusion primitive this is the worst available failure: two workers hold one scope and the evidence is erased. Observed live: a claim by chatgpt-orchestrator was absent from busy_list and then silently overwritten.",
       "now": "Every claim/list/release re-reads the store first. load() replaces the map rather than merging, so an out-of-band release is not resurrected; a missing file means no claims, while a parse or IO error leaves live claims untouched.",
       "verified": "Out-of-band claim is seen by busy_list, attributed correctly, refused to a different actor, survives on disk, and an out-of-band release is not resurrected."
+    },
+    {
+      "id": "busy-store-lost-update-race",
+      "file": "src/lib/busy-store.ts",
+      "was": "Re-reading before each operation removed cross-writer divergence, but claim/list/release remained an unsynchronised read-modify-write.",
+      "impact": "Two writers landing together could interleave and silently drop a claim -- the same lost-update class that erased the chatgpt-orchestrator claim, just on a narrower timing window.",
+      "now": "Every claim/list/release runs under an O_EXCL lock file next to the store. A lock older than 15s is treated as abandoned and stolen so a process killed mid-write cannot wedge BUSY. Lock acquisition times out after 2s and throws a named error rather than blocking a tool call.",
+      "verified": "16 processes / 16 distinct scopes: all 16 survive. 16 processes / 1 scope: exactly one winner, matching the actor on disk. Stale lock reclaimed in 78ms. Live lock fails fast, no hang. No latency cost: busy ops average 5.9ms."
     }
   ],
   "operational_notes": [
@@ -143,9 +161,8 @@
     "The previous MCP install lived under %LOCALAPPDATA%\\Temp and lost untracked files to Windows Storage Sense. This repo is deliberately outside Temp; do not relocate it back.",
     "Install supervisor persistence with: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\install-keepalive-task.ps1 (no admin required; -Uninstall removes it). Deliberately non-elevated: an elevated listener reports a blank CommandLine to a non-elevated WMI query, which breaks keepalive.ps1's port-reclaim ownership check."
   ],
-  "supersedes": "FREEZE_20260823.1 (tag freeze-20260823.1)",
+  "supersedes": "FREEZE_20260823.2 (tag freeze-20260823.2)",
   "known_gaps": [
-    "The supervisor has no OS-level persistence until scripts/install-keepalive-task.ps1 is run. It registers a non-elevated logon Scheduled Task 'ShellMcpKeepAlive'. Until then the supervisor dies with whatever shell launched it and does not start at logon.",
-    "busy-claims.json is read-modify-write without a lock. Re-reading before each operation fixes cross-process divergence, but two simultaneous writers can still interleave. A lock file would be needed for strict safety."
+    "The supervisor has no OS-level persistence until scripts/install-keepalive-task.ps1 is run. It registers a non-elevated logon Scheduled Task 'ShellMcpKeepAlive'. Until then the supervisor dies with whatever shell launched it and does not start at logon."
   ]
 }
