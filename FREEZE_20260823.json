@@ -140,11 +140,12 @@
     "dist/ is gitignored but is what actually runs; a fresh clone needs `npm install && npm run build` before start.ps1 -SkipBuild is valid.",
     "dist/index.js was rebuilt from src at freeze time and verified byte-identical to the running binary.",
     ".env and .state/ are gitignored and contain the OAuth store, the legacy MCP path secret, and runtime claims. They are not in this repo and must be backed up separately.",
-    "The previous MCP install lived under %LOCALAPPDATA%\\Temp and lost untracked files to Windows Storage Sense. This repo is deliberately outside Temp; do not relocate it back."
+    "The previous MCP install lived under %LOCALAPPDATA%\\Temp and lost untracked files to Windows Storage Sense. This repo is deliberately outside Temp; do not relocate it back.",
+    "Install supervisor persistence with: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\install-keepalive-task.ps1 (no admin required; -Uninstall removes it). Deliberately non-elevated: an elevated listener reports a blank CommandLine to a non-elevated WMI query, which breaks keepalive.ps1's port-reclaim ownership check."
   ],
   "supersedes": "FREEZE_20260823.1 (tag freeze-20260823.1)",
   "known_gaps": [
-    "The supervisor has no OS-level persistence. It is a plain hidden PowerShell process: it dies with whatever launched it and does not start at logon. Nothing restarts the supervisor itself. A logon Scheduled Task is the remaining fix.",
+    "The supervisor has no OS-level persistence until scripts/install-keepalive-task.ps1 is run. It registers a non-elevated logon Scheduled Task 'ShellMcpKeepAlive'. Until then the supervisor dies with whatever shell launched it and does not start at logon.",
     "busy-claims.json is read-modify-write without a lock. Re-reading before each operation fixes cross-process divergence, but two simultaneous writers can still interleave. A lock file would be needed for strict safety."
   ]
 }
