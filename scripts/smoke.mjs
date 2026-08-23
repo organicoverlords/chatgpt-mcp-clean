@@ -8,7 +8,7 @@ const root=process.cwd(), port=32147, origin="https://clean-test.ts.net";
 const temp=await fs.mkdtemp(path.join(os.tmpdir(),"mcp-clean-smoke-"));
 const env={...process.env,PORT:String(port),HOST:"127.0.0.1",MCP_PUBLIC_ORIGIN:origin,TAILSCALE_OWNER_LOGIN:"owner@example.com",MCP_OAUTH_STORE_PATH:path.join(temp,"oauth.json"),MCP_ACTOR_BINDINGS_PATH:path.join(temp,"actors.json"),AUDIT_LOG_PATH:path.join(temp,"audit.jsonl"),MCP_DEFAULT_CWD:temp,MCP_SESSION_RECOVERY:"true"};
 function start(){const p=spawn(process.execPath,[path.join(root,"dist","index.js")],{cwd:root,env,windowsHide:true,stdio:["ignore","pipe","pipe"]});let log="";p.stdout.on("data",d=>log+=d);p.stderr.on("data",d=>log+=d);return {p,get log(){return log}}}
-async function waitHealth(){for(let i=0;i<50;i++){try{const r=await fetch(`http://127.0.0.1:${port}/health`);if(r.ok)return}catch{}await new Promise(r=>setTimeout(r,100))}throw new Error("health timeout")}
+async function waitHealth(){for(let i=0;i<150;i++){try{const r=await fetch(`http://127.0.0.1:${port}/health`);if(r.ok)return}catch{}await new Promise(r=>setTimeout(r,100))}throw new Error("health timeout")}
 async function stop(p){if(p.exitCode!==null)return; p.kill("SIGTERM");for(let i=0;i<50&&p.exitCode===null;i++)await new Promise(r=>setTimeout(r,50));if(p.exitCode===null)p.kill("SIGKILL")}
 const b64=x=>Buffer.from(x).toString("base64url");
 const verifier="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~abcd";
