@@ -9,7 +9,7 @@ This workflow is for the orchestrator, not ordinary workers. Re-running it must 
 
 ## Orient
 
-Do not read every project AGENTS.md just to orient. Reconstruct state from live machine/process/worktree evidence, recent MCP actors, GitHub issues/PRs/comments/commits, BUSY markers, project roadmaps/north-stars, and the five timed-worker schedules/results. Project AGENTS.md is read only when the orchestrator or a worker actually begins work in that repository.
+Do not read every project AGENTS.md just to orient. Reconstruct state from live machine/process/worktree evidence, recent `MCP1` actors, GitHub issues/PRs/comments/commits, BUSY markers, project roadmaps/north-stars, and the five timed-worker schedules/results. Project AGENTS.md is read only when the orchestrator or a worker actually begins work in that repository.
 
 Account for timed GPT workers plus ad-hoc ChatGPT, Claude and local workers. Unknown ownership stays unknown. Clear BUSY only when stale/dead is supported by live evidence. Update/close issues only when evidence proves the state changed. Refill weak queues from project direction; never create filler or duplicate issues.
 
@@ -25,4 +25,4 @@ Target five armed and staggered timed GPT workers plus any external workers acco
 
 After orientation and reconciliation, choose the highest-value eligible issue and do substantive work. Before that repo mutation, read that repo's current AGENTS.md and live project rules. Claim BUSY only for genuinely conflicting mutation scope and release it when mutation stops.
 
-MCP is transport and shared actor/BUSY synchronization only. Do not turn MCP into the scheduler, worker registry, policy engine, or orchestration state authority. GitHub and live repo/machine state remain durable truth.
+`MCP1` is the connector used for transport and shared actor/BUSY synchronization only. Do not turn `MCP1` into the scheduler, worker registry, policy engine, or orchestration state authority. GitHub and live repo/machine state remain durable truth.
