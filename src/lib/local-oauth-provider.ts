@@ -83,8 +83,14 @@ export class LocalOAuthProvider implements OAuthServerProvider {
       getClient: (clientId) => this.getClient(clientId),
       registerClient: async (raw) => {
         const client = raw as OAuthClientInformationFull;
-        const tokenEndpointAuthMethod = client.token_endpoint_auth_method || "none";
-        if (tokenEndpointAuthMethod !== "none" && tokenEndpointAuthMethod !== "client_secret_post") throw new InvalidClientMetadataError("Unsupported token endpoint authentication method");
+        const requestedAuthMethod = client.token_endpoint_auth_method || "none";
+        if (requestedAuthMethod !== "none" && requestedAuthMethod !== "client_secret_post" && requestedAuthMethod !== "client_secret_basic") throw new InvalidClientMetadataError("Unsupported token endpoint authentication method");
+        // Some hosted MCP clients still send RFC 7591's confidential-client
+        // default (`client_secret_basic`) even when metadata advertises
+        // `client_secret_post`. The SDK token handler accepts credentials in
+        // the POST body, so explicitly substitute the supported method in the
+        // registration response instead of rejecting the client at DCR.
+        const tokenEndpointAuthMethod = requestedAuthMethod === "client_secret_basic" ? "client_secret_post" : requestedAuthMethod;
         if (!client.redirect_uris?.length || !client.redirect_uris.every(isAllowedRedirect)) throw new InvalidClientMetadataError("Only ChatGPT, loopback PKCE, or Traycer HTTPS OAuth callbacks are accepted");
         if (client.grant_types?.some((g) => g !== "authorization_code" && g !== "refresh_token")) throw new InvalidClientMetadataError("Unsupported grant type");
         if (client.response_types?.some((r) => r !== "code")) throw new InvalidClientMetadataError("Unsupported response type");
