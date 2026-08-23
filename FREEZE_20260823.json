@@ -1,5 +1,5 @@
 {
-  "freeze": "FREEZE_20260823.1",
+  "freeze": "FREEZE_20260823.2",
   "frozen_at": "2026-08-23",
   "status": "verified-stable",
   "server_name": "shell-mcp",
@@ -119,6 +119,21 @@
       "was": "normalizedCwd() returned workingDirectory unchecked and spawn() was given a cwd that may not exist.",
       "impact": "spawn() reports ENOENT when the *cwd* is missing and node attributes it to the executable, so any bad working_directory surfaced as 'spawn powershell.exe ENOENT'. This sent callers hunting a nonexistent PATH/PowerShell problem. Reproduced: nonexistent and relative working_directory both produced it while PowerShell resolved fine.",
       "now": "working_directory must be absolute, must exist, and must be a directory; each failure returns a message naming the real cause and the offending path. powershell.exe is additionally resolved through %SystemRoot% so a mangled inherited PATH cannot masquerade as the same error."
+    },
+    {
+      "id": "supervisor-killed-by-locked-log",
+      "file": "keepalive.ps1",
+      "was": "ArchiveServerLogs() called Move-Item on the server's redirected stdout/stderr under $ErrorActionPreference='Stop'.",
+      "impact": "The outgoing server's file handles are frequently still open at rotation, so Move-Item raised a sharing violation and terminated the entire supervisor. The server then stayed down with nothing to restart it. Reproduced directly: running keepalive.ps1 in the foreground died on 'Prosessi ei voi kayttaa tiedostoa'. This is the single largest source of unexplained MCP outages.",
+      "now": "Archiving is best-effort per file and logs a skip. The whole poll body is additionally wrapped in try/catch so no transient error -- locked file, WMI hiccup, netstat blip -- can end supervision."
+    },
+    {
+      "id": "busy-store-clobbers-other-writers",
+      "file": "src/lib/busy-store.ts",
+      "was": "load() ran only in the constructor; the in-memory map was authoritative for the process lifetime and persist() rewrote the whole file from it.",
+      "impact": "A claim written by any other writer -- a second server instance, or an agent on a fallback path writing busy-claims.json directly -- was invisible to busy_list and was destroyed by the next persist(). For a mutual-exclusion primitive this is the worst available failure: two workers hold one scope and the evidence is erased. Observed live: a claim by chatgpt-orchestrator was absent from busy_list and then silently overwritten.",
+      "now": "Every claim/list/release re-reads the store first. load() replaces the map rather than merging, so an out-of-band release is not resurrected; a missing file means no claims, while a parse or IO error leaves live claims untouched.",
+      "verified": "Out-of-band claim is seen by busy_list, attributed correctly, refused to a different actor, survives on disk, and an out-of-band release is not resurrected."
     }
   ],
   "operational_notes": [
@@ -127,5 +142,9 @@
     ".env and .state/ are gitignored and contain the OAuth store, the legacy MCP path secret, and runtime claims. They are not in this repo and must be backed up separately.",
     "The previous MCP install lived under %LOCALAPPDATA%\\Temp and lost untracked files to Windows Storage Sense. This repo is deliberately outside Temp; do not relocate it back."
   ],
-  "supersedes": "FREEZE_20260823 (tag freeze-20260823)"
+  "supersedes": "FREEZE_20260823.1 (tag freeze-20260823.1)",
+  "known_gaps": [
+    "The supervisor has no OS-level persistence. It is a plain hidden PowerShell process: it dies with whatever launched it and does not start at logon. Nothing restarts the supervisor itself. A logon Scheduled Task is the remaining fix.",
+    "busy-claims.json is read-modify-write without a lock. Re-reading before each operation fixes cross-process divergence, but two simultaneous writers can still interleave. A lock file would be needed for strict safety."
+  ]
 }

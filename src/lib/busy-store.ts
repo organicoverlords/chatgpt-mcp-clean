@@ -25,7 +25,7 @@ export class BusyStore {
   }
 
   claim(actor: string, scope: string): { ok: true; claim: BusyClaim } | { ok: false; reason: string; claim: BusyClaim } {
-    this.prune();
+    this.refresh();
     const current = this.claims.get(scope);
     if (current && current.actor !== actor) return { ok: false, reason: "scope_already_claimed", claim: current };
     const claim = { actor, scope, timestamp: new Date().toISOString() };
@@ -35,12 +35,12 @@ export class BusyStore {
   }
 
   list(): BusyClaim[] {
-    this.prune();
+    this.refresh();
     return [...this.claims.values()].sort((left, right) => left.scope.localeCompare(right.scope));
   }
 
   release(actor: string, scope: string): { ok: true; released: BusyClaim } | { ok: false; reason: string; claim?: BusyClaim } {
-    this.prune();
+    this.refresh();
     const current = this.claims.get(scope);
     if (!current) return { ok: false, reason: "scope_not_claimed" };
     if (current.actor !== actor) return { ok: false, reason: "claim_belongs_to_another_actor", claim: current };
@@ -49,18 +49,48 @@ export class BusyStore {
     return { ok: true, released: current };
   }
 
+  // Re-read the store before every operation, then prune.
+  //
+  // load() used to run only in the constructor, so the in-memory map was treated as
+  // authoritative for the process lifetime and persist() blind-overwrote the file.
+  // Any claim written by another writer -- a second server instance, or an agent on a
+  // fallback path writing busy-claims.json directly -- was invisible to this process
+  // and was destroyed by the next persist(). For a mutual-exclusion primitive that is
+  // the worst failure available: two workers hold one scope and the evidence is erased.
+  // Observed live: a claim by chatgpt-orchestrator was absent from busy_list and then
+  // silently overwritten.
+  private refresh(): void {
+    this.load();
+    this.prune();
+  }
+
+  // Replaces the in-memory map rather than merging into it, so a release performed by
+  // another writer is not resurrected here. A missing file means "no claims"; any other
+  // read/parse failure leaves the current map untouched, so a transient IO error or a
+  // torn read cannot silently drop live claims.
   private load(): void {
+    let raw: string;
     try {
-      const parsed = JSON.parse(readFileSync(this.storePath, "utf8")) as Partial<BusyFile>;
-      if (!Array.isArray(parsed.claims)) return;
-      for (const claim of parsed.claims) {
-        if (!claim || typeof claim.actor !== "string" || typeof claim.scope !== "string" || typeof claim.timestamp !== "string") continue;
-        if (!Number.isFinite(Date.parse(claim.timestamp))) continue;
-        this.claims.set(claim.scope, claim);
-      }
-    } catch {
-      // Missing or malformed state starts empty; the next mutation rewrites it.
+      raw = readFileSync(this.storePath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") this.claims.clear();
+      return;
     }
+    let parsed: Partial<BusyFile>;
+    try {
+      parsed = JSON.parse(raw) as Partial<BusyFile>;
+    } catch {
+      return;
+    }
+    if (!Array.isArray(parsed.claims)) return;
+    const next = new Map<string, BusyClaim>();
+    for (const claim of parsed.claims) {
+      if (!claim || typeof claim.actor !== "string" || typeof claim.scope !== "string" || typeof claim.timestamp !== "string") continue;
+      if (!Number.isFinite(Date.parse(claim.timestamp))) continue;
+      next.set(claim.scope, claim);
+    }
+    this.claims.clear();
+    for (const [scope, claim] of next) this.claims.set(scope, claim);
   }
 
   private persist(): void {

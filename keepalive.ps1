@@ -102,15 +102,27 @@ function IsOwnedMcpListener([int]$ProcessId) {
     } catch { return $false }
 }
 
+# Archiving is best-effort. The outgoing server's redirected stdout/stderr handles are
+# often still open when we rotate, and Move-Item then fails with a sharing violation.
+# Under $ErrorActionPreference='Stop' that terminated the whole supervisor and left the
+# server down with nothing to restart it -- the single largest source of "the MCP just
+# stopped". A locked log is never a reason to stop supervising.
 function ArchiveServerLogs {
     $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
-    if (Test-Path $stdout) { Move-Item $stdout (Join-Path $State "server.stdout.$stamp.log") -Force }
-    if (Test-Path $stderr) { Move-Item $stderr (Join-Path $State "server.stderr.$stamp.log") -Force }
-    foreach ($prefix in @('server.stdout.','server.stderr.')) {
-        Get-ChildItem $State -Filter "$prefix*.log" -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending | Select-Object -Skip $MaxArchives |
-            ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
+    foreach ($pair in @(@($stdout, "server.stdout.$stamp.log"), @($stderr, "server.stderr.$stamp.log"))) {
+        try {
+            if (Test-Path $pair[0]) { Move-Item $pair[0] (Join-Path $State $pair[1]) -Force -ErrorAction Stop }
+        } catch {
+            Log "could not archive $(Split-Path $pair[0] -Leaf) (in use); continuing"
+        }
     }
+    try {
+        foreach ($prefix in @('server.stdout.','server.stderr.')) {
+            Get-ChildItem $State -Filter "$prefix*.log" -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -Skip $MaxArchives |
+                ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
+        }
+    } catch {}
 }
 
 function StartServer {
@@ -152,10 +164,17 @@ try {
     if (-not $held) { exit 0 }
     Log 'clean MCP supervisor started'
     while ($true) {
-        StartServer
-        if (Healthy) {
-            EnsureFunnelConfiguration
-            if (-not (PublicHealthy)) { Log 'public MCP health probe failed while local MCP is healthy; persistent Funnel configuration left unchanged' }
+        # Nothing inside one poll may terminate the supervisor. $ErrorActionPreference is
+        # 'Stop', so without this guard any transient failure -- a locked log file, a WMI
+        # hiccup, a netstat blip -- kills supervision entirely and the server stays down.
+        try {
+            StartServer
+            if (Healthy) {
+                EnsureFunnelConfiguration
+                if (-not (PublicHealthy)) { Log 'public MCP health probe failed while local MCP is healthy; persistent Funnel configuration left unchanged' }
+            }
+        } catch {
+            Log "supervisor poll error (continuing): $($_.Exception.Message)"
         }
         # Exponential backoff on a server that will not come up, so a broken build does
         # not get relaunched every 15s indefinitely.
