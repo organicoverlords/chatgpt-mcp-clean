@@ -4,6 +4,7 @@ import { registerFileTools } from "./tools/files.js";
 import { registerShellTools } from "./tools/shell.js";
 import { registerGitTools } from "./tools/git.js";
 import { registerGithubTools } from "./tools/github.js";
+import { registerWorkflowSkills } from "./tools/workflow-skills.js";
 
 export function createServer(defaultCwd:string):McpServer{
   const server=new McpServer({name:"chatgpt-mcp-clean",version:"0.1.0"});
@@ -11,6 +12,6 @@ export function createServer(defaultCwd:string):McpServer{
   server.registerTool=((name:any,config:any,callback:any)=>original(name,config,((...args:any[])=>{
     const extra=args.at(-1); return runWithMcpHandlerContext(extra,()=>callback(...args));
   }) as any)) as typeof server.registerTool;
-  registerFileTools(server); registerShellTools(server,defaultCwd); registerGitTools(server); registerGithubTools(server);
+  registerFileTools(server); registerShellTools(server,defaultCwd); registerGitTools(server); registerGithubTools(server); registerWorkflowSkills(server);
   return server;
 }
