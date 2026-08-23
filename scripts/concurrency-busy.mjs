@@ -29,7 +29,7 @@ if (process.argv[2] === "worker") {
     process.stdout.write(JSON.stringify({ ok: true, claimed: result.ok, actor, scope }));
     process.exit(0);
   } catch (error) {
-    process.stdout.write(JSON.stringify({ ok: false, error: String(error?.message || error), actor, scope }));
+    process.stdout.write(JSON.stringify({ ok: false, error: String(error?.message || error), errorName: error?.name, actor, scope }));
     process.exit(0);
   }
 }
@@ -102,7 +102,8 @@ const t4 = Date.now();
 const r4 = await runWorkers([{ scope: "blocked", actor: "blocked-actor" }]);
 const ms4 = Date.now() - t4;
 check(r4[0]?.ok === false, "claim reported an error rather than succeeding", JSON.stringify(r4[0]));
-check(ms4 < 8000, `failed fast in ${ms4}ms (no hang)`, `took ${ms4}ms`);
+check(r4[0]?.errorName === "BusyStoreLockError", "claim reported the named lock error", JSON.stringify(r4[0]));
+check(ms4 < 5000, `failed fast in ${ms4}ms (no hang)`, `took ${ms4}ms`);
 rmSync(`${STORE}.lock`, { force: true });
 rmSync(STORE, { force: true });
 

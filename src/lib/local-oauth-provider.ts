@@ -61,7 +61,7 @@ export class LocalOAuthProvider implements OAuthServerProvider {
 
   get clientsStore(): OAuthRegisteredClientsStore {
     return {
-      getClient: (clientId) => this.clients.get(clientId),
+      getClient: (clientId) => this.getClient(clientId),
       registerClient: async (raw) => {
         const client = raw as OAuthClientInformationFull;
         if (client.token_endpoint_auth_method !== "none") throw new InvalidClientMetadataError("Only public PKCE clients are accepted");
@@ -70,7 +70,7 @@ export class LocalOAuthProvider implements OAuthServerProvider {
         if (client.response_types?.some((r) => r !== "code")) throw new InvalidClientMetadataError("Unsupported response type");
         const full = { ...client, client_id: client.client_id || randomUUID(), client_id_issued_at: client.client_id_issued_at || Math.floor(Date.now() / 1000) };
         this.prune();
-        while (this.clients.size >= MAX_CLIENTS) this.clients.delete(this.clients.keys().next().value as string);
+        this.makeClientRoom();
         this.clients.set(full.client_id, full);
         this.persist();
         return full;
@@ -169,6 +169,45 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     const out = requested.length ? requested : ["mcp"];
     if (out.some((scope) => !SUPPORTED_SCOPES.has(scope))) throw new InvalidScopeError("Unsupported scope");
     return [...new Set(out)];
+  }
+
+  private getClient(clientId: string): OAuthClientInformationFull | undefined {
+    this.prune();
+    const registered = this.clients.get(clientId);
+    if (registered) return registered;
+
+    // Older builds could evict a public client registration while retaining its
+    // live token records. Refresh-token possession is still the credential for
+    // these clients, so return the minimum metadata needed by the SDK's client
+    // authentication middleware. Empty redirect URIs prevent this recovery
+    // record from being reused for a new authorization-code flow.
+    if (!this.isClientReferenced(clientId)) return undefined;
+    return {
+      client_id: clientId,
+      redirect_uris: [],
+      token_endpoint_auth_method: "none",
+      grant_types: ["refresh_token"],
+      response_types: [],
+    };
+  }
+
+  private isClientReferenced(clientId: string): boolean {
+    for (const rec of this.codes.values()) if (rec.clientId === clientId) return true;
+    for (const rec of this.access.values()) if (rec.clientId === clientId) return true;
+    for (const rec of this.refresh.values()) if (rec.clientId === clientId) return true;
+    return false;
+  }
+
+  private makeClientRoom(): void {
+    // MAX_CLIENTS is a compaction target, not permission to invalidate a live
+    // account. Remove only registrations with no live OAuth state. If every
+    // client is active, temporarily exceed the target; token expiry makes those
+    // registrations eligible for a later registration pass.
+    while (this.clients.size >= MAX_CLIENTS) {
+      const unusedClientId = [...this.clients.keys()].find((clientId) => !this.isClientReferenced(clientId));
+      if (!unusedClientId) return;
+      this.clients.delete(unusedClientId);
+    }
   }
 
   private issuePair(clientId: string, scopes: string[], resource: string): OAuthTokens {

@@ -25,6 +25,18 @@ function sleepSync(ms: number): void {
 
 type BusyFile = { claims: BusyClaim[] };
 
+export class BusyStoreLockError extends Error {
+  constructor() {
+    super(`busy store is locked by another writer; gave up after ${LOCK_TIMEOUT_MS}ms`);
+    this.name = "BusyStoreLockError";
+  }
+}
+
+function isLockContentionError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException)?.code;
+  return code === "EEXIST" || code === "EACCES" || code === "EPERM";
+}
+
 export class BusyStore {
   private readonly claims = new Map<string, BusyClaim>();
   private readonly storePath: string;
@@ -41,7 +53,7 @@ export class BusyStore {
       this.withLock(() => {
         this.load();
         this.prune();
-      });
+      }, 0);
     } catch {
       // ignore
     }
@@ -88,10 +100,10 @@ export class BusyStore {
   //
   // A lock older than LOCK_STALE_MS is stolen: a process killed mid-write must not wedge
   // BUSY forever, and every holder here does bounded synchronous file IO.
-  private withLock<T>(fn: () => T): T {
+  private withLock<T>(fn: () => T, timeoutMs = LOCK_TIMEOUT_MS): T {
     const lockPath = `${this.storePath}.lock`;
     mkdirSync(dirname(this.storePath), { recursive: true });
-    const deadline = Date.now() + LOCK_TIMEOUT_MS;
+    const deadline = Date.now() + timeoutMs;
     let fd: number | undefined;
 
     for (;;) {
@@ -99,17 +111,24 @@ export class BusyStore {
         fd = openSync(lockPath, "wx");
         break;
       } catch (error) {
-        if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
+        // Windows can report EACCES or EPERM instead of EEXIST when another
+        // process still has the O_EXCL lock open. They are contention signals,
+        // not permanent store failures.
+        if (!isLockContentionError(error)) throw error;
+        let reclaimed = false;
         try {
           if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
             unlinkSync(lockPath);
-            continue;
+            reclaimed = true;
           }
-        } catch {
-          continue; // holder released it between our open and our stat
+        } catch (staleError) {
+          const code = (staleError as NodeJS.ErrnoException)?.code;
+          if (code === "ENOENT") continue; // holder released it before our stat
+          if (!isLockContentionError(staleError)) throw staleError;
         }
+        if (reclaimed) continue;
         if (Date.now() >= deadline) {
-          throw new Error(`busy store is locked by another writer; gave up after ${LOCK_TIMEOUT_MS}ms`);
+          throw new BusyStoreLockError();
         }
         sleepSync(LOCK_RETRY_MS);
       }

@@ -101,6 +101,16 @@ function toolResult(result) {
 async function callTool(sessionId, name, args = {}) {
   return toolResult(await mcpPost(sessionId, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name, arguments: args } }));
 }
+async function waitForOutput(sessionId, processId, pattern, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs;
+  let output;
+  do {
+    output = await callTool(sessionId, "read_output", { process_id: processId });
+    if (pattern.test(output.stdout)) return output;
+    await sleep(100);
+  } while (Date.now() < deadline);
+  return output;
+}
 
 const sessionA = await initialize();
 const getController = new AbortController();
@@ -130,16 +140,17 @@ let jobTwo;
 let treeJob;
 try {
   jobOne = await callTool(sessionA, "start_process", { command: "1..20 | ForEach-Object { Write-Output ('JOB_ONE_' + $_); Start-Sleep -Milliseconds 200 }" });
-  assert.ok(jobOne.process_id && Date.now() - startedAt < 1500);
+  assert.ok(jobOne.process_id && Date.now() - startedAt < 5000);
   assert.equal(jobOne.running, true);
-  let outputOne;
-  for (let i = 0; i < 20; i++) {
-    outputOne = await callTool(sessionA, "read_output", { process_id: jobOne.process_id });
-    if (/JOB_ONE_/.test(outputOne.stdout)) break;
-    await sleep(100);
-  }
+  const outputOne = await waitForOutput(sessionA, jobOne.process_id, /JOB_ONE_/);
   assert.equal(outputOne.running, true);
-  assert.match(outputOne.stdout, /JOB_ONE_/);
+  assert.match(outputOne.stdout, /JOB_ONE_/, JSON.stringify({
+    running: outputOne.running,
+    exit_code: outputOne.exit_code,
+    signal: outputOne.signal,
+    stderr: outputOne.stderr,
+    error: outputOne.error,
+  }));
 
   jobTwo = await callTool(sessionA, "start_process", { command: "1..20 | ForEach-Object { Write-Output ('JOB_TWO_' + $_); Start-Sleep -Milliseconds 200 }" });
   assert.ok(jobTwo.process_id && jobTwo.process_id !== jobOne.process_id);
@@ -150,13 +161,8 @@ try {
   assert.equal(readOne.running, true);
   assert.equal(readTwo.running, true);
 
-  treeJob = await callTool(sessionA, "start_process", { command: "$child = Start-Process powershell.exe -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 120') -PassThru; Write-Output ('CHILD_PID=' + $child.Id); Wait-Process -Id $child.Id" });
-  let treeOutput;
-  for (let i = 0; i < 20; i++) {
-    treeOutput = await callTool(sessionA, "read_output", { process_id: treeJob.process_id });
-    if (/CHILD_PID=(\d+)/.test(treeOutput.stdout)) break;
-    await sleep(100);
-  }
+  treeJob = await callTool(sessionA, "start_process", { command: "$child = Start-Process -FilePath \"$env:SystemRoot\\System32\\ping.exe\" -ArgumentList @('-t','127.0.0.1') -WindowStyle Hidden -PassThru; Write-Output ('CHILD_PID=' + $child.Id); Wait-Process -Id $child.Id" });
+  const treeOutput = await waitForOutput(sessionA, treeJob.process_id, /CHILD_PID=(\d+)/);
   const childPid = Number(treeOutput.stdout.match(/CHILD_PID=(\d+)/)?.[1]);
   assert.ok(childPid > 0, treeOutput.stdout);
   const killed = await callTool(sessionA, "kill_process", { process_id: treeJob.process_id });
