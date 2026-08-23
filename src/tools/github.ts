@@ -3,11 +3,12 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getMcpActorId } from "../lib/mcp-request-context.js";
 import { audit } from "../lib/audit.js";
+import { safeChildEnv } from "../lib/safe-env.js";
 
 const BUSY=/^BUSY - (\S+)\s*([\s\S]*?) :: ([\s\S]+)$/;
 const out=(tool:string,data:unknown,ok=true)=>({content:[{type:"text" as const,text:JSON.stringify(data)}],structuredContent:{ok,tool,data}});
 const actor=()=>getMcpActorId()||"actor-unknown";
-function gh(args:string[],cwd=process.cwd()){return new Promise<{stdout:string,stderr:string,exit_code:number|null}>((resolve,reject)=>{const p=spawn("gh",args,{cwd,windowsHide:true,env:{...process.env,GH_PAGER:"cat",PAGER:"cat",NO_COLOR:"1"}});let stdout="",stderr="";p.stdout.on("data",d=>stdout+=d);p.stderr.on("data",d=>stderr+=d);p.on("error",reject);p.on("close",code=>resolve({stdout:stdout.trim(),stderr:stderr.trim(),exit_code:code}))})}
+function gh(args:string[],cwd=process.cwd()){return new Promise<{stdout:string,stderr:string,exit_code:number|null}>((resolve,reject)=>{const p=spawn("gh",args,{cwd,windowsHide:true,env:safeChildEnv()});let stdout="",stderr="";p.stdout.on("data",d=>stdout+=d);p.stderr.on("data",d=>stderr+=d);p.on("error",reject);p.on("close",code=>resolve({stdout:stdout.trim(),stderr:stderr.trim(),exit_code:code}))})}
 async function issue(repo:string,n:number){const r=await gh(["issue","view",String(n),"--repo",repo,"--json","number,title,updatedAt,url,state"]);if(r.exit_code!==0)throw new Error(r.stderr||"gh issue view failed");return JSON.parse(r.stdout)}
 export function registerGithubTools(server:McpServer){
  server.registerTool("actor_status",{description:"Return the current MCP actor id.",inputSchema:{}},async()=>out("actor_status",{actor_id:actor()}));
