@@ -5,11 +5,6 @@ import { isAbsolute, resolve } from "node:path";
 import type { Readable } from "node:stream";
 
 const MAX_CAPTURE_CHARS = 4_000_000;
-// Keep foreground HTTP calls below the connector/Funnel response timeout. Long
-// work must use start_process + read_output so the initial MCP call returns
-// immediately instead of leaving a request open until the connector gives up.
-export const MAX_FOREGROUND_TIMEOUT_SECONDS = 60;
-const DEFAULT_TIMEOUT_SECONDS = MAX_FOREGROUND_TIMEOUT_SECONDS;
 const COMPLETED_RETENTION_MS = 30 * 60 * 1000;
 const MAX_COMPLETED_PROCESSES = 64;
 type CapturedChild = ChildProcessByStdio<null, Readable, Readable>;
@@ -30,16 +25,6 @@ type ProcessState = {
   signal?: NodeJS.Signals | null;
   error?: string;
   done: Promise<void>;
-};
-
-type CommandResult = {
-  stdout: string;
-  stderr: string;
-  exit_code: number | null;
-  timed_out: boolean;
-  cwd: string;
-  stdout_truncated?: boolean;
-  stderr_truncated?: boolean;
 };
 
 function appendCapture(current: string, chunk: Buffer | string): { value: string; truncated: boolean } {
@@ -120,60 +105,6 @@ export class ProcessManager {
       .filter((state) => state.exitCode !== null && state.finishedAt)
       .sort((a, b) => Date.parse(a.finishedAt!) - Date.parse(b.finishedAt!));
     for (const state of remaining.slice(0, Math.max(0, remaining.length - MAX_COMPLETED_PROCESSES))) this.processes.delete(state.id);
-  }
-
-  async execute(command: string, workingDirectory?: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<CommandResult> {
-    const cwd = normalizedCwd(workingDirectory);
-    const boundedTimeoutSeconds = Math.min(Math.max(1, timeoutSeconds), MAX_FOREGROUND_TIMEOUT_SECONDS);
-    const child = powershell(command, cwd);
-    let stdout = "";
-    let stderr = "";
-    let stdoutTruncated = false;
-    let stderrTruncated = false;
-    let settled = false;
-    let timedOut = false;
-
-    const result = new Promise<CommandResult>((resolve, reject) => {
-      child.stdout.on("data", (chunk: Buffer | string) => {
-        const captured = appendCapture(stdout, chunk);
-        stdout = captured.value;
-        stdoutTruncated ||= captured.truncated;
-      });
-      child.stderr.on("data", (chunk: Buffer | string) => {
-        const captured = appendCapture(stderr, chunk);
-        stderr = captured.value;
-        stderrTruncated ||= captured.truncated;
-      });
-      child.once("error", (error) => {
-        if (settled) return;
-        settled = true;
-        reject(error);
-      });
-      child.once("close", (code) => {
-        if (settled) return;
-        settled = true;
-        resolve({
-          stdout,
-          stderr,
-          exit_code: code,
-          timed_out: timedOut,
-          cwd,
-          ...(stdoutTruncated ? { stdout_truncated: true } : {}),
-          ...(stderrTruncated ? { stderr_truncated: true } : {}),
-        });
-      });
-    });
-
-    const timer = setTimeout(() => {
-      if (settled) return;
-      timedOut = true;
-      void taskkillTree(child.pid ?? -1).catch(() => undefined);
-    }, boundedTimeoutSeconds * 1000);
-    try {
-      return await result;
-    } finally {
-      clearTimeout(timer);
-    }
   }
 
   start(command: string, workingDirectory?: string): { process_id: string; pid: number; cwd: string; running: boolean } {
@@ -271,4 +202,3 @@ export class ProcessManager {
     return state;
   }
 }
-

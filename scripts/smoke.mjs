@@ -127,12 +127,7 @@ assert.equal(standaloneGet.headers.get("allow"), "POST");
 getController.abort();
 const listed = await mcpPost(sessionA, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
 const names = listed.body.result.tools.map((tool) => tool.name).sort();
-assert.deepEqual(names, ["busy_claim", "busy_list", "busy_release", "execute_command", "kill_process", "read_output", "start_process"]);
-
-const foreground = await callTool(sessionA, "execute_command", { command: "Write-Output 'FOREGROUND_STDOUT'; [Console]::Error.WriteLine('FOREGROUND_STDERR'); exit 7" });
-assert.match(foreground.stdout, /FOREGROUND_STDOUT/);
-assert.match(foreground.stderr, /FOREGROUND_STDERR/);
-assert.equal(foreground.exit_code, 7);
+assert.deepEqual(names, ["busy_claim", "busy_list", "busy_release", "kill_process", "read_output", "start_process"]);
 
 const startedAt = Date.now();
 let jobOne;
@@ -167,8 +162,7 @@ try {
   assert.ok(childPid > 0, treeOutput.stdout);
   const killed = await callTool(sessionA, "kill_process", { process_id: treeJob.process_id });
   assert.equal(killed.killed, true);
-  const childCheck = await callTool(sessionA, "execute_command", { command: `if (Get-Process -Id ${childPid} -ErrorAction SilentlyContinue) { exit 1 } else { exit 0 }` });
-  assert.equal(childCheck.exit_code, 0, `child process ${childPid} survived tree kill`);
+  execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `if (Get-Process -Id ${childPid} -ErrorAction SilentlyContinue) { exit 1 } else { exit 0 }`], { encoding: "utf8" });
 
   const sessionB = await initialize();
   const scope = `smoke-exact-scope-${Date.now()}`;
@@ -206,4 +200,4 @@ const hasSerenaProcess = processList.some((process) => {
   return directBinary || (launcher && /\bserena\b/i.test(commandLine) && /\bstart-mcp-server\b/i.test(commandLine));
 });
 assert.ok(!hasSerenaProcess, "Serena process exists");
-console.log(`PASS mcp=initialized tools=${names.join(",")} foreground=stdout+stderr+exit_code background=immediate+read_while_running concurrency=two_jobs kill_tree=root+child_gone busy=cross_session_claim_list_release listener=${listenerJson} port9121=unused serena=absent`);
+console.log(`PASS mcp=initialized tools=${names.join(",")} background=immediate+read_while_running concurrency=two_jobs kill_tree=root+child_gone busy=cross_session_claim_list_release listener=${listenerJson} port9121=unused serena=absent`);

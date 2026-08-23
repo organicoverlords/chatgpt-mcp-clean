@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { BusyStore } from "./lib/busy-store.js";
-import { MAX_FOREGROUND_TIMEOUT_SECONDS, ProcessManager } from "./lib/process-manager.js";
+import { ProcessManager } from "./lib/process-manager.js";
 
 const processManager = new ProcessManager();
 const liveSessions = new Set<string>();
@@ -21,19 +21,6 @@ export function markSessionLive(sessionId: string, live: boolean): void {
 
 export function createServer(): McpServer {
   const server = new McpServer({ name: "shell-mcp", version: "0.1.0" });
-
-  server.registerTool(
-    "execute_command",
-    {
-      description: "Run a short PowerShell command in the foreground and return stdout, stderr, and exit code. The call is bounded to 60 seconds; use start_process followed by read_output for longer work.",
-      inputSchema: {
-        command: z.string().min(1),
-        working_directory: z.string().optional(),
-        timeout_seconds: z.number().int().min(1).max(MAX_FOREGROUND_TIMEOUT_SECONDS).optional(),
-      },
-    },
-    async ({ command, working_directory, timeout_seconds }) => textResult(await processManager.execute(command, working_directory, timeout_seconds)),
-  );
 
   server.registerTool(
     "start_process",

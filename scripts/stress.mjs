@@ -162,19 +162,38 @@ console.log(`\nphase 2 - sustained ${SUSTAINED} req @ concurrency ${CONCURRENCY}
   if (errors) fail(`sustained had ${errors} errors`); else ok("sustained clean");
 }
 
-// ---------- phase 3: concurrent real processes ----------
-console.log(`\nphase 3 - ${PROCS} concurrent execute_command (real shell spawns)`);
+// ---------- phase 3: concurrent background processes ----------
+console.log(`\nphase 3 - ${PROCS} concurrent start_process/read_output/kill_process jobs`);
 {
+  const jobs = [];
   const { lats, errors } = await pool(PROCS, PROCS, async (i) => {
     const r = await mcpPost({
       jsonrpc: "2.0", id: 100 + i, method: "tools/call",
-      params: { name: "execute_command", arguments: { command: `Write-Output 'STRESS_${i}'` } },
+      params: { name: "start_process", arguments: { command: `Write-Output 'STRESS_${i}'; Start-Sleep -Seconds 20` } },
     });
     const text = r.body?.result?.content?.[0]?.text || "";
-    return { ok: r.status === 200 && text.includes(`STRESS_${i}`), ms: r.ms, detail: `status=${r.status} ${text.slice(0, 120)}` };
+    let data = null;
+    try { data = JSON.parse(text); } catch {}
+    if (r.status === 200 && data?.process_id) jobs[i] = data;
+    return { ok: r.status === 200 && !!data?.process_id, ms: r.ms, detail: `status=${r.status} ${text.slice(0, 120)}` };
   });
-  report("exec", lats, errors);
-  if (errors) fail(`exec had ${errors} errors`); else ok("exec clean, all outputs matched");
+  report("start_process", lats, errors);
+  if (errors) fail(`start_process had ${errors} errors`);
+
+  const activeJobs = jobs.map((job, index) => job ? { job, index } : null).filter(Boolean);
+  const outputs = await Promise.all(activeJobs.map(({ job }) => mcpPost({
+    jsonrpc: "2.0", id: 200 + job.pid, method: "tools/call",
+    params: { name: "read_output", arguments: { process_id: job.process_id } },
+  })));
+  const outputErrors = outputs.filter((r, i) => r.status !== 200 || !String(r.body?.result?.content?.[0]?.text || "").includes(`STRESS_${activeJobs[i].index}`)).length;
+  if (outputErrors) fail(`read_output had ${outputErrors} errors`); else ok("read_output clean, all outputs matched");
+
+  const kills = await Promise.all(activeJobs.map(({ job }) => mcpPost({
+    jsonrpc: "2.0", id: 300 + job.pid, method: "tools/call",
+    params: { name: "kill_process", arguments: { process_id: job.process_id } },
+  })));
+  const killErrors = kills.filter((r) => r.status !== 200 || !r.body?.result?.content?.[0]?.text?.includes("killed")).length;
+  if (killErrors) fail(`kill_process had ${killErrors} errors`); else ok("kill_process clean, all process trees stopped");
 }
 
 // ---------- phase 4: abuse ----------

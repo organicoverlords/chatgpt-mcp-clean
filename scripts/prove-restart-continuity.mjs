@@ -65,7 +65,7 @@ const sessionId = initialized.response.headers.get("mcp-session-id") || undefine
 await rpc({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, sessionId);
 const before = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, sessionId);
 const beforeTools = before.body.result.tools.map((tool) => tool.name).sort();
-assert.deepEqual(beforeTools, ["busy_claim", "busy_list", "busy_release", "execute_command", "kill_process", "read_output", "start_process"]);
+assert.deepEqual(beforeTools, ["busy_claim", "busy_list", "busy_release", "kill_process", "read_output", "start_process"]);
 
 const pidText = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "$c=Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if($c){$c.OwningProcess}"], { encoding: "utf8" }).trim();
 const oldPid = Number(pidText);
