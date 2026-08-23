@@ -1,0 +1,37 @@
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
+
+const root=process.cwd(), port=32147, origin="https://clean-test.ts.net";
+const temp=await fs.mkdtemp(path.join(os.tmpdir(),"mcp-clean-smoke-"));
+const env={...process.env,PORT:String(port),HOST:"127.0.0.1",MCP_PUBLIC_ORIGIN:origin,TAILSCALE_OWNER_LOGIN:"owner@example.com",MCP_OAUTH_STORE_PATH:path.join(temp,"oauth.json"),MCP_ACTOR_BINDINGS_PATH:path.join(temp,"actors.json"),AUDIT_LOG_PATH:path.join(temp,"audit.jsonl"),MCP_DEFAULT_CWD:temp,MCP_SESSION_RECOVERY:"true"};
+function start(){const p=spawn(process.execPath,[path.join(root,"dist","index.js")],{cwd:root,env,windowsHide:true,stdio:["ignore","pipe","pipe"]});let log="";p.stdout.on("data",d=>log+=d);p.stderr.on("data",d=>log+=d);return {p,get log(){return log}}}
+async function waitHealth(){for(let i=0;i<50;i++){try{const r=await fetch(`http://127.0.0.1:${port}/health`);if(r.ok)return}catch{}await new Promise(r=>setTimeout(r,100))}throw new Error("health timeout")}
+async function stop(p){if(p.exitCode!==null)return; p.kill("SIGTERM");for(let i=0;i<50&&p.exitCode===null;i++)await new Promise(r=>setTimeout(r,50));if(p.exitCode===null)p.kill("SIGKILL")}
+const b64=x=>Buffer.from(x).toString("base64url");
+const verifier="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~abcd";
+const challenge=b64(createHash("sha256").update(verifier).digest());
+let srv=start();
+try{
+ await waitHealth();
+ const reg=await fetch(`http://127.0.0.1:${port}/register`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({redirect_uris:["https://chatgpt.com/connector/oauth/test123"],token_endpoint_auth_method:"none",grant_types:["authorization_code","refresh_token"],response_types:["code"],client_name:"smoke"})});
+ if(!reg.ok)throw new Error(`register ${reg.status} ${await reg.text()}`);const client=await reg.json();
+ const au=new URL(`http://127.0.0.1:${port}/authorize`);for(const[k,v]of Object.entries({response_type:"code",client_id:client.client_id,redirect_uri:"https://chatgpt.com/connector/oauth/test123",code_challenge:challenge,code_challenge_method:"S256",resource:`${origin}/mcp`,scope:"mcp",state:"s"}))au.searchParams.set(k,v);
+ const ar=await fetch(au,{redirect:"manual",headers:{"tailscale-user-login":"owner@example.com"}});if(ar.status!==302)throw new Error(`authorize ${ar.status} ${await ar.text()}`);const loc=new URL(ar.headers.get("location"));const code=loc.searchParams.get("code");if(!code)throw new Error("no code");
+ const token=await fetch(`http://127.0.0.1:${port}/token`,{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:new URLSearchParams({grant_type:"authorization_code",client_id:client.client_id,code,redirect_uri:"https://chatgpt.com/connector/oauth/test123",code_verifier:verifier,resource:`${origin}/mcp`})});if(!token.ok)throw new Error(`token ${token.status} ${await token.text()}`);const tok=await token.json(),auth=`Bearer ${tok.access_token}`; const refreshBody=new URLSearchParams({grant_type:"refresh_token",client_id:client.client_id,refresh_token:tok.refresh_token,resource:`${origin}/mcp`}); const ref1=await fetch(`http://127.0.0.1:${port}/token`,{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:refreshBody}); const ref2=await fetch(`http://127.0.0.1:${port}/token`,{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:refreshBody}); if(!ref1.ok||!ref2.ok)throw new Error(`refresh reuse failed ${ref1.status}/${ref2.status}`);
+ async function rpc(body,sid,sessionHeader=true,openai){const headers={authorization:auth,"content-type":"application/json",accept:"application/json, text/event-stream",...(sid&&sessionHeader?{"mcp-session-id":sid}:{}),...(openai?{"x-openai-session":openai}:{})};const r=await fetch(`http://127.0.0.1:${port}/mcp`,{method:"POST",headers,body:JSON.stringify(body)});const text=await r.text();return {r,json:text?JSON.parse(text):null,text}}
+ const init=await rpc({jsonrpc:"2.0",id:1,method:"initialize",params:{protocolVersion:"2025-03-26",capabilities:{},clientInfo:{name:"smoke",version:"1"}}},undefined,true,"chat-session-A");if(!init.r.ok)throw new Error(`init ${init.r.status} ${JSON.stringify(init.json)}`);if("instructions" in init.json.result)throw new Error("server injected instructions");const sid=init.r.headers.get("mcp-session-id");if(!sid)throw new Error("no session id");
+ await rpc({jsonrpc:"2.0",method:"notifications/initialized"},sid);
+ const listed=await rpc({jsonrpc:"2.0",id:2,method:"tools/list",params:{}},sid);const names=listed.json.result.tools.map(x=>x.name).sort();
+ const expected=["actor_status","busy_claim","busy_list","busy_release","edit_file","git_add","git_checkout","git_commit","git_diff","git_log","git_pull","git_push","git_status","glob","grep","issue_close","issue_comment","issue_list","list_directory","process_output","process_status","read_text_file","run_command","start_process","stop_process","write_file"].sort();
+ if(JSON.stringify(names)!==JSON.stringify(expected))throw new Error(`tool surface mismatch ${names.join(',')}`);
+ const actor=await rpc({jsonrpc:"2.0",id:3,method:"tools/call",params:{name:"actor_status",arguments:{}}},sid);const actorText=actor.json.result.content[0].text;if(actorText.includes("actor-unknown"))throw new Error(`actor binding failed ${actorText}`);
+ const secret="MCP_SMOKE_SECRET_VALUE"; env.OPENAI_API_KEY=secret;
+ // restart with same OAuth + actor binding stores, then reuse stale session id
+ await stop(srv.p); srv=start(); await waitHealth();
+ const recovered=await rpc({jsonrpc:"2.0",id:4,method:"tools/call",params:{name:"actor_status",arguments:{}}},sid);if(!recovered.r.ok)throw new Error(`recovery ${recovered.r.status} ${JSON.stringify(recovered.json)}`);const recoveredText=recovered.json.result.content[0].text;if(recoveredText!==actorText)throw new Error(`actor changed across recovery ${actorText} -> ${recoveredText}`);
+ const shell=await rpc({jsonrpc:"2.0",id:5,method:"tools/call",params:{name:"run_command",arguments:{command:"Write-Output $env:OPENAI_API_KEY",working_directory:temp,timeout_seconds:5}}},sid);const shellData=JSON.parse(shell.json.result.content[0].text);if(shellData.stdout?.includes(secret))throw new Error("secret leaked to shell");
+ console.log(`PASS tools=${names.length} actor=${JSON.parse(actorText).actor_id} recovery=ok oauth_refresh=ok no_instructions=ok secret_filter=ok`);
+} finally {await stop(srv.p);await fs.rm(temp,{recursive:true,force:true})}
