@@ -88,8 +88,11 @@ class BoundedCapture {
     }
   }
 
-  tail(maxChars: number): { text: string; truncated: boolean } {
-    let remaining = Math.max(1, Math.min(maxChars, MAX_READ_CHARS));
+  // ceiling defaults to the transport cap. Receipts pass MAX_CAPTURE_CHARS because they
+  // are written to disk, never sent over MCP, and are the only durable proof of what a
+  // process produced when the caller's read is blocked or truncated.
+  tail(maxChars: number, ceiling: number = MAX_READ_CHARS): { text: string; truncated: boolean } {
+    let remaining = Math.max(1, Math.min(maxChars, ceiling));
     const parts: string[] = [];
     for (let index = this.chunks.length - 1; index >= 0 && remaining > 0; index -= 1) {
       const chunk = this.chunks[index]!;
@@ -256,8 +259,11 @@ export class ProcessManager {
     const path = this.receiptPath(state.id);
     if (!path || !state.finishedAt) return;
     const command = state.command.slice(0, MAX_COMMAND_REPORT_CHARS);
-    const stdout = state.stdout.tail(MAX_READ_CHARS);
-    const stderr = state.stderr.tail(MAX_READ_CHARS);
+    // Receipts are local evidence, not a transport payload, so they keep the full
+    // captured buffer. Using MAX_READ_CHARS here would shrink the durable record to the
+    // transport ceiling and destroy the only proof that a blocked read's process ran.
+    const stdout = state.stdout.tail(MAX_CAPTURE_CHARS, MAX_CAPTURE_CHARS);
+    const stderr = state.stderr.tail(MAX_CAPTURE_CHARS, MAX_CAPTURE_CHARS);
     const receipt: CompletedProcessReceipt = {
       version: 1,
       process_id: state.id,
