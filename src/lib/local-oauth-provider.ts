@@ -14,6 +14,13 @@ const CODE_TTL_MS = 60_000;
 const REFRESH_REUSE_GRACE_MS = 120_000;
 const MAX_CLIENTS = 64;
 const SUPPORTED_SCOPES = new Set(["mcp", "offline_access"]);
+const DISPOSABLE_CLIENT_NAMES = new Set([
+  "busy-probe",
+  "restart-proof",
+  "shell-mcp-probe",
+  "shell-mcp-smoke",
+  "shell-mcp-stress",
+]);
 
 interface CodeRecord {
   clientId: string;
@@ -231,12 +238,15 @@ export class LocalOAuthProvider implements OAuthServerProvider {
   }
 
   private makeClientRoom(): void {
-    // MAX_CLIENTS is a compaction target, not permission to invalidate a live
-    // account. Remove only registrations with no live OAuth state. If every
-    // client is active, temporarily exceed the target; token expiry makes those
-    // registrations eligible for a later registration pass.
+    // A dynamically registered client_id is durable client state. ChatGPT can
+    // reuse it after its last token has expired or been revoked, so lack of a
+    // token reference is not permission to evict a real connector registration.
+    // Compact only registrations created by this repository's disposable test
+    // clients; otherwise exceed the soft target rather than break an account.
     while (this.clients.size >= MAX_CLIENTS) {
-      const unusedClientId = [...this.clients.keys()].find((clientId) => !this.isClientReferenced(clientId));
+      const unusedClientId = [...this.clients.entries()].find(([clientId, client]) =>
+        !this.isClientReferenced(clientId) && DISPOSABLE_CLIENT_NAMES.has(client.client_name ?? ""),
+      )?.[0];
       if (!unusedClientId) return;
       this.clients.delete(unusedClientId);
     }
