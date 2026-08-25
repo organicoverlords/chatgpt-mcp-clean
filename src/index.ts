@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { createWriteStream, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import express, { type Request, type Response } from "express";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { callerId } from "./lib/caller-id.js";
 import { LocalOAuthProvider } from "./lib/local-oauth-provider.js";
+import { observeSocket, sessionFingerprint, setTelemetrySink, withTelemetryContext } from "./lib/transport-telemetry.js";
 import { createServer } from "./server.js";
 
 const PORT = Number(process.env.PORT || 3000);
@@ -28,12 +30,17 @@ const bearer = requireBearerAuth({ verifier: oauth, requiredScopes: ["mcp"], res
 
 const transportLogPath = resolve(process.env.MCP_TRANSPORT_LOG_PATH || ".state/transport.jsonl");
 mkdirSync(dirname(transportLogPath), { recursive: true });
+const transportLogStream = createWriteStream(transportLogPath, { flags: "a", encoding: "utf8" });
+transportLogStream.on("error", (error) => console.error("transport telemetry stream failed:", error.message));
 let activeRequests = 0;
 let totalRequests = 0;
 
 function transportLog(event: Record<string, unknown>): void {
   try {
-    appendFileSync(transportLogPath, `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`, "utf8");
+    if (!transportLogStream.destroyed) {
+      transportLogStream.write(`${JSON.stringify({ at: new Date().toISOString(), server_pid: process.pid, ...event })}
+`);
+    }
   } catch (error) {
     console.error("transport telemetry write failed:", error instanceof Error ? error.message : String(error));
   }
@@ -45,20 +52,17 @@ function jsonError(res: Response, status: number, message: string): void {
 }
 
 async function handleStateless(req: Request, res: Response, body: unknown): Promise<void> {
-  const server: McpServer = createServer();
+  const server: McpServer = createServer(callerId(req));
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
     allowedHosts: ["127.0.0.1:3000", "localhost:3000", publicOrigin.host],
     enableDnsRebindingProtection: true,
   });
-  activeRequests += 1;
-  totalRequests += 1;
   let cleaned = false;
   const cleanup = async () => {
     if (cleaned) return;
     cleaned = true;
-    activeRequests -= 1;
     await transport.close().catch(() => undefined);
     await server.close().catch(() => undefined);
   };
@@ -72,13 +76,18 @@ async function handleStateless(req: Request, res: Response, body: unknown): Prom
     throw error;
   }
 }
+setTelemetrySink(transportLog);
 
 async function handleMcp(req: Request, res: Response): Promise<void> {
+  activeRequests += 1;
+  totalRequests += 1;
   try {
     await handleStateless(req, res, req.body);
   } catch (error) {
     console.error("MCP request failed:", error instanceof Error ? error.message : String(error));
     jsonError(res, 500, "Internal MCP server error");
+  } finally {
+    activeRequests -= 1;
   }
 }
 
@@ -86,23 +95,26 @@ const app = express();
 app.set("trust proxy", "loopback");
 app.use((req, res, next) => {
   const requestId = randomUUID();
+  const requestCallerId = callerId(req);
+  const connectionId = observeSocket(req.socket);
+  const sessionId = sessionFingerprint(req.header("mcp-session-id") || req.header("x-openai-session"));
   const startedAt = process.hrtime.bigint();
   const host = req.header("host") || "";
   const viaFunnel = host.toLowerCase() === publicOrigin.host.toLowerCase();
   let finished = false;
   const durationMs = () => Number(process.hrtime.bigint() - startedAt) / 1_000_000;
-  transportLog({ event: "request_start", request_id: requestId, method: req.method, path: req.path, via_funnel: viaFunnel, remote_address: req.socket.remoteAddress || null });
+  transportLog({ event: "request_start", request_id: requestId, caller_id: requestCallerId, connection_id: connectionId, session_id: sessionId, method: req.method, path: req.path, via_funnel: viaFunnel, remote_address: req.socket.remoteAddress || null });
   res.setHeader("x-shell-mcp-request-id", requestId);
   res.on("finish", () => {
     finished = true;
-    transportLog({ event: "response_finish", request_id: requestId, method: req.method, path: req.path, via_funnel: viaFunnel, mcp_method: res.locals.mcpMethod || null, mcp_tool: res.locals.mcpTool || null, status: res.statusCode, duration_ms: Number(durationMs().toFixed(3)) });
+    transportLog({ event: "response_finish", request_id: requestId, caller_id: requestCallerId, connection_id: connectionId, session_id: sessionId, method: req.method, path: req.path, via_funnel: viaFunnel, mcp_method: res.locals.mcpMethod || null, mcp_tool: res.locals.mcpTool || null, status: res.statusCode, duration_ms: Number(durationMs().toFixed(3)) });
   });
   res.on("close", () => {
-    if (!finished) transportLog({ event: "response_close_early", request_id: requestId, method: req.method, path: req.path, via_funnel: viaFunnel, mcp_method: res.locals.mcpMethod || null, mcp_tool: res.locals.mcpTool || null, status: res.statusCode, duration_ms: Number(durationMs().toFixed(3)) });
+    if (!finished) transportLog({ event: "response_close_early", request_id: requestId, caller_id: requestCallerId, connection_id: connectionId, session_id: sessionId, method: req.method, path: req.path, via_funnel: viaFunnel, mcp_method: res.locals.mcpMethod || null, mcp_tool: res.locals.mcpTool || null, status: res.statusCode, duration_ms: Number(durationMs().toFixed(3)) });
   });
-  req.on("aborted", () => transportLog({ event: "request_aborted", request_id: requestId, method: req.method, path: req.path, via_funnel: viaFunnel, mcp_method: res.locals.mcpMethod || null, mcp_tool: res.locals.mcpTool || null, duration_ms: Number(durationMs().toFixed(3)) }));
-  req.once("error", (error) => transportLog({ event: "request_error", request_id: requestId, method: req.method, path: req.path, via_funnel: viaFunnel, mcp_method: res.locals.mcpMethod || null, mcp_tool: res.locals.mcpTool || null, code: "code" in error ? error.code : null, duration_ms: Number(durationMs().toFixed(3)) }));
-  next();
+  req.on("aborted", () => transportLog({ event: "request_aborted", request_id: requestId, caller_id: requestCallerId, connection_id: connectionId, session_id: sessionId, method: req.method, path: req.path, via_funnel: viaFunnel, mcp_method: res.locals.mcpMethod || null, mcp_tool: res.locals.mcpTool || null, duration_ms: Number(durationMs().toFixed(3)) }));
+  req.once("error", (error) => transportLog({ event: "request_error", request_id: requestId, caller_id: requestCallerId, connection_id: connectionId, session_id: sessionId, method: req.method, path: req.path, via_funnel: viaFunnel, mcp_method: res.locals.mcpMethod || null, mcp_tool: res.locals.mcpTool || null, code: "code" in error ? error.code : null, duration_ms: Number(durationMs().toFixed(3)) }));
+  withTelemetryContext({ request_id: requestId, caller_id: requestCallerId, connection_id: connectionId, session_id: sessionId }, next);
 });
 app.use(express.json({ limit: "4mb" }));
 app.use((req, res, next) => {
@@ -147,15 +159,32 @@ app.get("/.well-known/openid-configuration", (_req, res) => res.json(oauthMetada
 app.get("/.well-known/oauth-authorization-server/mcp", (_req, res) => res.json(oauthMetadata));
 app.use(mcpAuthRouter({ provider: oauth, issuerUrl: publicOrigin, resourceServerUrl: resource, scopesSupported: ["mcp", "offline_access"], resourceName: "Shell MCP", clientRegistrationOptions: { rateLimit: { windowMs: 60 * 60 * 1000, max: 300 } } }));
 
+const allowedMcpHosts = new Set(["127.0.0.1:3000", "localhost:3000", publicOrigin.host.toLowerCase()]);
+app.use("/mcp", (req, res, next) => {
+  const host = (req.header("host") || "").toLowerCase();
+  if (!allowedMcpHosts.has(host)) {
+    res.status(403).send("Invalid Host header");
+    return;
+  }
+  next();
+});
 app.post("/mcp", bearer, handleMcp);
 app.get("/mcp", bearer, (_req, res) => res.status(405).set("Allow", "POST").send("Method not allowed."));
 app.delete("/mcp", bearer, (_req, res) => res.status(405).set("Allow", "POST").send("Method not allowed."));
-app.get("/health", (_req, res) => res.json({ status: "ok", name: "shell-mcp", host: HOST, port: PORT, active_requests: activeRequests, total_requests: totalRequests }));
+app.get("/health", (_req, res) => res.json({ status: "ok", name: "shell-mcp", host: HOST, port: PORT, pid: process.pid, active_requests: activeRequests, total_requests: totalRequests }));
 
 const httpServer = app.listen(PORT, HOST, () => console.error(`shell-mcp listening on http://${HOST}:${PORT}/mcp`));
-httpServer.keepAliveTimeout = 65_000;
-httpServer.headersTimeout = 75_000;
-httpServer.requestTimeout = 0;
+httpServer.on("connection", (socket) => { observeSocket(socket); });
+// MCP Streamable HTTP sessions may legitimately remain idle for longer than a minute.
+// Do not let Node reap an otherwise healthy connection; the MCP client/server protocol
+// owns session lifetime, while requestTimeout remains bounded for individual calls.
+httpServer.keepAliveTimeout = 0;
+// MCP calls are deliberately background/immediate; a client body that takes
+// longer than this is a stalled connector upload, not useful long-running work.
+// Keep a broken request from holding the route indefinitely while the worker
+// reconnects and retries with the same process_id.
+httpServer.headersTimeout = 35_000;
+httpServer.requestTimeout = 30_000;
 httpServer.timeout = 0;
 
 process.on("uncaughtExceptionMonitor", (error, origin) => {
@@ -166,7 +195,7 @@ httpServer.on("error", (error) => transportLog({ event: "http_server_error", err
 
 const stop = (signal: "SIGINT" | "SIGTERM") => {
   transportLog({ event: "process_signal", signal });
-  httpServer.close(() => process.exit(0));
+  httpServer.close(() => transportLogStream.end(() => process.exit(0)));
   setTimeout(() => process.exit(1), 5_000).unref();
 };
 process.on("SIGINT", () => stop("SIGINT"));

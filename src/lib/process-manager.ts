@@ -1,37 +1,126 @@
-﻿import { spawn, type ChildProcessByStdio } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { statSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import type { Readable } from "node:stream";
+import { currentTelemetryContext, emitTelemetry, type TelemetryContext } from "./transport-telemetry.js";
 
-const MAX_CAPTURE_CHARS = 4_000_000;
+const MAX_CAPTURE_CHARS = 100_000;
+// 6,000 not 20,000: the platform blocks read_output payloads above roughly 6 KB as a
+// safety error AFTER the process has already run, so a larger cap produces an invisible
+// failure -- the output sits complete in the receipt while the caller sees only a block.
+// Measured 2026-08-25: 6.4 KB delivered, 12.8 KB and 14.4 KB blocked. Truncating below
+// that ceiling turns a silent loss into a marked stdout_truncated read the caller can page.
+const MAX_READ_CHARS = 6_000;
+const MAX_COMMAND_REPORT_CHARS = 4_000;
 const COMPLETED_RETENTION_MS = 30 * 60 * 1000;
 const MAX_COMPLETED_PROCESSES = 64;
+const TASKKILL_TIMEOUT_MS = 2_000;
+const KILL_SETTLE_MS = 1_000;
+const DEFAULT_LAUNCH_BUCKET_CAPACITY = 40;
+const DEFAULT_LAUNCH_REFILL_MS = 5_000;
+const DEFAULT_MAX_LIVE_PER_CALLER = 3;
 type CapturedChild = ChildProcessByStdio<null, Readable, Readable>;
+
+type ProcessManagerOptions = {
+  maxLaunchesPerWindow?: number;
+  launchRefillMs?: number;
+  maxLivePerCaller?: number;
+  now?: () => number;
+  receiptDirectory?: string;
+};
+
+type LaunchBucket = {
+  tokens: number;
+  lastRefillAt: number;
+};
+
+type CompletedProcessReceipt = {
+  version: 1;
+  process_id: string;
+  pid: number;
+  caller_id: string;
+  command: string;
+  command_truncated?: true;
+  cwd: string;
+  stdout: string;
+  stderr: string;
+  stdout_truncated?: true;
+  stderr_truncated?: true;
+  exit_code: number | null;
+  signal: NodeJS.Signals | null;
+  started_at: string;
+  finished_at: string;
+  error?: string;
+};
+
+const PROCESS_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+class BoundedCapture {
+  private readonly chunks: string[] = [];
+  private length = 0;
+  truncated = false;
+
+  append(chunk: Buffer | string): void {
+    let text = chunk.toString();
+    if (!text) return;
+    if (text.length >= MAX_CAPTURE_CHARS) {
+      text = text.slice(-MAX_CAPTURE_CHARS);
+      this.chunks.length = 0;
+      this.chunks.push(text);
+      this.length = text.length;
+      this.truncated = true;
+      return;
+    }
+    this.chunks.push(text);
+    this.length += text.length;
+    while (this.length > MAX_CAPTURE_CHARS) {
+      const overflow = this.length - MAX_CAPTURE_CHARS;
+      const first = this.chunks[0]!;
+      if (first.length <= overflow) {
+        this.chunks.shift();
+        this.length -= first.length;
+      } else {
+        this.chunks[0] = first.slice(overflow);
+        this.length -= overflow;
+      }
+      this.truncated = true;
+    }
+  }
+
+  tail(maxChars: number): { text: string; truncated: boolean } {
+    let remaining = Math.max(1, Math.min(maxChars, MAX_READ_CHARS));
+    const parts: string[] = [];
+    for (let index = this.chunks.length - 1; index >= 0 && remaining > 0; index -= 1) {
+      const chunk = this.chunks[index]!;
+      const part = chunk.length <= remaining ? chunk : chunk.slice(-remaining);
+      parts.push(part);
+      remaining -= part.length;
+    }
+    return { text: parts.reverse().join(""), truncated: this.truncated || this.length > maxChars };
+  }
+}
 
 type ProcessState = {
   id: string;
   pid: number;
+  callerId: string;
+  ownerContext: TelemetryContext;
   command: string;
   cwd: string;
   child: CapturedChild;
-  stdout: string;
-  stderr: string;
-  stdoutTruncated: boolean;
-  stderrTruncated: boolean;
+  stdout: BoundedCapture;
+  stderr: BoundedCapture;
   startedAt: string;
   finishedAt?: string;
   exitCode: number | null;
   signal?: NodeJS.Signals | null;
   error?: string;
   done: Promise<void>;
+  revision: number;
+  lastReadRevisionByCaller: Map<string, number>;
+  waiters: Set<() => void>;
 };
-
-function appendCapture(current: string, chunk: Buffer | string): { value: string; truncated: boolean } {
-  const next = current + chunk.toString();
-  if (next.length <= MAX_CAPTURE_CHARS) return { value: next, truncated: false };
-  return { value: next.slice(-MAX_CAPTURE_CHARS), truncated: true };
-}
 
 // Absolute path so a mangled PATH in an inherited environment cannot turn into a
 // spawn failure. Falls back to bare resolution only if SystemRoot is unset.
@@ -74,14 +163,30 @@ function powershell(command: string, cwd: string): CapturedChild {
   );
 }
 
-async function taskkillTree(pid: number): Promise<number> {
-  return await new Promise<number>((resolve, reject) => {
+async function taskkillTree(pid: number): Promise<{ code: number; timedOut: boolean }> {
+  return await new Promise<{ code: number; timedOut: boolean }>((resolve, reject) => {
     const killer = spawn("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
       windowsHide: true,
       stdio: "ignore",
     });
-    killer.once("error", reject);
-    killer.once("close", (code) => resolve(code ?? 1));
+    let settled = false;
+    const finish = (result: { code: number; timedOut: boolean }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      killer.kill();
+      finish({ code: 124, timedOut: true });
+    }, TASKKILL_TIMEOUT_MS);
+    killer.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+    killer.once("close", (code) => finish({ code: code ?? 1, timedOut: false }));
   });
 }
 
@@ -89,8 +194,180 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function processResponseState(startedAt: string, running: boolean, finishedAt?: string | null): {
+  mcp_status: "OK";
+  process_state: "RUNNING" | "COMPLETED";
+  elapsed_ms: number;
+  next_action: "READ_SAME_PROCESS_ID" | "STOP_READING";
+} {
+  const endMs = running ? Date.now() : Date.parse(finishedAt ?? startedAt);
+  return {
+    mcp_status: "OK",
+    process_state: running ? "RUNNING" : "COMPLETED",
+    elapsed_ms: Math.max(0, endMs - Date.parse(startedAt)),
+    next_action: running ? "READ_SAME_PROCESS_ID" : "STOP_READING",
+  };
+}
+
 export class ProcessManager {
   private readonly processes = new Map<string, ProcessState>();
+  private readonly launchBucketsByCaller = new Map<string, LaunchBucket>();
+  private readonly launchBucketCapacity: number;
+  private readonly launchRefillMs: number;
+  private readonly maxLivePerCaller: number;
+  private readonly now: () => number;
+  private readonly receiptDirectory?: string;
+
+  constructor(options: ProcessManagerOptions = {}) {
+    this.launchBucketCapacity = options.maxLaunchesPerWindow ?? DEFAULT_LAUNCH_BUCKET_CAPACITY;
+    this.launchRefillMs = options.launchRefillMs ?? DEFAULT_LAUNCH_REFILL_MS;
+    this.maxLivePerCaller = options.maxLivePerCaller ?? DEFAULT_MAX_LIVE_PER_CALLER;
+    this.now = options.now ?? Date.now;
+    this.receiptDirectory = options.receiptDirectory ? resolve(options.receiptDirectory) : undefined;
+    if (this.receiptDirectory) {
+      mkdirSync(this.receiptDirectory, { recursive: true });
+      this.pruneReceipts();
+    }
+  }
+
+  private receiptPath(processId: string): string | undefined {
+    if (!this.receiptDirectory || !PROCESS_ID_PATTERN.test(processId)) return undefined;
+    return join(this.receiptDirectory, `${processId}.json`);
+  }
+
+  private pruneReceipts(): void {
+    if (!this.receiptDirectory) return;
+    const now = Date.now();
+    const files = readdirSync(this.receiptDirectory, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && PROCESS_ID_PATTERN.test(entry.name.slice(0, -5)) && entry.name.endsWith(".json"))
+      .map((entry) => {
+        const path = join(this.receiptDirectory!, entry.name);
+        return { path, modifiedAt: statSync(path).mtimeMs };
+      })
+      .sort((a, b) => a.modifiedAt - b.modifiedAt);
+    for (const file of files) {
+      if (now - file.modifiedAt > COMPLETED_RETENTION_MS) unlinkSync(file.path);
+    }
+    const retained = files.filter((file) => now - file.modifiedAt <= COMPLETED_RETENTION_MS);
+    for (const file of retained.slice(0, Math.max(0, retained.length - MAX_COMPLETED_PROCESSES))) unlinkSync(file.path);
+  }
+
+  private persistReceipt(state: ProcessState): void {
+    const path = this.receiptPath(state.id);
+    if (!path || !state.finishedAt) return;
+    const command = state.command.slice(0, MAX_COMMAND_REPORT_CHARS);
+    const stdout = state.stdout.tail(MAX_READ_CHARS);
+    const stderr = state.stderr.tail(MAX_READ_CHARS);
+    const receipt: CompletedProcessReceipt = {
+      version: 1,
+      process_id: state.id,
+      pid: state.pid,
+      caller_id: state.callerId,
+      command,
+      ...(state.command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}),
+      cwd: state.cwd,
+      stdout: stdout.text,
+      stderr: stderr.text,
+      ...(stdout.truncated ? { stdout_truncated: true as const } : {}),
+      ...(stderr.truncated ? { stderr_truncated: true as const } : {}),
+      exit_code: state.exitCode,
+      signal: state.signal ?? null,
+      started_at: state.startedAt,
+      finished_at: state.finishedAt,
+      ...(state.error ? { error: state.error } : {}),
+    };
+    const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(temporaryPath, JSON.stringify(receipt), { encoding: "utf8", flag: "wx" });
+      renameSync(temporaryPath, path);
+      this.pruneReceipts();
+      emitTelemetry({
+        event: "process_receipt_persisted",
+        process_id: state.id,
+        pid: state.pid,
+        owner_caller_id: state.callerId,
+      }, state.ownerContext);
+    } catch (error) {
+      try { unlinkSync(temporaryPath); } catch { /* best-effort temporary cleanup */ }
+      emitTelemetry({
+        event: "process_receipt_error",
+        process_id: state.id,
+        pid: state.pid,
+        owner_caller_id: state.callerId,
+        error_message: error instanceof Error ? error.message : String(error),
+      }, state.ownerContext);
+    }
+  }
+
+  private readReceipt(processId: string, maxChars: number): Record<string, unknown> | undefined {
+    const path = this.receiptPath(processId);
+    if (!path) return undefined;
+    this.pruneReceipts();
+    let receipt: CompletedProcessReceipt;
+    try {
+      receipt = JSON.parse(readFileSync(path, "utf8")) as CompletedProcessReceipt;
+    } catch {
+      return undefined;
+    }
+    if (receipt.version !== 1 || receipt.process_id !== processId || typeof receipt.pid !== "number" || typeof receipt.command !== "string" || typeof receipt.cwd !== "string" || typeof receipt.stdout !== "string" || typeof receipt.stderr !== "string" || typeof receipt.started_at !== "string" || typeof receipt.finished_at !== "string") {
+      return undefined;
+    }
+    const limit = Math.max(1, Math.min(maxChars, MAX_READ_CHARS));
+    const stdout = receipt.stdout.slice(-limit);
+    const stderr = receipt.stderr.slice(-limit);
+    const observer = currentTelemetryContext();
+    emitTelemetry({
+      event: "process_receipt_read",
+      process_id: receipt.process_id,
+      pid: receipt.pid,
+      owner_caller_id: receipt.caller_id,
+      caller_id: observer.caller_id ?? "caller_unknown",
+    }, observer);
+    return {
+      ...processResponseState(receipt.started_at, false, receipt.finished_at),
+      process_id: receipt.process_id,
+      pid: receipt.pid,
+      command: receipt.command,
+      ...(receipt.command_truncated ? { command_truncated: true } : {}),
+      cwd: receipt.cwd,
+      running: false,
+      stdout,
+      stderr,
+      exit_code: receipt.exit_code,
+      signal: receipt.signal,
+      started_at: receipt.started_at,
+      finished_at: receipt.finished_at,
+      ...(receipt.stdout_truncated || receipt.stdout.length > limit ? { stdout_truncated: true } : {}),
+      ...(receipt.stderr_truncated || receipt.stderr.length > limit ? { stderr_truncated: true } : {}),
+      ...(receipt.error ? { error: receipt.error } : {}),
+    };
+  }
+
+  private reserveLaunch(callerId: string): void {
+    const now = this.now();
+    const bucket = this.launchBucketsByCaller.get(callerId) ?? {
+      tokens: this.launchBucketCapacity,
+      lastRefillAt: now,
+    };
+    const elapsedMs = Math.max(0, now - bucket.lastRefillAt);
+    bucket.tokens = Math.min(
+      this.launchBucketCapacity,
+      bucket.tokens + elapsedMs / this.launchRefillMs,
+    );
+    bucket.lastRefillAt = now;
+    if (bucket.tokens < 1) {
+      const retryAfterMs = Math.max(1, Math.ceil((1 - bucket.tokens) * this.launchRefillMs));
+      this.launchBucketsByCaller.set(callerId, bucket);
+      throw new Error(`start_process_rate_limited: caller launch bucket is empty; capacity=${this.launchBucketCapacity}; refill_ms=${this.launchRefillMs}; retry_after_ms=${retryAfterMs}`);
+    }
+    bucket.tokens -= 1;
+    this.launchBucketsByCaller.set(callerId, bucket);
+  }
+
+  private markProcessChanged(state: ProcessState): void {
+    state.revision += 1;
+    for (const wake of [...state.waiters]) wake();
+  }
 
   private pruneCompleted(): void {
     const now = Date.now();
@@ -107,86 +384,225 @@ export class ProcessManager {
     for (const state of remaining.slice(0, Math.max(0, remaining.length - MAX_COMPLETED_PROCESSES))) this.processes.delete(state.id);
   }
 
-  start(command: string, workingDirectory?: string): { process_id: string; pid: number; cwd: string; running: boolean } {
+  start(command: string, workingDirectory?: string, callerId = "caller_unknown"): { mcp_status: "OK"; process_state: "RUNNING" | "COMPLETED"; elapsed_ms: number; next_action: "READ_SAME_PROCESS_ID" | "STOP_READING"; process_id: string; pid: number; cwd: string; running: boolean } {
     this.pruneCompleted();
     const cwd = normalizedCwd(workingDirectory);
+    const duplicate = [...this.processes.values()].find((state) =>
+      state.exitCode === null && state.callerId === callerId && state.cwd === cwd && state.command === command
+    );
+    if (duplicate) {
+      emitTelemetry({
+        event: "process_reused",
+        process_id: duplicate.id,
+        pid: duplicate.pid,
+        owner_caller_id: duplicate.callerId,
+      });
+      return { ...processResponseState(duplicate.startedAt, true), process_id: duplicate.id, pid: duplicate.pid, cwd: duplicate.cwd, running: true } as const;
+    }
+    const liveForCaller = [...this.processes.values()].filter((state) => state.exitCode === null && state.callerId === callerId);
+    if (liveForCaller.length >= this.maxLivePerCaller) {
+      throw new Error(`start_process_concurrency_limited: caller already has ${liveForCaller.length} live processes; active_process_ids=${liveForCaller.map((state) => state.id).join(",")}`);
+    }
+    this.reserveLaunch(callerId);
     const child = powershell(command, cwd);
     if (!child.pid) throw new Error("Background process did not receive a PID");
 
     let resolveDone!: () => void;
     const done = new Promise<void>((resolve) => { resolveDone = resolve; });
+    const ownerContext = currentTelemetryContext();
     const state: ProcessState = {
       id: randomUUID(),
       pid: child.pid,
+      callerId,
+      ownerContext,
       command,
       cwd,
       child,
-      stdout: "",
-      stderr: "",
-      stdoutTruncated: false,
-      stderrTruncated: false,
+      stdout: new BoundedCapture(),
+      stderr: new BoundedCapture(),
       startedAt: new Date().toISOString(),
       exitCode: null,
       done,
+      revision: 0,
+      lastReadRevisionByCaller: new Map<string, number>(),
+      waiters: new Set<() => void>(),
     };
 
     child.stdout.on("data", (chunk: Buffer | string) => {
-      const captured = appendCapture(state.stdout, chunk);
-      state.stdout = captured.value;
-      state.stdoutTruncated ||= captured.truncated;
+      state.stdout.append(chunk);
+      this.markProcessChanged(state);
     });
     child.stderr.on("data", (chunk: Buffer | string) => {
-      const captured = appendCapture(state.stderr, chunk);
-      state.stderr = captured.value;
-      state.stderrTruncated ||= captured.truncated;
+      state.stderr.append(chunk);
+      this.markProcessChanged(state);
     });
     child.once("error", (error) => {
       state.error = error.message;
       if (state.exitCode === null) state.exitCode = -1;
+      this.markProcessChanged(state);
+      emitTelemetry({
+        event: "process_error",
+        process_id: state.id,
+        pid: state.pid,
+        owner_caller_id: state.callerId,
+        error_code: "code" in error ? error.code : null,
+        error_message: error.message,
+      }, state.ownerContext);
     });
     child.once("close", (code, signal) => {
       if (state.exitCode === null) state.exitCode = code;
       state.signal = signal;
       state.finishedAt = new Date().toISOString();
+      this.markProcessChanged(state);
+      this.persistReceipt(state);
+      emitTelemetry({
+        event: "process_exit_observed",
+        process_id: state.id,
+        pid: state.pid,
+        owner_caller_id: state.callerId,
+        exit_code: state.exitCode,
+        signal: state.signal ?? null,
+        started_at: state.startedAt,
+        finished_at: state.finishedAt,
+      }, state.ownerContext);
       resolveDone();
     });
     this.processes.set(state.id, state);
-    return { process_id: state.id, pid: state.pid, cwd: state.cwd, running: true };
-  }
-
-  read(processId: string, maxChars = 200_000): Record<string, unknown> {
-    this.pruneCompleted();
-    const state = this.requireProcess(processId);
-    const limit = Math.max(1, Math.min(maxChars, MAX_CAPTURE_CHARS));
-    return {
+    emitTelemetry({
+      event: "process_started",
       process_id: state.id,
       pid: state.pid,
-      command: state.command,
+      owner_caller_id: state.callerId,
+      cwd: state.cwd,
+      started_at: state.startedAt,
+    }, state.ownerContext);
+    return { ...processResponseState(state.startedAt, true), process_id: state.id, pid: state.pid, cwd: state.cwd, running: true } as const;
+  }
+
+  read(processId: string, maxChars = MAX_READ_CHARS): Record<string, unknown> {
+    this.pruneCompleted();
+    const limit = Math.max(1, Math.min(maxChars, MAX_READ_CHARS));
+    const state = this.processes.get(processId);
+    if (!state) {
+      const receipt = this.readReceipt(processId, limit);
+      if (receipt) return receipt;
+      throw new Error(`Unknown process_id: ${processId}`);
+    }
+    const command = state.command.slice(0, MAX_COMMAND_REPORT_CHARS);
+    const stdout = state.stdout.tail(limit);
+    const stderr = state.stderr.tail(limit);
+    const observer = currentTelemetryContext();
+    const observerCallerId = observer.caller_id ?? "caller_unknown";
+    state.lastReadRevisionByCaller.set(observerCallerId, state.revision);
+    emitTelemetry({
+      event: "process_read",
+      process_id: state.id,
+      pid: state.pid,
+      owner_caller_id: state.callerId,
+      caller_id: observerCallerId,
+      running: state.exitCode === null,
+      reassociated: Boolean(observer.caller_id && observer.caller_id !== state.callerId),
+    }, observer);
+    return {
+      ...processResponseState(state.startedAt, state.exitCode === null, state.finishedAt),
+      process_id: state.id,
+      pid: state.pid,
+      command,
+      ...((state.command.length > MAX_COMMAND_REPORT_CHARS) ? { command_truncated: true } : {}),
       cwd: state.cwd,
       running: state.exitCode === null,
-      stdout: state.stdout.slice(-limit),
-      stderr: state.stderr.slice(-limit),
+      stdout: stdout.text,
+      stderr: stderr.text,
       exit_code: state.exitCode,
       signal: state.signal ?? null,
       started_at: state.startedAt,
       finished_at: state.finishedAt ?? null,
-      ...(state.stdoutTruncated ? { stdout_truncated: true } : {}),
-      ...(state.stderrTruncated ? { stderr_truncated: true } : {}),
+      ...(stdout.truncated ? { stdout_truncated: true } : {}),
+      ...(stderr.truncated ? { stderr_truncated: true } : {}),
       ...(state.error ? { error: state.error } : {}),
     };
   }
 
+  async readWithWait(processId: string, maxChars = MAX_READ_CHARS, waitMs = 0): Promise<Record<string, unknown>> {
+    const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
+    if (boundedWaitMs === 0) return this.read(processId, maxChars);
+
+    const state = this.processes.get(processId);
+    if (!state || state.exitCode !== null) return this.read(processId, maxChars);
+    const observer = currentTelemetryContext();
+    const observerCallerId = observer.caller_id ?? "caller_unknown";
+    const lastReadRevision = state.lastReadRevisionByCaller.get(observerCallerId) ?? 0;
+    if (state.revision > lastReadRevision) return this.read(processId, maxChars);
+
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      let timer: NodeJS.Timeout;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        state.waiters.delete(finish);
+        resolve();
+      };
+      state.waiters.add(finish);
+      timer = setTimeout(finish, boundedWaitMs);
+    });
+    return this.read(processId, maxChars);
+  }
+
   async kill(processId: string): Promise<Record<string, unknown>> {
     const state = this.requireProcess(processId);
-    if (state.exitCode !== null) return { process_id: state.id, pid: state.pid, killed: false, already_exited: true, exit_code: state.exitCode };
-
-    await taskkillTree(state.pid);
-    await Promise.race([state.done, delay(5_000)]);
-    if (state.exitCode === null) {
-      await taskkillTree(state.pid).catch(() => undefined);
-      await Promise.race([state.done, delay(2_000)]);
+    const observer = currentTelemetryContext();
+    if (state.exitCode !== null) {
+      emitTelemetry({
+        event: "process_kill_skipped",
+        process_id: state.id,
+        pid: state.pid,
+        owner_caller_id: state.callerId,
+        caller_id: observer.caller_id ?? "caller_unknown",
+        reason: "already_exited",
+      }, observer);
+      return { process_id: state.id, pid: state.pid, killed: false, already_exited: true, exit_code: state.exitCode };
     }
-    if (state.exitCode === null) throw new Error(`Process tree for ${processId} did not terminate`);
+
+    emitTelemetry({
+      event: "process_kill_requested",
+      process_id: state.id,
+      pid: state.pid,
+      owner_caller_id: state.callerId,
+      caller_id: observer.caller_id ?? "caller_unknown",
+      reassociated: Boolean(observer.caller_id && observer.caller_id !== state.callerId),
+    }, observer);
+    const killResult = await taskkillTree(state.pid);
+    await Promise.race([state.done, delay(KILL_SETTLE_MS)]);
+    if (state.exitCode === null) {
+      emitTelemetry({
+        event: "process_kill_incomplete",
+        process_id: state.id,
+        pid: state.pid,
+        owner_caller_id: state.callerId,
+        caller_id: observer.caller_id ?? "caller_unknown",
+        kill_timed_out: killResult.timedOut,
+      }, observer);
+      return {
+        process_id: state.id,
+        pid: state.pid,
+        killed: false,
+        kill_requested: true,
+        running: true,
+        kill_timed_out: killResult.timedOut,
+        error: `Process tree for ${processId} did not terminate within the bounded kill window`,
+      };
+    }
+    emitTelemetry({
+      event: "process_killed",
+      process_id: state.id,
+      pid: state.pid,
+      owner_caller_id: state.callerId,
+      caller_id: observer.caller_id ?? "caller_unknown",
+      exit_code: state.exitCode,
+      signal: state.signal ?? null,
+    }, observer);
     return { process_id: state.id, pid: state.pid, killed: true, running: false, exit_code: state.exitCode, signal: state.signal ?? null };
   }
 

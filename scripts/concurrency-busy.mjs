@@ -25,7 +25,7 @@ if (process.argv[2] === "worker") {
   const actor = process.argv[4];
   const store = new BusyStore(() => false, STORE);
   try {
-    const result = store.claim(actor, scope);
+    const result = await store.claim(actor, scope);
     process.stdout.write(JSON.stringify({ ok: true, claimed: result.ok, actor, scope }));
     process.exit(0);
   } catch (error) {

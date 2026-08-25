@@ -16,11 +16,8 @@ const LOCK_TIMEOUT_MS = 2_000;
 const LOCK_STALE_MS = 15_000;
 const LOCK_RETRY_MS = 10;
 
-// Atomics.wait needs a SharedArrayBuffer; this is the only way to sleep synchronously,
-// and BusyStore's API is synchronous.
-const SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
-function sleepSync(ms: number): void {
-  Atomics.wait(SLEEP_BUFFER, 0, 0, ms);
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 type BusyFile = { claims: BusyClaim[] };
@@ -46,20 +43,11 @@ export class BusyStore {
     storePath = process.env.MCP_BUSY_STORE_PATH || ".state/busy-claims.json",
   ) {
     this.storePath = resolve(storePath);
-    // Best-effort at boot. If another writer holds the lock right now, start with an
-    // empty map and let the first operation refresh under the lock -- never fail server
-    // startup over the busy store.
-    try {
-      this.withLock(() => {
-        this.load();
-        this.prune();
-      }, 0);
-    } catch {
-      // ignore
-    }
+    // Do not acquire the inter-process lock during construction. The first operation
+    // refreshes under the lock, and startup must never wait on another writer.
   }
 
-  claim(actor: string, scope: string): { ok: true; claim: BusyClaim } | { ok: false; reason: string; claim: BusyClaim } {
+  async claim(actor: string, scope: string): Promise<{ ok: true; claim: BusyClaim } | { ok: false; reason: string; claim: BusyClaim }> {
     return this.withLock(() => {
       this.refresh();
       const current = this.claims.get(scope);
@@ -71,7 +59,7 @@ export class BusyStore {
     });
   }
 
-  list(): BusyClaim[] {
+  async list(): Promise<BusyClaim[]> {
     // Also locked: refresh() calls prune(), which can persist(), so listing is a
     // read-modify-write like the others.
     return this.withLock(() => {
@@ -80,7 +68,7 @@ export class BusyStore {
     });
   }
 
-  release(actor: string, scope: string): { ok: true; released: BusyClaim } | { ok: false; reason: string; claim?: BusyClaim } {
+  async release(actor: string, scope: string): Promise<{ ok: true; released: BusyClaim } | { ok: false; reason: string; claim?: BusyClaim }> {
     return this.withLock(() => {
       this.refresh();
       const current = this.claims.get(scope);
@@ -99,8 +87,9 @@ export class BusyStore {
   // on Windows and POSIX alike, so the lock file is the arbiter.
   //
   // A lock older than LOCK_STALE_MS is stolen: a process killed mid-write must not wedge
-  // BUSY forever, and every holder here does bounded synchronous file IO.
-  private withLock<T>(fn: () => T, timeoutMs = LOCK_TIMEOUT_MS): T {
+  // BUSY forever, and every holder here does bounded file IO. Waiting for a competing
+  // writer must yield the Node event loop so health and unrelated tools remain responsive.
+  private async withLock<T>(fn: () => T | PromiseLike<T>, timeoutMs = LOCK_TIMEOUT_MS): Promise<T> {
     const lockPath = `${this.storePath}.lock`;
     mkdirSync(dirname(this.storePath), { recursive: true });
     const deadline = Date.now() + timeoutMs;
@@ -130,13 +119,13 @@ export class BusyStore {
         if (Date.now() >= deadline) {
           throw new BusyStoreLockError();
         }
-        sleepSync(LOCK_RETRY_MS);
+        await sleep(LOCK_RETRY_MS);
       }
     }
 
     try {
       try { writeSync(fd, String(process.pid)); } catch {}
-      return fn();
+      return await fn();
     } finally {
       try { closeSync(fd); } catch {}
       try { unlinkSync(lockPath); } catch {}

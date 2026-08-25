@@ -111,6 +111,16 @@ async function waitForOutput(sessionId, processId, pattern, timeoutMs = 20_000) 
   } while (Date.now() < deadline);
   return output;
 }
+async function waitForExit(sessionId, processId, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs;
+  let output;
+  do {
+    output = await callTool(sessionId, "read_output", { process_id: processId });
+    if (!output.running) return output;
+    await sleep(100);
+  } while (Date.now() < deadline);
+  return output;
+}
 
 const sessionA = await initialize();
 const getController = new AbortController();
@@ -127,12 +137,16 @@ assert.equal(standaloneGet.headers.get("allow"), "POST");
 getController.abort();
 const listed = await mcpPost(sessionA, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
 const names = listed.body.result.tools.map((tool) => tool.name).sort();
-assert.deepEqual(names, ["busy_claim", "busy_list", "busy_release", "kill_process", "read_output", "start_process"]);
+assert.deepEqual(names, ["busy_claim", "busy_list", "busy_release", "kill_process", "read_output", "start_process", "view_image"]);
+const readOutputTool = listed.body.result.tools.find((tool) => tool.name === "read_output");
+assert.equal(readOutputTool.inputSchema.properties.wait_ms.maximum, 10_000);
+assert.equal(readOutputTool.inputSchema.properties.wait_ms.minimum, 0);
 
 const startedAt = Date.now();
 let jobOne;
 let jobTwo;
 let treeJob;
+let floodJob;
 try {
   jobOne = await callTool(sessionA, "start_process", { command: "1..20 | ForEach-Object { Write-Output ('JOB_ONE_' + $_); Start-Sleep -Milliseconds 200 }" });
   assert.ok(jobOne.process_id && Date.now() - startedAt < 5000);
@@ -164,6 +178,17 @@ try {
   assert.equal(killed.killed, true);
   execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `if (Get-Process -Id ${childPid} -ErrorAction SilentlyContinue) { exit 1 } else { exit 0 }`], { encoding: "utf8" });
 
+  floodJob = await callTool(sessionA, "start_process", { command: "$payload = 'X' * 200; 1..10000 | ForEach-Object { Write-Output (('FLOOD_{0}_{1}' -f $_,$payload)) }" });
+  const healthStarted = Date.now();
+  const healthDuringFlood = await jsonFetch(`${origin}/health`, { signal: AbortSignal.timeout(5_000) });
+  assert.equal(healthDuringFlood.response.status, 200, healthDuringFlood.text);
+  assert.ok(Date.now() - healthStarted < 5_000, "health probe stalled during high-output process");
+  const floodOutput = await waitForExit(sessionA, floodJob.process_id);
+  assert.equal(floodOutput.running, false);
+  assert.ok(floodOutput.stdout.length <= 6_000, `read_output returned ${floodOutput.stdout.length} characters`);
+  assert.equal(floodOutput.stdout_truncated, true);
+  assert.match(floodOutput.stdout, /FLOOD_10000_/);
+
   const sessionB = await initialize();
   const scope = `smoke-exact-scope-${Date.now()}`;
   const claimA = await callTool(sessionA, "busy_claim", { actor: "smoke-actor-a", scope });
@@ -183,6 +208,7 @@ try {
   if (jobOne?.process_id) await callTool(sessionA, "kill_process", { process_id: jobOne.process_id }).catch(() => undefined);
   if (jobTwo?.process_id) await callTool(sessionA, "kill_process", { process_id: jobTwo.process_id }).catch(() => undefined);
   if (treeJob?.process_id) await callTool(sessionA, "kill_process", { process_id: treeJob.process_id }).catch(() => undefined);
+  if (floodJob?.process_id) await callTool(sessionA, "kill_process", { process_id: floodJob.process_id }).catch(() => undefined);
 }
 
 const listenerJson = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,OwningProcess | ConvertTo-Json -Compress"], { encoding: "utf8" }).trim();
@@ -200,4 +226,4 @@ const hasSerenaProcess = processList.some((process) => {
   return directBinary || (launcher && /\bserena\b/i.test(commandLine) && /\bstart-mcp-server\b/i.test(commandLine));
 });
 assert.ok(!hasSerenaProcess, "Serena process exists");
-console.log(`PASS mcp=initialized tools=${names.join(",")} background=immediate+read_while_running concurrency=two_jobs kill_tree=root+child_gone busy=cross_session_claim_list_release listener=${listenerJson} port9121=unused serena=absent`);
+console.log(`PASS mcp=standard-initialize tools=${names.join(",")} background=immediate+read_while_running concurrency=two_jobs high_output=bounded+health-responsive kill_tree=root+child_gone busy=cross_session_claim_list_release listener=${listenerJson} port9121=unused serena=absent`);
