@@ -14,6 +14,7 @@ const CODE_TTL_MS = 60_000;
 const REFRESH_REUSE_GRACE_MS = 120_000;
 const MAX_CLIENTS = 64;
 const SUPPORTED_SCOPES = new Set(["mcp", "offline_access"]);
+const UUID_CLIENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DISPOSABLE_CLIENT_NAMES = new Set([
   "busy-probe",
   "restart-proof",
@@ -208,6 +209,15 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     const out = requested.length ? requested : ["mcp"];
     if (out.some((scope) => !SUPPORTED_SCOPES.has(scope))) throw new InvalidScopeError("Unsupported scope");
     return [...new Set(out)];
+  }
+
+  recoverLegacyChatGptClient(clientId: string, redirectUri: string): boolean {
+    this.prune();
+    if (this.clients.has(clientId)) return false;
+    if (!UUID_CLIENT_ID.test(clientId) || !isChatGptRedirect(redirectUri)) return false;
+    this.clients.set(clientId, { client_id: clientId, client_id_issued_at: Math.floor(Date.now() / 1000), redirect_uris: [redirectUri], token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], client_name: "recovered-chatgpt-client" });
+    this.persist();
+    return true;
   }
 
   private getClient(clientId: string): OAuthClientInformationFull | undefined {
