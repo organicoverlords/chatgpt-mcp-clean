@@ -96,7 +96,15 @@ try {
   assert.ok(recoveredRefresh.access_token);
   assert.equal(await recovered.clientsStore.getClient("missing-client"), undefined);
 
-  console.log("PASS oauth_client_retention churn=96 dormant_persisted=true orphan_refresh_recovered=true secrets=not_printed");
+  const staleClientId = "123e4567-e89b-42d3-a456-426614174000";
+  assert.equal(recovered.recoverLegacyChatGptClient(staleClientId, "https://evil.example/oauth/callback"), false);
+  assert.equal(recovered.recoverLegacyChatGptClient("not-a-uuid", redirectUri), false);
+  assert.equal(recovered.recoverLegacyChatGptClient(staleClientId, redirectUri), true);
+  assert.deepEqual((await recovered.clientsStore.getClient(staleClientId))?.redirect_uris, [redirectUri]);
+  const recoveredAgain = new LocalOAuthProvider(resourceUrl, "owner@example.com", storePath);
+  assert.deepEqual((await recoveredAgain.clientsStore.getClient(staleClientId))?.redirect_uris, [redirectUri]);
+
+  console.log("PASS oauth_client_retention churn=96 dormant_persisted=true orphan_refresh_recovered=true stale_chatgpt_authorize_recovered=true secrets=not_printed");
 } finally {
   await rm(tempDir, { recursive: true, force: true });
 }

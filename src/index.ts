@@ -145,6 +145,11 @@ app.use("/authorize", (req, res, next) => {
     res.status(403).send("Owner authorization required");
     return;
   }
+  if (login === OWNER && req.method === "GET") {
+    const clientId = typeof req.query.client_id === "string" ? req.query.client_id : "";
+    const redirectUri = typeof req.query.redirect_uri === "string" ? req.query.redirect_uri : "";
+    if (clientId && redirectUri) oauth.recoverLegacyChatGptClient(clientId, redirectUri);
+  }
   next();
 });
 const oauthMetadata = {
