@@ -1,22 +1,25 @@
--client-recovery | 362 | 3.31 | 5,013.8 ms | 0 | 362 | 8,250 |
+# MCP transport generation evidence — 2026-08-25
+
+Snapshot: first 59,467,516 bytes of `.state/transport.jsonl`, SHA-256 `97884c18711be5e9f2fa1a612b9b4b6581300e1a9a718a05175eeb6156c7c8c5`.
+
+| Generation | Responses | read/start | read p95 | reads >=9s | byte coverage | max bytes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| foreground-era | 24,306 | 3.98 | 60.5 ms | 0 | 0 | n/a |
+| background-only | 63,369 | 1.82 | 41.5 ms | 25 | 0 | n/a |
+| bounded-wait-pre-byte-telemetry | 1,547 | 2.03 | 10,014.5 ms | 47 | 3 | 116 |
+| response-byte-telemetry | 6,329 | 1.46 | 10,013.6 ms | 39 | 6,329 | 13,012 |
+| stable-pinned-baseline | 329 | 6.38 | 3.6 ms | 0 | 329 | 6,838 |
+| oauth-retention | 515 | 6.50 | 3.2 ms | 0 | 515 | 6,838 |
+| stale-client-recovery | 362 | 3.31 | 5,013.8 ms | 0 | 362 | 8,250 |
 
 ## Findings
 
-The foreground generation contains all **1,880** observed `execute_command` calls. After the last observed `execute_command` completion at `2026-08-23T20:50:03.339Z`, the tool surface shifts to `start_process` plus bounded `read_output`. That is an observed runtime transition, not an inference from commit dates alone.
+The foreground generation contains all **1,880** observed `execute_command` calls. The last observed completion is `2026-08-23T20:50:03.339Z`; after that the tool surface shifts to `start_process` plus bounded `read_output`.
 
-The apparent Aug-25 "10 second latency" spike is dominated by intentional long polling. `read_output` explicitly permits `wait_ms` up to **10,000 ms**. The bounded-wait and response-byte generations have p95 values of 10,014.5 ms and 10,013.6 ms respectively, tightly matching that configured wait ceiling. Treat those calls as client-requested waiting unless separate evidence shows server processing delay.
+The Aug-25 ~10 second p95 cluster matches the configured `read_output.wait_ms <= 10,000` contract. Treat those calls primarily as intentional client long-poll waiting unless separate evidence proves server processing delay.
 
-The later stable pinned/OAuth generations are a counterexample to "high polling ratio means slow MCP": read/start rises to 6.38 and 6.50 while `read_output` p95 is only 3.6 ms and 3.2 ms. Polling amplification is therefore a workload/control-plane cost metric, not by itself a transport-latency defect.
+Later stable/OAuth generations falsify the simple claim that a high read/start ratio implies slow MCP: ratios reach 6.38 and 6.50 while read p95 is only 3.6 ms and 3.2 ms. Polling amplification is therefore a workload/control-plane cost metric, not by itself a transport-latency defect.
 
-Response-byte telemetry begins only in the later Aug-25 generation. Across the fixed snapshot, measured MCP tool responses are: `read_output` 591 responses, mean ~3,472 bytes, max **13,012** bytes; all other measured MCP tool responses are <=402 bytes. The 13,012-byte HTTP response is compatible with two independently capped 6,000-character stdout/stderr streams plus MCP/JSON framing; it does not show the per-stream 6,000-character cap was bypassed.
-The data rejects a simple "MCP got slower and caused the regression" explanation. It supports a multi-class model already documented on issue #8: transport defects, caller/workload amplification, and public/control-plane failures must be analyzed separately. High call volume and high read/start ratios can coexist with low server-side read latency.
+Response-byte telemetry is unavailable for older generations. In measured generations the largest HTTP response is 13,012 bytes, compatible with two separately capped 6,000-character stdout/stderr streams plus MCP/JSON framing; this does not prove a cap bypass or a 12 KB delivery failure.
 
-## Confidence / limitations
-
-`PROVEN`: tool counts, status counts, measured response bytes where present, observed last `execute_command`, runtime PID windows, and the 10-second `read_output` contract.
-
-`SUPPORTED`: the Aug-25 ~10-second cluster is primarily intentional long-poll waiting because its distribution matches the configured maximum and disappears in later generations without reducing read/start ratio.
-
-`NOT_PROVEN`: that polling amplification itself caused user-visible regression, that the growing JSONL file caused stalls, or that HTTP response size above 12 KB is a delivery failure. Older generations lack response-byte telemetry, so cross-generation byte comparisons remain unavailable.
-
-The companion behavioral/yield conclusions belong in `organicoverlords/regression-research#28`; this artifact intentionally limits itself to MCP transport/process evidence.
+`PROVEN`: counts, observed tool-surface transition, runtime PID windows, measured bytes where present, and the 10-second read contract. `SUPPORTED`: most Aug-25 ~10-second reads are intentional long polls. `NOT_PROVEN`: polling caused the user-visible regression, JSONL growth caused stalls, or >12 KB responses fail delivery.
