@@ -91,7 +91,7 @@ class BoundedCapture {
   // ceiling defaults to the transport cap. Receipts pass MAX_CAPTURE_CHARS because they
   // are written to disk, never sent over MCP, and are the only durable proof of what a
   // process produced when the caller's read is blocked or truncated.
-  tail(maxChars: number, ceiling: number = MAX_READ_CHARS): { text: string; truncated: boolean } {
+  tail(maxChars: number, ceiling: number = MAX_READ_CHARS): { text: string; truncated: boolean; dropped: number } {
     let remaining = Math.max(1, Math.min(maxChars, ceiling));
     const parts: string[] = [];
     for (let index = this.chunks.length - 1; index >= 0 && remaining > 0; index -= 1) {
@@ -100,7 +100,12 @@ class BoundedCapture {
       parts.push(part);
       remaining -= part.length;
     }
-    return { text: parts.reverse().join(""), truncated: this.truncated || this.length > maxChars };
+    const text = parts.reverse().join("");
+    // dropped counts the characters cut from the START, because this returns the tail.
+    // A caller that asked for the first N lines of a file gets the last slice of that
+    // output, so a bare boolean is not enough to notice the beginning is missing.
+    const dropped = Math.max(0, this.length - text.length);
+    return { text, truncated: this.truncated || this.length > maxChars, dropped };
   }
 }
 
@@ -523,8 +528,8 @@ export class ProcessManager {
       signal: state.signal ?? null,
       started_at: state.startedAt,
       finished_at: state.finishedAt ?? null,
-      ...(stdout.truncated ? { stdout_truncated: true } : {}),
-      ...(stderr.truncated ? { stderr_truncated: true } : {}),
+      ...(stdout.truncated ? { stdout_truncated: true, stdout_dropped_from_start: stdout.dropped } : {}),
+      ...(stderr.truncated ? { stderr_truncated: true, stderr_dropped_from_start: stderr.dropped } : {}),
       ...(state.error ? { error: state.error } : {}),
     };
   }
