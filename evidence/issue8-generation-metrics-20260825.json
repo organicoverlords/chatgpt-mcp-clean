@@ -1,0 +1,284 @@
+﻿[
+  {
+    "id": "foreground-era",
+    "start": "2026-08-23T00:00:00.000Z",
+    "end": "2026-08-23T20:50:03.340Z",
+    "boundary_evidence": "Ends immediately after the last observed execute_command completion in transport telemetry.",
+    "confidence": "high",
+    "responses": 24306,
+    "caller_count": 0,
+    "response_status_counts": {
+      "200": 21027,
+      "201": 93,
+      "202": 2787,
+      "302": 90,
+      "400": 52,
+      "401": 72,
+      "404": 42,
+      "405": 128,
+      "413": 12,
+      "429": 3
+    },
+    "tool_counts": {
+      "busy_claim": 168,
+      "busy_list": 275,
+      "busy_release": 123,
+      "execute_command": 1880,
+      "kill_process": 234,
+      "no_such_tool": 12,
+      "read_output": 1788,
+      "start_process": 449
+    },
+    "read_output_per_start_process": 3.98,
+    "read_output_duration_ms": {
+      "count": 1788,
+      "p50": 3.525,
+      "p95": 60.508,
+      "p99": 334.714,
+      "max": 2832.34,
+      "ge_9000ms": 0
+    },
+    "response_bytes": {
+      "coverage": 0,
+      "max": null
+    }
+  },
+  {
+    "id": "background-only",
+    "start": "2026-08-23T20:50:03.340Z",
+    "end": "2026-08-25T06:40:52.988Z",
+    "boundary_evidence": "Tool surface no longer records foreground execute_command; end is first request on post-observability-transition listener PID 8764.",
+    "confidence": "medium",
+    "responses": 63369,
+    "caller_count": 215,
+    "response_status_counts": {
+      "200": 51712,
+      "201": 63,
+      "202": 11430,
+      "302": 66,
+      "400": 15,
+      "401": 15,
+      "403": 1,
+      "404": 41,
+      "405": 22,
+      "406": 4
+    },
+    "tool_counts": {
+      "busy_claim": 344,
+      "busy_list": 457,
+      "busy_release": 207,
+      "kill_process": 497,
+      "read_output": 10676,
+      "start_process": 5852,
+      "view_image": 225
+    },
+    "read_output_per_start_process": 1.82,
+    "read_output_duration_ms": {
+      "count": 10676,
+      "p50": 3.493,
+      "p95": 41.526,
+      "p99": 835.107,
+      "max": 209574.022,
+      "ge_9000ms": 25
+    },
+    "response_bytes": {
+      "coverage": 0,
+      "max": null
+    }
+  },
+  {
+    "id": "bounded-wait-pre-byte-telemetry",
+    "start": "2026-08-25T06:40:52.988Z",
+    "end": "2026-08-25T08:06:26.273Z",
+    "boundary_evidence": "Runtime PID boundary after bounded read_output changes; response_bytes not yet consistently present.",
+    "confidence": "medium",
+    "responses": 1547,
+    "caller_count": 21,
+    "response_status_counts": {
+      "200": 1502,
+      "201": 13,
+      "202": 16,
+      "302": 13,
+      "405": 3
+    },
+    "tool_counts": {
+      "busy_claim": 11,
+      "busy_list": 11,
+      "busy_release": 8,
+      "kill_process": 17,
+      "read_output": 260,
+      "start_process": 128
+    },
+    "read_output_per_start_process": 2.03,
+    "read_output_duration_ms": {
+      "count": 260,
+      "p50": 2.927,
+      "p95": 10014.546,
+      "p99": 10018.851,
+      "max": 10022.788,
+      "ge_9000ms": 47
+    },
+    "response_bytes": {
+      "coverage": 0,
+      "max": null
+    }
+  },
+  {
+    "id": "response-byte-telemetry",
+    "start": "2026-08-25T08:06:26.273Z",
+    "end": "2026-08-25T16:24:12.595Z",
+    "boundary_evidence": "PID 13404 begins with response_bytes coverage on every response; ends at restored stable listener PID 22988.",
+    "confidence": "high",
+    "responses": 6327,
+    "caller_count": 20,
+    "response_status_counts": {
+      "200": 6290,
+      "201": 2,
+      "202": 22,
+      "401": 4,
+      "403": 2,
+      "404": 5,
+      "405": 2
+    },
+    "tool_counts": {
+      "busy_claim": 6,
+      "busy_list": 3,
+      "busy_release": 4,
+      "kill_process": 3,
+      "read_output": 333,
+      "start_process": 228
+    },
+    "read_output_per_start_process": 1.46,
+    "read_output_duration_ms": {
+      "count": 333,
+      "p50": 4.075,
+      "p95": 10013.566,
+      "p99": 10019.107,
+      "max": 10033.704,
+      "ge_9000ms": 39
+    },
+    "response_bytes": {
+      "coverage": 6327,
+      "max": 13012
+    }
+  },
+  {
+    "id": "stable-pinned-baseline",
+    "start": "2026-08-25T16:24:12.595Z",
+    "end": "2026-08-25T16:38:06.214Z",
+    "boundary_evidence": "Restored pinned-SDK listener PID 22988; ends at keep-alive replacement PID 23112.",
+    "confidence": "high",
+    "responses": 330,
+    "caller_count": 4,
+    "response_status_counts": {
+      "200": 315,
+      "201": 2,
+      "202": 4,
+      "302": 2,
+      "400": 1,
+      "404": 4,
+      "405": 2
+    },
+    "tool_counts": {
+      "busy_claim": 4,
+      "busy_list": 4,
+      "busy_release": 4,
+      "kill_process": 10,
+      "read_output": 51,
+      "start_process": 8
+    },
+    "read_output_per_start_process": 6.38,
+    "read_output_duration_ms": {
+      "count": 51,
+      "p50": 1.989,
+      "p95": 3.574,
+      "p99": 4.245,
+      "max": 4.613,
+      "ge_9000ms": 0
+    },
+    "response_bytes": {
+      "coverage": 330,
+      "max": 6838
+    }
+  },
+  {
+    "id": "oauth-retention",
+    "start": "2026-08-25T16:38:06.214Z",
+    "end": "2026-08-25T16:59:39.354Z",
+    "boundary_evidence": "Keep-alive replacement PID 23112 serving fd6fa36; ends at auth-recovery deployment.",
+    "confidence": "high",
+    "responses": 514,
+    "caller_count": 5,
+    "response_status_counts": {
+      "200": 486,
+      "201": 3,
+      "202": 6,
+      "302": 3,
+      "400": 3,
+      "401": 1,
+      "404": 9,
+      "405": 3
+    },
+    "tool_counts": {
+      "busy_claim": 6,
+      "busy_list": 6,
+      "busy_release": 6,
+      "kill_process": 15,
+      "read_output": 78,
+      "start_process": 12
+    },
+    "read_output_per_start_process": 6.5,
+    "read_output_duration_ms": {
+      "count": 78,
+      "p50": 2.163,
+      "p95": 3.233,
+      "p99": 3.842,
+      "max": 3.986,
+      "ge_9000ms": 0
+    },
+    "response_bytes": {
+      "coverage": 514,
+      "max": 6838
+    }
+  },
+  {
+    "id": "stale-client-recovery",
+    "start": "2026-08-25T16:59:39.354Z",
+    "end": "2026-08-25T20:12:21.630Z",
+    "boundary_evidence": "Listener PID 5560 serving 6e69add; upper bound is the fixed evidence snapshot timestamp.",
+    "confidence": "high",
+    "responses": 362,
+    "caller_count": 13,
+    "response_status_counts": {
+      "200": 344,
+      "201": 3,
+      "202": 5,
+      "302": 4,
+      "401": 1,
+      "403": 1,
+      "404": 1,
+      "405": 3
+    },
+    "tool_counts": {
+      "busy_claim": 7,
+      "busy_list": 6,
+      "busy_release": 5,
+      "kill_process": 14,
+      "read_output": 129,
+      "start_process": 39
+    },
+    "read_output_per_start_process": 3.31,
+    "read_output_duration_ms": {
+      "count": 129,
+      "p50": 2.894,
+      "p95": 5013.764,
+      "p99": 5020.989,
+      "max": 5022.97,
+      "ge_9000ms": 0
+    },
+    "response_bytes": {
+      "coverage": 362,
+      "max": 8250
+    }
+  }
+]
