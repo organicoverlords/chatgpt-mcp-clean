@@ -41,6 +41,7 @@ async function issueTokens(provider, client) {
 try {
   const provider = new LocalOAuthProvider(resourceUrl, "owner@example.com", storePath);
   const retained = await provider.clientsStore.registerClient(metadata("retained-client"));
+  const dormant = await provider.clientsStore.registerClient(metadata("dormant-chatgpt-client"));
   const opencode = await provider.clientsStore.registerClient(metadata("opencode", "http://127.0.0.1:19876/callback"));
   const traycer = await provider.clientsStore.registerClient(metadata("traycer", "https://platform.traycer.ai/oauth/callback"));
   const traycerConfidential = await provider.clientsStore.registerClient({
@@ -71,12 +72,14 @@ try {
   }
 
   assert.equal((await provider.clientsStore.getClient(retained.client_id))?.client_id, retained.client_id);
+  assert.equal((await provider.clientsStore.getClient(dormant.client_id))?.client_id, dormant.client_id);
   const compacted = JSON.parse(await readFile(storePath, "utf8"));
-  assert.equal(Object.keys(compacted.clients).length, 64);
+  assert.equal(compacted.clients[dormant.client_id].client_id, dormant.client_id);
 
   const reloaded = new LocalOAuthProvider(resourceUrl, "owner@example.com", storePath);
   const persistedClient = await reloaded.clientsStore.getClient(retained.client_id);
   assert.equal(persistedClient?.client_id, retained.client_id);
+  assert.equal((await reloaded.clientsStore.getClient(dormant.client_id))?.client_id, dormant.client_id);
   const refreshed = await reloaded.exchangeRefreshToken(persistedClient, tokens.refresh_token, ["mcp", "offline_access"], resourceUrl);
   assert.ok(refreshed.access_token);
   assert.equal(refreshed.refresh_token, tokens.refresh_token);
@@ -93,7 +96,7 @@ try {
   assert.ok(recoveredRefresh.access_token);
   assert.equal(await recovered.clientsStore.getClient("missing-client"), undefined);
 
-  console.log("PASS oauth_client_retention churn=96 persisted=true orphan_refresh_recovered=true secrets=not_printed");
+  console.log("PASS oauth_client_retention churn=96 dormant_persisted=true orphan_refresh_recovered=true secrets=not_printed");
 } finally {
   await rm(tempDir, { recursive: true, force: true });
 }
