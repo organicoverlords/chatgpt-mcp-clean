@@ -11,6 +11,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { callerId } from "./lib/caller-id.js";
 import { LocalOAuthProvider } from "./lib/local-oauth-provider.js";
 import { observeSocket, sessionFingerprint, setTelemetrySink, withTelemetryContext } from "./lib/transport-telemetry.js";
+import { createResponseByteCounter } from "./lib/response-bytes.js";
 import { createServer } from "./server.js";
 
 const PORT = Number(process.env.PORT || 3000);
@@ -102,15 +103,21 @@ app.use((req, res, next) => {
   const host = req.header("host") || "";
   const viaFunnel = host.toLowerCase() === publicOrigin.host.toLowerCase();
   let finished = false;
+  let responseBytes = 0;
+  const originalWrite = res.write.bind(res);
+  const originalEnd = res.end.bind(res);
+  const byteCounter = createResponseByteCounter((bytes) => { responseBytes = bytes; });
+  res.write = ((chunk: any, encoding?: any, callback?: any) => { byteCounter.count(chunk, encoding); return originalWrite(chunk, encoding, callback); }) as typeof res.write;
+  res.end = ((chunk?: any, encoding?: any, callback?: any) => { if (chunk != null) byteCounter.count(chunk, encoding); byteCounter.finish(); return originalEnd(chunk, encoding, callback); }) as typeof res.end;
   const durationMs = () => Number(process.hrtime.bigint() - startedAt) / 1_000_000;
   transportLog({ event: "request_start", request_id: requestId, caller_id: requestCallerId, connection_id: connectionId, session_id: sessionId, method: req.method, path: req.path, via_funnel: viaFunnel, remote_address: req.socket.remoteAddress || null });
   res.setHeader("x-shell-mcp-request-id", requestId);
   res.on("finish", () => {
     finished = true;
-    transportLog({ event: "response_finish", request_id: requestId, caller_id: requestCallerId, connection_id: connectionId, session_id: sessionId, method: req.method, path: req.path, via_funnel: viaFunnel, mcp_method: res.locals.mcpMethod || null, mcp_tool: res.locals.mcpTool || null, status: res.statusCode, duration_ms: Number(durationMs().toFixed(3)) });
+    transportLog({ event: "response_finish", request_id: requestId, caller_id: requestCallerId, connection_id: connectionId, session_id: sessionId, method: req.method, path: req.path, via_funnel: viaFunnel, mcp_method: res.locals.mcpMethod || null, mcp_tool: res.locals.mcpTool || null, status: res.statusCode, response_bytes: responseBytes, duration_ms: Number(durationMs().toFixed(3)) });
   });
   res.on("close", () => {
-    if (!finished) transportLog({ event: "response_close_early", request_id: requestId, caller_id: requestCallerId, connection_id: connectionId, session_id: sessionId, method: req.method, path: req.path, via_funnel: viaFunnel, mcp_method: res.locals.mcpMethod || null, mcp_tool: res.locals.mcpTool || null, status: res.statusCode, duration_ms: Number(durationMs().toFixed(3)) });
+    if (!finished) transportLog({ event: "response_close_early", request_id: requestId, caller_id: requestCallerId, connection_id: connectionId, session_id: sessionId, method: req.method, path: req.path, via_funnel: viaFunnel, mcp_method: res.locals.mcpMethod || null, mcp_tool: res.locals.mcpTool || null, status: res.statusCode, response_bytes: responseBytes, duration_ms: Number(durationMs().toFixed(3)) });
   });
   req.on("aborted", () => transportLog({ event: "request_aborted", request_id: requestId, caller_id: requestCallerId, connection_id: connectionId, session_id: sessionId, method: req.method, path: req.path, via_funnel: viaFunnel, mcp_method: res.locals.mcpMethod || null, mcp_tool: res.locals.mcpTool || null, duration_ms: Number(durationMs().toFixed(3)) }));
   req.once("error", (error) => transportLog({ event: "request_error", request_id: requestId, caller_id: requestCallerId, connection_id: connectionId, session_id: sessionId, method: req.method, path: req.path, via_funnel: viaFunnel, mcp_method: res.locals.mcpMethod || null, mcp_tool: res.locals.mcpTool || null, code: "code" in error ? error.code : null, duration_ms: Number(durationMs().toFixed(3)) }));
