@@ -1,0 +1,50 @@
+[
+  {
+    "id": "foreground-era",
+    "start": "2026-08-23T00:00:00.000Z",
+    "end": "2026-08-23T20:50:03.340Z",
+    "boundary_evidence": "Ends immediately after the last observed execute_command completion in transport telemetry.",
+    "confidence": "high"
+  },
+  {
+    "id": "background-only",
+    "start": "2026-08-23T20:50:03.340Z",
+    "end": "2026-08-25T06:40:52.988Z",
+    "boundary_evidence": "Tool surface no longer records foreground execute_command; end is first request on post-observability-transition listener PID 8764.",
+    "confidence": "medium"
+  },
+  {
+    "id": "bounded-wait-pre-byte-telemetry",
+    "start": "2026-08-25T06:40:52.988Z",
+    "end": "2026-08-25T08:06:26.273Z",
+    "boundary_evidence": "Runtime PID boundary after bounded read_output changes; response_bytes not yet consistently present.",
+    "confidence": "medium"
+  },
+  {
+    "id": "response-byte-telemetry",
+    "start": "2026-08-25T08:06:26.273Z",
+    "end": "2026-08-25T16:24:12.595Z",
+    "boundary_evidence": "PID 13404 begins with response_bytes coverage on every response; ends at restored stable listener PID 22988.",
+    "confidence": "high"
+  },  {
+    "id": "stable-pinned-baseline",
+    "start": "2026-08-25T16:24:12.595Z",
+    "end": "2026-08-25T16:38:06.214Z",
+    "boundary_evidence": "Restored pinned-SDK listener PID 22988; ends at keep-alive replacement PID 23112.",
+    "confidence": "high"
+  },
+  {
+    "id": "oauth-retention",
+    "start": "2026-08-25T16:38:06.214Z",
+    "end": "2026-08-25T16:59:39.354Z",
+    "boundary_evidence": "Keep-alive replacement PID 23112 serving fd6fa36; ends at auth-recovery deployment.",
+    "confidence": "high"
+  },
+  {
+    "id": "stale-client-recovery",
+    "start": "2026-08-25T16:59:39.354Z",
+    "end": "2026-08-25T20:12:21.630Z",
+    "boundary_evidence": "Listener PID 5560 serving 6e69add; upper bound is the fixed evidence snapshot timestamp.",
+    "confidence": "high"
+  }
+]
