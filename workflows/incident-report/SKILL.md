@@ -27,4 +27,10 @@ Create a replay-ready fixture whose scoring rule evaluates the very next substan
 
 Write SECONDARY only after capture is verified or evidenced exhaustion is recorded, using the same immutable incident ID. Store artifacts under the regression-research directory contract described in incident-contract.md.
 
+## MCP boundary classification
+
+For an MCP connection failure, connector disappearance, timeout, or apparent stall, record the exact local timestamp and classify only from the narrow matching transport window while MCP was the active control plane. First ask whether a matching `/mcp` request reached the local server boundary. If no request arrived, classify the incident as pre-dispatch/non-arrival only when the active-control-plane timing is proven; otherwise leave it `NOT_PROVEN`. If a request arrived, record whether it finished normally, closed early, aborted, or returned non-2xx and include request-local `response_bytes` when present. In the same window record localhost health and public/Funnel health plus any intentional revoke, listener restart, route switch, or process kill.
+
+Use the durable classes from `evidence/issue7-incident-classification-20260825.md`: A pre-dispatch/non-arrival, B local listener stall, C public/Funnel path failure, D server-arrived abnormal MCP response, and E intentional bounded wait. Do not collapse these into a generic "MCP died" diagnosis, and do not infer a response-size, absolute-path, polling, or log-growth cause without correlated boundary evidence.
+
 Repair directly supported defects and resume the original task. Do not delegate the incident writing/capture/verification, invent identifiers or evidence, or turn a failed route into a global blocker.
