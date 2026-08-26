@@ -105,6 +105,22 @@ check(r4[0]?.ok === false, "claim reported an error rather than succeeding", JSO
 check(r4[0]?.errorName === "BusyStoreLockError", "claim reported the named lock error", JSON.stringify(r4[0]));
 check(ms4 < 5000, `failed fast in ${ms4}ms (no hang)`, `took ${ms4}ms`);
 rmSync(`${STORE}.lock`, { force: true });
+
+// Test 5: arbitrary task scopes survive the five-minute stale window. Only scopes that
+// explicitly opt into session:/process: lifecycle ownership may be auto-pruned.
+console.log(`\ntest 5 - long-lived task claims persist; ephemeral lifecycle claims expire`);
+resetStore();
+const oldTimestamp = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+writeFileSync(STORE, JSON.stringify({ claims: [
+  { actor: "long-worker", scope: "task:long-running-integration", timestamp: oldTimestamp },
+  { actor: "old-session", scope: "session:gone-session", timestamp: oldTimestamp },
+  { actor: "old-process", scope: "process:00000000-0000-0000-0000-000000000000", timestamp: oldTimestamp },
+] }, null, 2) + "\n", "utf8");
+const durabilityStore = new BusyStore(() => false, STORE);
+const durableClaims = await durabilityStore.list();
+check(durableClaims.some((claim) => claim.scope === "task:long-running-integration"), "ordinary task claim survives >5 minutes", JSON.stringify(durableClaims));
+check(!durableClaims.some((claim) => claim.scope === "session:gone-session"), "dead session claim is pruned", JSON.stringify(durableClaims));
+check(!durableClaims.some((claim) => claim.scope.startsWith("process:")), "dead process claim is pruned", JSON.stringify(durableClaims));
 rmSync(STORE, { force: true });
 
 console.log(failures ? `\nCONCURRENCY TEST FAILED (${failures})` : "\nCONCURRENCY TEST PASSED");
