@@ -1,4 +1,9 @@
-param([int]$Port = 0, [switch]$SkipBuild)
+param(
+    [int]$Port = 3003,
+    [string]$BackendConfigPath = '',
+    [string]$ProcessRoutePath = '',
+    [switch]$SkipBuild
+)
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Root
@@ -11,8 +16,9 @@ if (Test-Path '.env') {
         Set-Item -Path "Env:$($name.Trim())" -Value $value.Trim().Trim("'").Trim('"')
     }
 }
-if ($Port -gt 0) { $env:PORT = [string]$Port }
-if ($Port -gt 0 -and $Port -ne 3000) { $env:MCP_BACKEND_MODE = '1' }
+$env:FRONT_DOOR_PORT = [string]$Port
+if ($BackendConfigPath) { $env:MCP_BACKEND_CONFIG_PATH = $BackendConfigPath }
+if ($ProcessRoutePath) { $env:MCP_PROCESS_ROUTE_PATH = $ProcessRoutePath }
 if (-not $SkipBuild) { & npm.cmd run build --silent; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
-& node.exe dist/index.js
+& node.exe dist/front-door.js
 exit $LASTEXITCODE

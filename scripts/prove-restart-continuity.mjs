@@ -1,13 +1,16 @@
 import "dotenv/config";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 const origin = (process.env.MCP_SMOKE_ORIGIN || process.env.MCP_PUBLIC_ORIGIN || "").replace(/\/$/, "");
 const ownerLogin = (process.env.TAILSCALE_OWNER_LOGIN || "").trim();
 const redirectUri = "https://chatgpt.com/connector/oauth/restart-proof";
 const resource = `${origin}/mcp`;
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const configPath = resolve(process.env.MCP_BACKEND_CONFIG_PATH || ".state/front-door/active-backend.json");
+const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 assert.ok(origin && ownerLogin, "MCP_PUBLIC_ORIGIN and TAILSCALE_OWNER_LOGIN are required");
 
 async function jsonFetch(url, options = {}) {
@@ -17,6 +20,12 @@ async function jsonFetch(url, options = {}) {
   try { body = text ? JSON.parse(text) : null; } catch { body = text; }
   return { response, body, text };
 }
+const frontDoorHealth = await jsonFetch(`${origin}/health`);
+assert.equal(frontDoorHealth.response.status, 200, frontDoorHealth.text);
+assert.equal(frontDoorHealth.body.name, "shell-mcp");
+assert.equal(frontDoorHealth.body.port, 3003, "public health is not served by the stable front door");
+const frontDoorPid = frontDoorHealth.body.pid;
+
 const registration = await jsonFetch(`${origin}/register`, {
   method: "POST",
   headers: { "content-type": "application/json" },
@@ -25,7 +34,7 @@ const registration = await jsonFetch(`${origin}/register`, {
 assert.equal(registration.response.status, 201, registration.text);
 const client = registration.body;
 const verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~abcd";
-const challenge = Buffer.from(createHash("sha256").update(verifier).digest()).toString("base64url");
+const challenge = createHash("sha256").update(verifier).digest("base64url");
 const authorizationUrl = new URL(`${origin}/authorize`);
 for (const [key, value] of Object.entries({ response_type: "code", client_id: client.client_id, redirect_uri: redirectUri, code_challenge: challenge, code_challenge_method: "S256", resource, scope: "mcp offline_access", state: "restart-proof" })) authorizationUrl.searchParams.set(key, value);
 const authorization = await fetch(authorizationUrl, { redirect: "manual", headers: { "tailscale-user-login": ownerLogin } });
@@ -40,64 +49,71 @@ const token = await jsonFetch(`${origin}/token`, {
 assert.equal(token.response.status, 200, token.text);
 const auth = `Bearer ${token.body.access_token}`;
 
-async function rpc(message, sessionId) {
-  const headers = { authorization: auth, "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-06-18" };
-  if (sessionId) headers["mcp-session-id"] = sessionId;
-  const result = await jsonFetch(`${origin}/mcp`, { method: "POST", headers, body: JSON.stringify(message) });
+async function rpc(message) {
+  const result = await jsonFetch(`${origin}/mcp`, { method: "POST", headers: { authorization: auth, "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-06-18" }, body: JSON.stringify(message) });
   assert.ok(result.response.ok, `${result.response.status}: ${result.text}`);
-  if (typeof result.body === "string" && result.response.headers.get("content-type")?.includes("text/event-stream")) {
-    const data = [...result.text.matchAll(/^data:\s*(.+)$/gm)].at(-1)?.[1];
-    assert.ok(data, result.text);
-    result.body = JSON.parse(data);
-  }
+  assert.equal(result.response.headers.has("x-shell-mcp-front-door"), false, "front door injected worker-visible transport metadata");
   return result;
 }
 function toolResult(result) {
   assert.ok(result.body?.result, result.text);
   return JSON.parse(result.body.result.content[0].text);
 }
-async function callTool(name, args, sessionId) {
-  return toolResult(await rpc({ jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name, arguments: args } }, sessionId));
+async function callTool(name, args) {
+  return toolResult(await rpc({ jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name, arguments: args } }));
 }
 
-const initialized = await rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "restart-proof", version: "1.0.0" } } });
-const sessionId = initialized.response.headers.get("mcp-session-id") || undefined;
-await rpc({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, sessionId);
-const before = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, sessionId);
+const before = await rpc({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
 const beforeTools = before.body.result.tools.map((tool) => tool.name).sort();
 assert.deepEqual(beforeTools, ["busy_claim", "busy_list", "busy_release", "kill_process", "read_output", "start_process", "view_image"]);
+const claim = await callTool("busy_claim", { actor: "restart-proof", scope: "mcp:backend-replacement-proof" });
+assert.equal(claim.ok, true);
+const started = await callTool("start_process", { command: "Write-Output 'BEFORE_BACKEND_SWITCH'; Start-Sleep -Seconds 20" });
+assert.ok(started.process_id && started.running);
 
-const pidText = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "$c=Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if($c){$c.OwningProcess}"], { encoding: "utf8" }).trim();
-const oldPid = Number(pidText);
-assert.ok(oldPid > 0, "no MCP listener to restart");
-const processInfo = JSON.parse(execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `$n=Get-CimInstance Win32_Process -Filter 'ProcessId=${oldPid}'; $p=Get-CimInstance Win32_Process -Filter \"ProcessId=$($n.ParentProcessId)\"; [pscustomobject]@{command=$n.CommandLine;parent=$p.CommandLine} | ConvertTo-Json -Compress`], { encoding: "utf8" }));
-assert.match(processInfo.command || "", /dist[\\/]index\.js/i, processInfo.command);
-assert.match(processInfo.parent || "", /ChatGPTMcpClean[\\/]start\.ps1/i, processInfo.parent);
-execFileSync("taskkill.exe", ["/PID", String(oldPid), "/T", "/F"], { encoding: "utf8" });
-
-let newPid = 0;
-for (let i = 0; i < 30; i++) {
-  await sleep(1000);
+const active = JSON.parse(readFileSync(configPath, "utf8").replace(/^\uFEFF/, ""));
+const candidatePort = active.port === 3001 ? 3002 : 3001;
+const candidateHealth = await jsonFetch(`http://127.0.0.1:${candidatePort}/health`);
+assert.equal(candidateHealth.response.status, 200, candidateHealth.text);
+assert.equal(candidateHealth.body.role, "backend");
+const switchProcess = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", resolve("scripts/switch-backend.ps1"), "-CandidatePort", String(candidatePort), "-HealthSamples", "100"], { cwd: resolve("."), stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+let switchStdout = "";
+let switchStderr = "";
+switchProcess.stdout.on("data", (chunk) => { switchStdout += chunk.toString(); });
+switchProcess.stderr.on("data", (chunk) => { switchStderr += chunk.toString(); });
+const healthFailures = [];
+while (switchProcess.exitCode === null) {
   try {
     const health = await jsonFetch(`${origin}/health`);
-    if (health.response.ok && health.body?.status === "ok") {
-      const pid = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "$c=Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if($c){$c.OwningProcess}"], { encoding: "utf8" }).trim();
-      newPid = Number(pid);
-      if (newPid && newPid !== oldPid) break;
-    }
-  } catch {}
+    if (!health.response.ok || health.body.pid !== frontDoorPid) healthFailures.push(`status=${health.response.status}`);
+  } catch (error) { healthFailures.push(error.message); }
+  await sleep(20);
 }
-assert.ok(newPid && newPid !== oldPid, `supervisor did not replace PID ${oldPid}`);
+assert.equal(switchProcess.exitCode, 0, switchStderr || switchStdout);
+const switchReceipt = JSON.parse(switchStdout.trim().replace(/^\uFEFF/, ""));
+assert.equal(switchReceipt.status, "PROVEN");
+assert.deepEqual(healthFailures, [], `public/front-door health disappeared: ${healthFailures.join("; ")}`);
 
-const staleHeader = "restart-proof-stale-session";
-const after = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/list", params: {} }, staleHeader);
+const after = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
 const afterTools = after.body.result.tools.map((tool) => tool.name).sort();
-assert.deepEqual(afterTools, beforeTools);
-const started = await callTool("start_process", { command: "Write-Output 'AFTER_RESTART'; Start-Sleep -Seconds 20" }, staleHeader);
-assert.ok(started.process_id && started.running);
-await sleep(500);
-const output = await callTool("read_output", { process_id: started.process_id }, staleHeader);
-assert.match(output.stdout, /AFTER_RESTART/);
-const killed = await callTool("kill_process", { process_id: started.process_id }, staleHeader);
+assert.deepEqual(afterTools, beforeTools, "worker-visible tool surface changed");
+const claims = await callTool("busy_list", {});
+assert.ok(claims.claims.some((item) => item.actor === "restart-proof" && item.scope === "mcp:backend-replacement-proof"));
+let output;
+for (let attempt = 0; attempt < 10; attempt++) {
+  output = await callTool("read_output", { process_id: started.process_id, wait_ms: 500 });
+  if (/BEFORE_BACKEND_SWITCH/.test(output.stdout || "")) break;
+}
+assert.equal(output.process_id, started.process_id);
+assert.match(output.stdout, /BEFORE_BACKEND_SWITCH/);
+const killed = await callTool("kill_process", { process_id: started.process_id });
 assert.equal(killed.killed, true);
-console.log(`PASS controlled_restart old_pid=${oldPid} new_pid=${newPid} session_id_header=${sessionId ? "present-before-restart" : "none-stateless"} stale_header_reused=true tools=${afterTools.join(",")} post_restart=start_process+read_output+kill_process`);
+const released = await callTool("busy_release", { actor: "restart-proof", scope: "mcp:backend-replacement-proof" });
+assert.equal(released.ok, true);
+const refreshed = await jsonFetch(`${origin}/token`, {
+  method: "POST",
+  headers: { "content-type": "application/x-www-form-urlencoded" },
+  body: new URLSearchParams({ grant_type: "refresh_token", client_id: client.client_id, refresh_token: token.body.refresh_token, resource, scope: "mcp offline_access" }),
+});
+assert.equal(refreshed.response.status, 200, refreshed.text);
+console.log(`PASS backend_restart_continuity front_door_pid=${frontDoorPid} old_backend_port=${active.port} new_backend_port=${candidatePort} health_failures=0 tools_unchanged=true oauth_preserved=true busy_preserved=true process_id_preserved=true old_backend_draining=true`);
