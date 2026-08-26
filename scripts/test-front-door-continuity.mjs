@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -9,6 +9,7 @@ const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)
 const temporary = mkdtempSync(join(tmpdir(), "shell-mcp-front-door-"));
 const configPath = join(temporary, "active-backend.json");
 const routesPath = join(temporary, "process-routes.json");
+const requestLogPath = join(temporary, "front-door-request.jsonl");
 const processId = "11111111-1111-4111-8111-111111111111";
 let releaseSlow;
 const slowGate = new Promise((resolveSlow) => { releaseSlow = resolveSlow; });
@@ -65,6 +66,23 @@ function writeTarget(port, generation) {
   writeFileSync(configPath, `${JSON.stringify({ version: 1, port, generation }, null, 2)}\n`, "utf8");
 }
 
+function requestLogEntries() {
+  try {
+    return readFileSync(requestLogPath, "utf8").trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  } catch {
+    return [];
+  }
+}
+
+async function waitForRequestLog(predicate) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const entries = requestLogEntries();
+    if (predicate(entries)) return entries;
+    await sleep(20);
+  }
+  throw new Error("front-door request telemetry did not appear");
+}
+
 async function waitForHealth(origin) {
   for (let attempt = 0; attempt < 100; attempt++) {
     try {
@@ -94,7 +112,7 @@ try {
   const frontDoorPort = await unusedPort();
   writeTarget(first.port, "blue-1");
   frontDoor = spawn(process.execPath, [resolve("dist/front-door.js")], {
-    env: { ...process.env, FRONT_DOOR_PORT: String(frontDoorPort), MCP_BACKEND_CONFIG_PATH: configPath, MCP_PROCESS_ROUTE_PATH: routesPath },
+    env: { ...process.env, FRONT_DOOR_PORT: String(frontDoorPort), MCP_BACKEND_CONFIG_PATH: configPath, MCP_PROCESS_ROUTE_PATH: routesPath, FRONT_DOOR_REQUEST_LOG_PATH: requestLogPath },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -121,6 +139,11 @@ try {
   const started = await toolCall(origin, "start_process", { command: "test" });
   assert.equal(started.status, 200);
   assert.equal(JSON.parse(JSON.parse(await started.text()).result.content[0].text).backend, "blue");
+  const requestEvidence = await waitForRequestLog((entries) => entries.some((entry) => entry.event === "front_backend_dispatch"));
+  assert.ok(requestEvidence.some((entry) => entry.event === "front_request_start" && entry.path === "/mcp"));
+  assert.ok(requestEvidence.some((entry) => entry.event === "front_backend_select" && entry.tool === "start_process" && entry.backend_port === first.port));
+  assert.ok(requestEvidence.some((entry) => entry.event === "front_backend_dispatch" && entry.backend_port === first.port));
+  assert.equal(readFileSync(requestLogPath, "utf8").includes('"command":"test"'), false, "front-door telemetry must not log tool arguments or request bodies");
 
   const slow = fetch(`${origin}/slow`).then((response) => response.text());
   await sleep(30);

@@ -4,6 +4,7 @@ All notable project changes are recorded here in Keep a Changelog 1.1.0 style.
 
 ## [Unreleased]
 
+- [2026-08-26] Added front-door request-boundary telemetry for `/mcp` arrival, backend selection/dispatch/response/close, without logging headers, request bodies, or tool arguments, so connector non-arrival can be distinguished from front-door forwarding failure (#7).
 - [2026-08-26] Added a transparent stable front door with blue/green loopback backends, process-generation pinning, shared OAuth/BUSY state, and off-path proof that backend replacement leaves health continuously available without changing the seven-tool worker contract (#7).
 - [2026-08-26] Kept ordinary task BUSY claims durable until explicit release, including across listener and tool-context recovery (#13).
 - [2026-08-25] Added server-boundary incident classification so pre-dispatch, local-listener, Funnel, server-response, and bounded-wait failures are not collapsed into one MCP failure class (#7).
