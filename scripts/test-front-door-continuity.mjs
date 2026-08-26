@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
+import { connect } from "node:net";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -95,6 +96,33 @@ async function waitForHealth(origin) {
   throw new Error("front door did not become healthy");
 }
 
+async function malformedConnectionCloses(port) {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, "127.0.0.1");
+    let settled = false;
+    const finish = (closed) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      resolve(closed);
+    };
+    const deadline = setTimeout(() => {
+      socket.destroy();
+      finish(false);
+    }, 1_000);
+    socket.once("close", () => finish(true));
+    socket.once("error", () => {});
+    socket.on("data", () => {});
+    socket.once("connect", () => {
+      socket.write("BROKEN REQUEST\r\n\r\n");
+    });
+    socket.setTimeout(2_000, () => {
+      socket.destroy();
+      reject(new Error("malformed connection probe timed out"));
+    });
+  });
+}
+
 async function toolCall(origin, name, args) {
   return fetch(`${origin}/mcp`, {
     method: "POST",
@@ -120,6 +148,7 @@ try {
   frontDoor.stderr.on("data", (chunk) => { frontDoorError += chunk.toString(); });
   const origin = `http://127.0.0.1:${frontDoorPort}`;
   await waitForHealth(origin);
+  assert.equal(await malformedConnectionCloses(frontDoorPort), true, "front door retained a malformed client socket after clientError");
 
   const healthFailures = [];
   let monitor = true;
