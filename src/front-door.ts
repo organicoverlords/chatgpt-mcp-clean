@@ -2,7 +2,7 @@
 import "dotenv/config";
 import { createServer, request as httpRequest } from "node:http";
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { createWriteStream, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 type BackendTarget = { version: 1; port: number; generation: string };
@@ -14,6 +14,7 @@ const HOST = process.env.FRONT_DOOR_HOST || "127.0.0.1";
 const PORT = Number(process.env.FRONT_DOOR_PORT || 3003);
 const BACKEND_CONFIG_PATH = resolve(process.env.MCP_BACKEND_CONFIG_PATH || ".state/front-door/active-backend.json");
 const PROCESS_ROUTES_PATH = resolve(process.env.MCP_PROCESS_ROUTE_PATH || ".state/front-door/process-routes.json");
+const REQUEST_LOG_PATH = resolve(process.env.FRONT_DOOR_REQUEST_LOG_PATH || ".state/front-door/request.jsonl");
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
 const MAX_CAPTURE_BYTES = 1024 * 1024;
 const PROCESS_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -21,6 +22,13 @@ const HOP_BY_HOP_HEADERS = new Set(["connection", "keep-alive", "proxy-authentic
 
 if (HOST !== "127.0.0.1" || !Number.isInteger(PORT) || PORT < 1024 || PORT > 65535) {
   throw new Error("The MCP front door must bind a non-privileged port on 127.0.0.1");
+}
+
+mkdirSync(dirname(REQUEST_LOG_PATH), { recursive: true });
+const requestLogStream = createWriteStream(REQUEST_LOG_PATH, { flags: "a", encoding: "utf8" });
+let requestSequence = 0;
+function frontDoorLog(event: string, fields: Record<string, unknown> = {}): void {
+  requestLogStream.write(`${JSON.stringify({ at: new Date().toISOString(), event, front_pid: process.pid, ...fields })}\n`);
 }
 
 function validBackend(value: unknown): value is BackendTarget {
@@ -160,11 +168,13 @@ async function targetGenerationMatches(target: BackendTarget): Promise<boolean> 
   });
 }
 
-async function proxyRequest(request: IncomingMessage, response: ServerResponse, body: Buffer, call: McpCall): Promise<void> {
+async function proxyRequest(request: IncomingMessage, response: ServerResponse, body: Buffer, call: McpCall, requestId?: string): Promise<void> {
   const active = backendTarget();
   const pinned = call.processId ? processRoutes.get(call.processId) : undefined;
   const target = pinned ? { version: 1 as const, port: pinned.port, generation: pinned.generation } : active;
+  if (requestId) frontDoorLog("front_backend_select", { request_id: requestId, tool: call.tool || null, process_id: call.processId || null, backend_port: target.port, backend_generation: target.generation, pinned: Boolean(pinned) });
   if (!await targetGenerationMatches(target)) {
+    if (requestId) frontDoorLog("front_backend_unavailable", { request_id: requestId, backend_port: target.port, backend_generation: target.generation });
     if (!response.destroyed && !response.headersSent) {
       response.statusCode = 503;
       response.setHeader("content-type", "application/json");
@@ -181,6 +191,7 @@ async function proxyRequest(request: IncomingMessage, response: ServerResponse, 
     settled = true;
     activeRequests -= 1;
   };
+  if (requestId) frontDoorLog("front_backend_dispatch", { request_id: requestId, backend_port: target.port, backend_generation: target.generation });
   const upstream = httpRequest({
     host: "127.0.0.1",
     port: target.port,
@@ -189,6 +200,7 @@ async function proxyRequest(request: IncomingMessage, response: ServerResponse, 
     headers: outgoingHeaders(request.headers, target),
     agent: false,
   }, (backendResponse) => {
+    if (requestId) frontDoorLog("front_backend_response", { request_id: requestId, backend_port: target.port, status: backendResponse.statusCode || null });
     if (!response.destroyed && !response.headersSent) {
       response.statusCode = backendResponse.statusCode || 502;
       response.statusMessage = backendResponse.statusMessage || response.statusMessage;
@@ -217,6 +229,7 @@ async function proxyRequest(request: IncomingMessage, response: ServerResponse, 
   });
   upstream.setTimeout(35_000, () => upstream.destroy(new Error("backend request timeout")));
   upstream.on("error", (error) => {
+    if (requestId) frontDoorLog("front_backend_error", { request_id: requestId, backend_port: target.port, error: error.message });
     if (!response.destroyed && !response.headersSent) {
       response.statusCode = 503;
       response.setHeader("content-type", "application/json");
@@ -243,7 +256,22 @@ async function readBody(request: IncomingMessage): Promise<Buffer> {
 }
 
 const server = createServer(async (request, response) => {
-  if (request.method === "GET" && request.url?.split("?", 1)[0] === "/health") {
+  const requestPath = request.url?.split("?", 1)[0] || "";
+  const requestId = requestPath === "/mcp" ? `${process.pid}-${Date.now()}-${++requestSequence}` : undefined;
+  const requestStartedAt = Date.now();
+  let requestFinished = false;
+  if (requestId) {
+    frontDoorLog("front_request_start", { request_id: requestId, method: request.method || null, path: requestPath });
+    request.once("aborted", () => frontDoorLog("front_request_aborted", { request_id: requestId }));
+    response.once("finish", () => {
+      requestFinished = true;
+      frontDoorLog("front_request_finish", { request_id: requestId, status: response.statusCode, duration_ms: Date.now() - requestStartedAt });
+    });
+    response.once("close", () => {
+      if (!requestFinished) frontDoorLog("front_request_close", { request_id: requestId, status: response.statusCode, duration_ms: Date.now() - requestStartedAt, writable_ended: response.writableEnded });
+    });
+  }
+  if (request.method === "GET" && requestPath === "/health") {
     response.statusCode = 200;
     response.setHeader("content-type", "application/json");
     response.setHeader("cache-control", "no-store");
@@ -252,7 +280,9 @@ const server = createServer(async (request, response) => {
   }
   try {
     const body = await readBody(request);
-    await proxyRequest(request, response, body, request.url?.split("?", 1)[0] === "/mcp" ? parseMcpCall(body) : {});
+    const call = requestPath === "/mcp" ? parseMcpCall(body) : {};
+    if (requestId) frontDoorLog("front_request_parsed", { request_id: requestId, tool: call.tool || null, process_id: call.processId || null });
+    await proxyRequest(request, response, body, call, requestId);
   } catch (error) {
     if (!response.headersSent) {
       response.statusCode = error instanceof Error && error.message === "request_too_large" ? 413 : 500;
@@ -261,6 +291,8 @@ const server = createServer(async (request, response) => {
     }
   }
 });
+
+server.on("clientError", (error) => frontDoorLog("front_client_error", { code: "code" in error ? error.code : null, error: error.message }));
 
 server.listen(PORT, HOST, () => {
   const target = backendTarget();
@@ -271,7 +303,7 @@ server.headersTimeout = 40_000;
 server.requestTimeout = 35_000;
 server.timeout = 0;
 const stop = () => {
-  server.close(() => process.exit(0));
+  server.close(() => requestLogStream.end(() => process.exit(0)));
   setTimeout(() => process.exit(1), 5_000).unref();
 };
 process.on("SIGINT", stop);
