@@ -148,22 +148,29 @@ function copyResponseHeaders(source: IncomingMessage, response: ServerResponse):
 let activeRequests = 0;
 let totalRequests = 0;
 
-async function targetGenerationMatches(target: BackendTarget): Promise<boolean> {
+type GenerationProbeResult = "match" | "unavailable" | "timeout";
+
+async function targetGenerationMatches(target: BackendTarget): Promise<GenerationProbeResult> {
   return new Promise((resolveMatch) => {
+    let timedOut = false;
     const probe = httpRequest({ host: "127.0.0.1", port: target.port, path: "/health", method: "GET", agent: false }, (probeResponse) => {
       const chunks: Buffer[] = [];
       probeResponse.on("data", (chunk: Buffer) => chunks.push(chunk));
       probeResponse.on("end", () => {
         try {
           const health = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { status?: unknown; name?: unknown; pid?: unknown; backend_generation?: unknown };
-          if (health.status !== "ok" || health.name !== "shell-mcp") return resolveMatch(false);
-          if (target.generation.startsWith("legacy-")) return resolveMatch(String(health.pid) === target.generation.slice("legacy-".length));
-          resolveMatch(health.backend_generation === target.generation);
-        } catch { resolveMatch(false); }
+          if (health.status !== "ok" || health.name !== "shell-mcp") return resolveMatch("unavailable");
+          if (target.generation.startsWith("legacy-")) return resolveMatch(String(health.pid) === target.generation.slice("legacy-".length) ? "match" : "unavailable");
+          resolveMatch(health.backend_generation === target.generation ? "match" : "unavailable");
+        } catch { resolveMatch("unavailable"); }
       });
     });
-    probe.setTimeout(1_000, () => probe.destroy());
-    probe.on("error", () => resolveMatch(false));
+    probe.setTimeout(1_000, () => {
+      timedOut = true;
+      resolveMatch("timeout");
+      probe.destroy();
+    });
+    probe.on("error", () => resolveMatch(timedOut ? "timeout" : "unavailable"));
     probe.end();
   });
 }
@@ -173,7 +180,8 @@ async function proxyRequest(request: IncomingMessage, response: ServerResponse, 
   const pinned = call.processId ? processRoutes.get(call.processId) : undefined;
   const target = pinned ? { version: 1 as const, port: pinned.port, generation: pinned.generation } : active;
   if (requestId) frontDoorLog("front_backend_select", { request_id: requestId, tool: call.tool || null, process_id: call.processId || null, backend_port: target.port, backend_generation: target.generation, pinned: Boolean(pinned) });
-  if (!await targetGenerationMatches(target)) {
+  const generationProbe = await targetGenerationMatches(target);
+  if (generationProbe === "unavailable") {
     if (requestId) frontDoorLog("front_backend_unavailable", { request_id: requestId, backend_port: target.port, backend_generation: target.generation });
     if (!response.destroyed && !response.headersSent) {
       response.statusCode = 503;
@@ -182,6 +190,9 @@ async function proxyRequest(request: IncomingMessage, response: ServerResponse, 
       response.end(JSON.stringify({ error: "Service unavailable" }));
     }
     return;
+  }
+  if (generationProbe === "timeout" && requestId) {
+    frontDoorLog("front_backend_probe_timeout", { request_id: requestId, backend_port: target.port, backend_generation: target.generation });
   }
   activeRequests += 1;
   totalRequests += 1;
