@@ -292,7 +292,17 @@ const server = createServer(async (request, response) => {
   }
 });
 
-server.on("clientError", (error) => frontDoorLog("front_client_error", { code: "code" in error ? error.code : null, error: error.message }));
+server.on("clientError", (error, socket) => {
+  frontDoorLog("front_client_error", { code: "code" in error ? error.code : null, error: error.message });
+  // Installing a clientError listener disables Node's default malformed-socket
+  // cleanup. Always close the socket here so a Funnel-side reset or parse error
+  // cannot leave a dead public connection retained by the stable front door.
+  if (socket.writable && !("code" in error && error.code === "ECONNRESET")) {
+    socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", () => socket.destroy());
+  } else {
+    socket.destroy();
+  }
+});
 
 server.listen(PORT, HOST, () => {
   const target = backendTarget();
