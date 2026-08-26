@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('FrontDoor','Backend','Legacy')][string]$Role = 'FrontDoor',
+    [ValidateSet('All','FrontDoor','Backend','Legacy')][string]$Role = 'All',
     [int]$Port = 0,
     [int]$PollSeconds = 15,
     [string]$BackendConfigPath = '',
@@ -11,6 +11,36 @@ $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Root
 if ($PollSeconds -lt 5) { throw 'PollSeconds must be >= 5' }
+if ($Role -eq 'All') {
+    $allMutex = New-Object System.Threading.Mutex($false,'Global\CodexLocalMcpKeepAlive-All')
+    $allHeld = $false
+    try {
+        try { $allHeld = $allMutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $allHeld = $true }
+        if (-not $allHeld) { exit 0 }
+        $definitions = @(
+            @{ Role='FrontDoor'; Port=3003 },
+            @{ Role='Backend'; Port=3001 },
+            @{ Role='Backend'; Port=3002 }
+        )
+        while ($true) {
+            foreach ($definition in $definitions) {
+                $rolePattern = '-Role\s+' + [regex]::Escape($definition.Role) + '(\s|$)'
+                $portPattern = '-Port\s+' + [regex]::Escape([string]$definition.Port) + '(\s|$)'
+                $supervisor = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+                    $_.Name -eq 'powershell.exe' -and $_.CommandLine -match 'ChatGPTMcpClean\\keepalive\.ps1' -and $_.CommandLine -match $rolePattern -and $_.CommandLine -match $portPattern
+                } | Select-Object -First 1
+                if (-not $supervisor) {
+                    Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $Root 'keepalive.ps1'),'-Role',$definition.Role,'-Port',[string]$definition.Port,'-PollSeconds',[string]$PollSeconds) -WorkingDirectory $Root -WindowStyle Hidden | Out-Null
+                }
+            }
+            Start-Sleep -Seconds $PollSeconds
+        }
+    } finally {
+        if ($allHeld) { $allMutex.ReleaseMutex() }
+        $allMutex.Dispose()
+    }
+    exit 0
+}
 if ($Port -le 0) { $Port = if ($Role -eq 'FrontDoor') { 3003 } elseif ($Role -eq 'Legacy') { 3000 } else { 3001 } }
 if ($Role -eq 'FrontDoor' -and $Port -ne 3003 -and -not $TestMode) { throw 'The public front door must own the stable 127.0.0.1:3003 endpoint outside explicit off-path tests' }
 if ($Role -eq 'Backend' -and $Port -eq 3000) { throw 'A replaceable backend must not own the public front-door port' }
@@ -28,7 +58,7 @@ $ExpectedRole = if ($Role -eq 'FrontDoor') { 'front-door' } elseif ($Role -eq 'L
 $Tailscale = 'C:\Program Files\Tailscale\tailscale.exe'
 if (-not $BackendConfigPath) { $BackendConfigPath = Join-Path $Root '.state\front-door\active-backend.json' }
 if (-not $ProcessRoutePath) { $ProcessRoutePath = Join-Path $Root '.state\front-door\process-routes.json' }
-$RoleKey = if ($Role -eq 'FrontDoor') { 'front-door' } elseif ($Role -eq 'Legacy') { 'legacy-3000' } else { "backend-$Port" }
+$RoleKey = if ($Role -eq 'FrontDoor') { if ($TestMode) { "front-door-test-$Port" } else { 'front-door' } } elseif ($Role -eq 'Legacy') { 'legacy-3000' } else { "backend-$Port" }
 if (-not $SupervisorStateRoot) { $SupervisorStateRoot = Join-Path $Root '.state\keepalive' }
 $State = Join-Path $SupervisorStateRoot $RoleKey
 New-Item -ItemType Directory -Force $State | Out-Null

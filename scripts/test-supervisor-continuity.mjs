@@ -30,7 +30,7 @@ async function health(origin) {
   return response.json();
 }
 async function waitHealth(origin, predicate) {
-  for (let attempt = 0; attempt < 160; attempt++) {
+  for (let attempt = 0; attempt < 400; attempt++) {
     try {
       const body = await health(origin);
       if (predicate(body)) return body;

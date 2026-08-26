@@ -13,6 +13,7 @@ This repository serves one native MCP contract through a stable front door at `1
 - `read_output` is capped at 6,000 characters per stream and marks truncated output; do not print base64, raw binary, or oversized stdout.
 - Each live tool result and transport record includes a short pseudonymous `caller_id`; raw authentication values are never logged or returned.
 - Tailscale Funnel forwards the public HTTPS origin to the stable front door at `http://127.0.0.1:3003`. Backend deployment changes only the front door's atomic active-backend file; it never retargets Funnel and never restarts the public front door.
+- A no-argument `keepalive.ps1` is the durable top-level supervisor used by legacy scheduled-task actions. It keeps independent FrontDoor/Backend supervisors present for ports 3003, 3001, and 3002; backend supervision never owns or recycles the front door.
 - Keep the server bound to loopback only. Do not add files, Git, project activation, workspace scanning, skills, routing, orchestration, or scheduler features.
 - `.env` and `.state` remain untracked. Never print or commit OAuth credentials.
 - Validate with `npm test` before deployment and verify the live `/mcp` handshake and exact tool list.

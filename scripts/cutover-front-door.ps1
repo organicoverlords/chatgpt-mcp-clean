@@ -52,7 +52,7 @@ if (-not $legacyPid -or [int]$legacy.pid -ne $legacyPid) { throw 'legacy health 
 $legacyProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$legacyPid"
 if (-not $legacyProcess -or $legacyProcess.CommandLine -notmatch 'dist[\\/]index\.js') { throw 'legacy listener is not the expected Node MCP server' }
 if ([int]$legacy.active_requests -ne 0) { throw 'legacy backend has active requests; retry the cutover at an idle boundary' }
-if (PortOwner $StableFrontDoorPort) { throw "stable front-door port $StableFrontDoorPort is already occupied" }
+if ((PortOwner $StableFrontDoorPort) -and -not (WaitHealth $StableFrontDoorPort '' 2)) { throw "stable front-door port $StableFrontDoorPort is occupied by an unexpected listener" }
 
 $generation = "legacy-$legacyPid"
 WriteJsonNoBom $Config ([ordered]@{version=1;port=$LegacyBackendPort;generation=$generation})
@@ -60,26 +60,41 @@ if (-not (Test-Path $Routes)) { WriteJsonNoBom $Routes ([ordered]@{version=1;rou
 
 $backendSupervisors = @()
 foreach ($candidatePort in $CandidatePorts) {
-    if (PortOwner $candidatePort) { throw "candidate backend port $candidatePort is already occupied" }
-    $stdout = Join-Path $State "candidate-$candidatePort-supervisor.stdout.log"
-    $stderr = Join-Path $State "candidate-$candidatePort-supervisor.stderr.log"
-    $backendSupervisors += Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $Root 'keepalive.ps1'),'-Role','Backend','-Port',[string]$candidatePort) -WorkingDirectory $Root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
-    if (-not (WaitHealth $candidatePort 'backend' 30)) { throw "candidate backend $candidatePort did not become healthy" }
+    if (-not (WaitHealth $candidatePort 'backend' 2)) {
+        if (PortOwner $candidatePort) { throw "candidate backend port $candidatePort is occupied by an unexpected listener" }
+        $stdout = Join-Path $State "candidate-$candidatePort-supervisor.stdout.log"
+        $stderr = Join-Path $State "candidate-$candidatePort-supervisor.stderr.log"
+        $backendSupervisors += Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $Root 'keepalive.ps1'),'-Role','Backend','-Port',[string]$candidatePort) -WorkingDirectory $Root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+        if (-not (WaitHealth $candidatePort 'backend' 30)) { throw "candidate backend $candidatePort did not become healthy" }
+    }
 }
 
-$frontStdout = Join-Path $State 'front-door.stdout.log'
-$frontStderr = Join-Path $State 'front-door.stderr.log'
-Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $Root 'start-front-door.ps1'),'-SkipBuild','-Port',[string]$StableFrontDoorPort,'-BackendConfigPath',$Config,'-ProcessRoutePath',$Routes) -WorkingDirectory $Root -WindowStyle Hidden -RedirectStandardOutput $frontStdout -RedirectStandardError $frontStderr | Out-Null
-$front = WaitHealth $StableFrontDoorPort '' 30
+$front = WaitHealth $StableFrontDoorPort '' 2
+if (-not $front) {
+    $frontStdout = Join-Path $State 'front-door.stdout.log'
+    $frontStderr = Join-Path $State 'front-door.stderr.log'
+    Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $Root 'start-front-door.ps1'),'-SkipBuild','-Port',[string]$StableFrontDoorPort,'-BackendConfigPath',$Config,'-ProcessRoutePath',$Routes) -WorkingDirectory $Root -WindowStyle Hidden -RedirectStandardOutput $frontStdout -RedirectStandardError $frontStderr | Out-Null
+    $front = WaitHealth $StableFrontDoorPort '' 30
+}
 if (-not $front) { throw 'stable front door did not become healthy off the public path' }
 $frontPid = [int]$front.pid
 $frontProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$frontPid"
 if (-not $frontProcess -or $frontProcess.CommandLine -notmatch 'dist[\\/]front-door\.js') { throw 'stable port is not owned by the front-door process' }
 
-$task = Get-ScheduledTask -TaskName $LegacySupervisorTask -ErrorAction Stop
-$legacyAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Role Legacy -Port 3000' -f (Join-Path $Root 'keepalive.ps1')) -WorkingDirectory $Root
-Set-ScheduledTask -TaskName $LegacySupervisorTask -Action $legacyAction | Out-Null
-Stop-ScheduledTask -TaskName $LegacySupervisorTask -ErrorAction SilentlyContinue
+$supervisorStopMode = 'scheduled-task'
+try {
+    $task = Get-ScheduledTask -TaskName $LegacySupervisorTask -ErrorAction Stop
+    $legacyAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Role Legacy -Port 3000' -f (Join-Path $Root 'keepalive.ps1')) -WorkingDirectory $Root
+    Set-ScheduledTask -TaskName $LegacySupervisorTask -Action $legacyAction -ErrorAction Stop | Out-Null
+    Stop-ScheduledTask -TaskName $LegacySupervisorTask -ErrorAction Stop
+} catch {
+    $supervisorStopMode = 'verified-process'
+    $legacySupervisors = @(Get-CimInstance Win32_Process | Where-Object {
+        $_.Name -eq 'powershell.exe' -and $_.CommandLine -match 'ChatGPTMcpClean\\keepalive\.ps1' -and $_.CommandLine -notmatch '-Role'
+    })
+    if ($legacySupervisors.Count -ne 1) { throw "could not uniquely identify the legacy supervisor after scheduled-task access failed (count=$($legacySupervisors.Count))" }
+    Stop-Process -Id $legacySupervisors[0].ProcessId -Force -ErrorAction Stop
+}
 Start-Sleep -Milliseconds 500
 if ((PortOwner $LegacyBackendPort) -ne $legacyPid -or -not (Health $LegacyBackendPort)) { throw 'stopping the legacy supervisor changed the legacy listener; Funnel was not touched' }
 
@@ -96,13 +111,19 @@ $monitorResult = Get-Content -LiteralPath $monitorReceipt -Raw | ConvertFrom-Jso
 $public = try { Invoke-RestMethod ($Origin.TrimEnd('/')+'/health') -TimeoutSec 5 } catch { $null }
 if ($monitorResult.failure_count -ne 0 -or -not $public -or [int]$public.pid -ne $frontPid) {
     & $Tailscale funnel --yes --bg --https=443 "http://127.0.0.1:$LegacyBackendPort" | Out-Null
-    Start-ScheduledTask -TaskName $LegacySupervisorTask -ErrorAction SilentlyContinue
+    Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $Root 'keepalive.ps1'),'-Role','Legacy','-Port','3000') -WorkingDirectory $Root -WindowStyle Hidden | Out-Null
     throw "public cutover continuity failed; Funnel rolled back to legacy backend (monitor failures=$($monitorResult.failure_count))"
 }
 
-& (Join-Path $Root 'scripts\install-keepalive-task.ps1') | Out-Null
-foreach ($supervisor in $backendSupervisors) { Stop-Process -Id $supervisor.Id -Force -ErrorAction SilentlyContinue }
-foreach ($taskName in @('ShellMcpKeepAlive','ShellMcpBackend3001','ShellMcpBackend3002')) { Start-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue }
+$scheduledTasksUpdated = $false
+try {
+    & (Join-Path $Root 'scripts\install-keepalive-task.ps1') | Out-Null
+    foreach ($supervisor in $backendSupervisors) { Stop-Process -Id $supervisor.Id -Force -ErrorAction SilentlyContinue }
+    foreach ($taskName in @('ShellMcpKeepAlive','ShellMcpBackend3001','ShellMcpBackend3002')) { Start-ScheduledTask -TaskName $taskName -ErrorAction Stop }
+    $scheduledTasksUpdated = $true
+} catch {
+    Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $Root 'keepalive.ps1'),'-Role','FrontDoor','-Port',[string]$StableFrontDoorPort) -WorkingDirectory $Root -WindowStyle Hidden | Out-Null
+}
 Start-Sleep -Seconds 1
 
 $receipt = [ordered]@{
@@ -122,6 +143,8 @@ $receipt = [ordered]@{
     max_public_health_latency_ms=[double]$monitorResult.max_latency_ms
     legacy_listener_recycled=$false
     funnel_tcp_listener_restarted=$false
+    legacy_supervisor_stop_mode=$supervisorStopMode
+    scheduled_tasks_updated=$scheduledTasksUpdated
 }
 $receiptPath = Join-Path $State "cutover-$stamp.json"
 WriteJsonNoBom $receiptPath $receipt
