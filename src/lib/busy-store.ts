@@ -34,6 +34,10 @@ function isLockContentionError(error: unknown): boolean {
   return code === "EEXIST" || code === "EACCES" || code === "EPERM";
 }
 
+function isAutoPrunableScope(scope: string): boolean {
+  return scope.startsWith("session:") || scope.startsWith("process:");
+}
+
 export class BusyStore {
   private readonly claims = new Map<string, BusyClaim>();
   private readonly storePath: string;
@@ -187,7 +191,10 @@ export class BusyStore {
     const now = Date.now();
     let changed = false;
     for (const [scope, claim] of this.claims) {
-      if (now - Date.parse(claim.timestamp) > STALE_AFTER_MS && !this.hasLiveReference(scope)) {
+      // Ordinary task scopes are durable coordination state and must survive long runs,
+      // tool-context rollovers, and listener reconnects until their actor explicitly releases
+      // them. Only scopes that opt into lifecycle ownership with session:/process: may expire.
+      if (isAutoPrunableScope(scope) && now - Date.parse(claim.timestamp) > STALE_AFTER_MS && !this.hasLiveReference(scope)) {
         this.claims.delete(scope);
         changed = true;
       }
