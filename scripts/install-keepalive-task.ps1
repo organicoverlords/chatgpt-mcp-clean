@@ -1,46 +1,29 @@
-# Registers the shell-mcp supervisor as a logon Scheduled Task.
-#
-# Without this the supervisor is only ever a plain hidden PowerShell process: it dies
-# with whatever shell launched it and never starts at logon, so nothing restarts the
-# restarter. This task is the top of the chain.
-#
-# Deliberately NOT elevated. The server binds 127.0.0.1:3000 and needs no admin, and an
-# elevated listener reports a blank CommandLine to a non-elevated WMI query, which is
-# what previously made keepalive.ps1 misclassify its own server as foreign and refuse to
-# reclaim the port.
-#
-# Re-runnable: an existing task with this name is replaced.
-
+# Registers independent supervisors for the stable front door and two backend slots.
+# Re-running updates task definitions in place. It does not stop running tasks or listeners.
 param(
-    [string]$TaskName = 'ShellMcpKeepAlive',
+    [string]$FrontDoorTaskName = 'ShellMcpKeepAlive',
+    [string]$BlueTaskName = 'ShellMcpBackend3001',
+    [string]$GreenTaskName = 'ShellMcpBackend3002',
     [switch]$Uninstall
 )
-
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $Script = Join-Path $Root 'keepalive.ps1'
+$taskNames = @($FrontDoorTaskName,$BlueTaskName,$GreenTaskName)
 
 if ($Uninstall) {
-    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-        Write-Output "removed scheduled task '$TaskName'"
-    } else {
-        Write-Output "no scheduled task '$TaskName' to remove"
+    foreach ($taskName in $taskNames) {
+        if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+            Write-Output "removed scheduled task '$taskName'"
+        }
     }
     return
 }
-
 if (-not (Test-Path $Script)) { throw "supervisor not found: $Script" }
 
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-    -Argument ('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $Script) `
-    -WorkingDirectory $Root
-
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-
-# Run as the logged-on user, non-elevated, no stored password.
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
-
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
@@ -51,15 +34,15 @@ $settings = New-ScheduledTaskSettingsSet `
     -RestartInterval (New-TimeSpan -Minutes 1) `
     -ExecutionTimeLimit ([TimeSpan]::Zero)
 
-if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+$definitions = @(
+    @{ Name=$FrontDoorTaskName; Arguments='-Role FrontDoor -Port 3003'; Description='Keeps the stable shell-mcp front door on 127.0.0.1:3003 alive and preserves the Tailscale Funnel target.' },
+    @{ Name=$BlueTaskName; Arguments='-Role Backend -Port 3001'; Description='Keeps the blue replaceable shell-mcp backend on 127.0.0.1:3001 alive.' },
+    @{ Name=$GreenTaskName; Arguments='-Role Backend -Port 3002'; Description='Keeps the green replaceable shell-mcp backend on 127.0.0.1:3002 alive.' }
+)
+foreach ($definition in $definitions) {
+    $arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" {1}' -f $Script,$definition.Arguments
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments -WorkingDirectory $Root
+    Register-ScheduledTask -TaskName $definition.Name -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description $definition.Description -Force | Out-Null
+    Write-Output "registered scheduled task '$($definition.Name)' ($($definition.Arguments))"
 }
-
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
-    -Principal $principal -Settings $settings `
-    -Description 'Keeps the shell-mcp server (127.0.0.1:3000) running and its Tailscale Funnel configured.' | Out-Null
-
-Write-Output "registered scheduled task '$TaskName'"
-Write-Output "  runs: powershell.exe -File $Script"
-Write-Output "  as:   $env:USERDOMAIN\$env:USERNAME (Limited, interactive logon)"
-Write-Output "  when: at logon, restarts up to 3x at 1-minute intervals, no time limit"
+Write-Output 'task definitions updated; no running task or listener was stopped or started'

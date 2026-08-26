@@ -20,7 +20,12 @@ const ORIGIN = (process.env.MCP_PUBLIC_ORIGIN || "").trim();
 const OWNER = (process.env.TAILSCALE_OWNER_LOGIN || "").trim().toLowerCase();
 const STORE = process.env.MCP_OAUTH_STORE_PATH || ".state/oauth.json";
 
-if (HOST !== "127.0.0.1" || PORT !== 3000) throw new Error("This server is fixed to 127.0.0.1:3000");
+const backendMode = process.env.MCP_BACKEND_MODE === "1";
+const frontDoorHost = (process.env.MCP_FRONT_DOOR_HOST || "127.0.0.1:3003").toLowerCase();
+const backendGeneration = backendMode ? (process.env.MCP_BACKEND_GENERATION || `backend-${PORT}-${process.pid}-${Date.now()}`) : undefined;
+if (HOST !== "127.0.0.1") throw new Error("This server is fixed to loopback");
+if (!Number.isInteger(PORT) || PORT < 1024 || PORT > 65535) throw new Error("PORT must be a non-privileged TCP port");
+if (PORT !== 3000 && !backendMode) throw new Error("Alternate loopback ports require MCP_BACKEND_MODE=1");
 if (!ORIGIN || !OWNER) throw new Error("MCP_PUBLIC_ORIGIN and TAILSCALE_OWNER_LOGIN are required");
 
 const publicOrigin = new URL(ORIGIN);
@@ -57,7 +62,7 @@ async function handleStateless(req: Request, res: Response, body: unknown): Prom
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
-    allowedHosts: ["127.0.0.1:3000", "localhost:3000", publicOrigin.host],
+    allowedHosts: [`127.0.0.1:${PORT}`, `localhost:${PORT}`, frontDoorHost, publicOrigin.host],
     enableDnsRebindingProtection: true,
   });
   let cleaned = false;
@@ -171,7 +176,7 @@ app.get("/.well-known/openid-configuration", (_req, res) => res.json(oauthMetada
 app.get("/.well-known/oauth-authorization-server/mcp", (_req, res) => res.json(oauthMetadata));
 app.use(mcpAuthRouter({ provider: oauth, issuerUrl: publicOrigin, resourceServerUrl: resource, scopesSupported: ["mcp", "offline_access"], resourceName: "Shell MCP", clientRegistrationOptions: { rateLimit: { windowMs: 60 * 60 * 1000, max: 300 } } }));
 
-const allowedMcpHosts = new Set(["127.0.0.1:3000", "localhost:3000", publicOrigin.host.toLowerCase()]);
+const allowedMcpHosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, frontDoorHost, publicOrigin.host.toLowerCase()]);
 app.use("/mcp", (req, res, next) => {
   const host = (req.header("host") || "").toLowerCase();
   if (!allowedMcpHosts.has(host)) {
@@ -183,7 +188,7 @@ app.use("/mcp", (req, res, next) => {
 app.post("/mcp", bearer, handleMcp);
 app.get("/mcp", bearer, (_req, res) => res.status(405).set("Allow", "POST").send("Method not allowed."));
 app.delete("/mcp", bearer, (_req, res) => res.status(405).set("Allow", "POST").send("Method not allowed."));
-app.get("/health", (_req, res) => res.json({ status: "ok", name: "shell-mcp", host: HOST, port: PORT, pid: process.pid, active_requests: activeRequests, total_requests: totalRequests }));
+app.get("/health", (_req, res) => res.json({ status: "ok", name: "shell-mcp", role: backendMode ? "backend" : "direct", ...(backendGeneration ? { backend_generation: backendGeneration } : {}), host: HOST, port: PORT, pid: process.pid, active_requests: activeRequests, total_requests: totalRequests }));
 
 const httpServer = app.listen(PORT, HOST, () => console.error(`shell-mcp listening on http://${HOST}:${PORT}/mcp`));
 httpServer.on("connection", (socket) => { observeSocket(socket); });

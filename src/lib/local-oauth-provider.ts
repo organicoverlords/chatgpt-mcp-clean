@@ -90,6 +90,7 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     return {
       getClient: (clientId) => this.getClient(clientId),
       registerClient: async (raw) => {
+        this.load();
         const client = raw as OAuthClientInformationFull;
         const requestedAuthMethod = client.token_endpoint_auth_method || "none";
         if (requestedAuthMethod !== "none" && requestedAuthMethod !== "client_secret_post" && requestedAuthMethod !== "client_secret_basic") throw new InvalidClientMetadataError("Unsupported token endpoint authentication method");
@@ -146,9 +147,13 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     if (redirectUri && redirectUri !== rec.redirectUri) throw new InvalidGrantError("redirect_uri mismatch");
     if (resource && canonical(resource) !== rec.resource) throw new InvalidTargetError("resource mismatch");
     this.codes.delete(code);
+    // Another backend generation may have written durable registrations or
+    // tokens while this authorization code stayed local to the active backend.
+    this.load();
     return this.issuePair(client.client_id, rec.scopes, rec.resource);
   }
   async exchangeRefreshToken(client: OAuthClientInformationFull, refreshToken: string, scopes?: string[], resource?: URL): Promise<OAuthTokens> {
+    this.load();
     this.prune();
     const key = digest(refreshToken);
     const rec = this.refresh.get(key);
@@ -172,6 +177,7 @@ export class LocalOAuthProvider implements OAuthServerProvider {
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
+    this.load();
     this.prune();
     const rec = this.access.get(digest(token));
     if (!rec || rec.expiresAt <= Date.now()) throw new InvalidTokenError("Invalid or expired access token");
@@ -186,6 +192,7 @@ export class LocalOAuthProvider implements OAuthServerProvider {
   }
 
   async revokeToken(_client: OAuthClientInformationFull, request: OAuthTokenRevocationRequest): Promise<void> {
+    this.load();
     const key = digest(request.token);
     this.access.delete(key);
     this.refresh.delete(key);
@@ -212,6 +219,7 @@ export class LocalOAuthProvider implements OAuthServerProvider {
   }
 
   recoverLegacyChatGptClient(clientId: string, redirectUri: string): boolean {
+    this.load();
     this.prune();
     if (this.clients.has(clientId)) return false;
     if (!UUID_CLIENT_ID.test(clientId) || !isChatGptRedirect(redirectUri)) return false;
@@ -221,6 +229,7 @@ export class LocalOAuthProvider implements OAuthServerProvider {
   }
 
   private getClient(clientId: string): OAuthClientInformationFull | undefined {
+    this.load();
     this.prune();
     const registered = this.clients.get(clientId);
     if (registered) return registered;
@@ -285,14 +294,19 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     try {
       if (!existsSync(this.storePath)) return;
       const data = JSON.parse(readFileSync(this.storePath, "utf8")) as StoreShape;
-      for (const [id, client] of Object.entries(data.clients ?? {})) this.clients.set(id, client);
-      for (const [key, rec] of Object.entries(data.access ?? {})) this.access.set(key, rec);
-      for (const [key, rec] of Object.entries(data.refresh ?? {})) this.refresh.set(key, rec);
-      this.prune();
-    } catch {
+      const clients = new Map(Object.entries(data.clients ?? {}));
+      const access = new Map(Object.entries(data.access ?? {}));
+      const refresh = new Map(Object.entries(data.refresh ?? {}));
       this.clients.clear();
       this.access.clear();
       this.refresh.clear();
+      for (const [id, client] of clients) this.clients.set(id, client);
+      for (const [key, rec] of access) this.access.set(key, rec);
+      for (const [key, rec] of refresh) this.refresh.set(key, rec);
+      this.prune();
+    } catch {
+      // A transient read or parse failure must not erase the last good in-memory
+      // snapshot. The next request retries the durable store.
     }
   }
 

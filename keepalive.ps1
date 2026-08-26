@@ -1,8 +1,49 @@
-param([int]$PollSeconds = 15)
+param(
+    [ValidateSet('All','FrontDoor','Backend','Legacy')][string]$Role = 'All',
+    [int]$Port = 0,
+    [int]$PollSeconds = 15,
+    [string]$BackendConfigPath = '',
+    [string]$ProcessRoutePath = '',
+    [string]$SupervisorStateRoot = '',
+    [switch]$TestMode
+)
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Root
 if ($PollSeconds -lt 5) { throw 'PollSeconds must be >= 5' }
+if ($Role -eq 'All') {
+    $allMutex = New-Object System.Threading.Mutex($false,'Global\CodexLocalMcpKeepAlive-All')
+    $allHeld = $false
+    try {
+        try { $allHeld = $allMutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $allHeld = $true }
+        if (-not $allHeld) { exit 0 }
+        $definitions = @(
+            @{ Role='FrontDoor'; Port=3003 },
+            @{ Role='Backend'; Port=3001 },
+            @{ Role='Backend'; Port=3002 }
+        )
+        while ($true) {
+            foreach ($definition in $definitions) {
+                $rolePattern = '-Role\s+' + [regex]::Escape($definition.Role) + '(\s|$)'
+                $portPattern = '-Port\s+' + [regex]::Escape([string]$definition.Port) + '(\s|$)'
+                $supervisor = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+                    $_.Name -eq 'powershell.exe' -and $_.CommandLine -match 'ChatGPTMcpClean\\keepalive\.ps1' -and $_.CommandLine -match $rolePattern -and $_.CommandLine -match $portPattern
+                } | Select-Object -First 1
+                if (-not $supervisor) {
+                    Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $Root 'keepalive.ps1'),'-Role',$definition.Role,'-Port',[string]$definition.Port,'-PollSeconds',[string]$PollSeconds) -WorkingDirectory $Root -WindowStyle Hidden | Out-Null
+                }
+            }
+            Start-Sleep -Seconds $PollSeconds
+        }
+    } finally {
+        if ($allHeld) { $allMutex.ReleaseMutex() }
+        $allMutex.Dispose()
+    }
+    exit 0
+}
+if ($Port -le 0) { $Port = if ($Role -eq 'FrontDoor') { 3003 } elseif ($Role -eq 'Legacy') { 3000 } else { 3001 } }
+if ($Role -eq 'FrontDoor' -and $Port -ne 3003 -and -not $TestMode) { throw 'The public front door must own the stable 127.0.0.1:3003 endpoint outside explicit off-path tests' }
+if ($Role -eq 'Backend' -and $Port -eq 3000) { throw 'A replaceable backend must not own the public front-door port' }
 
 function EnvValue([string]$Name) {
     if (-not (Test-Path '.env')) { return $null }
@@ -11,112 +52,104 @@ function EnvValue([string]$Name) {
     return (($line -split '=',2)[1].Trim()).Trim("'").Trim('"')
 }
 
-$Port = [int]$(if (EnvValue 'PORT') { EnvValue 'PORT' } else { '3000' })
 $Origin = EnvValue 'MCP_PUBLIC_ORIGIN'
 $ServerName = 'shell-mcp'
+$ExpectedRole = if ($Role -eq 'FrontDoor') { 'front-door' } elseif ($Role -eq 'Legacy') { 'direct' } else { 'backend' }
 $Tailscale = 'C:\Program Files\Tailscale\tailscale.exe'
-$State = Join-Path $Root '.state\keepalive'
+if (-not $BackendConfigPath) { $BackendConfigPath = Join-Path $Root '.state\front-door\active-backend.json' }
+if (-not $ProcessRoutePath) { $ProcessRoutePath = Join-Path $Root '.state\front-door\process-routes.json' }
+$RoleKey = if ($Role -eq 'FrontDoor') { if ($TestMode) { "front-door-test-$Port" } else { 'front-door' } } elseif ($Role -eq 'Legacy') { 'legacy-3000' } else { "backend-$Port" }
+if (-not $SupervisorStateRoot) { $SupervisorStateRoot = Join-Path $Root '.state\keepalive' }
+$State = Join-Path $SupervisorStateRoot $RoleKey
 New-Item -ItemType Directory -Force $State | Out-Null
-$log = Join-Path $State 'supervisor.log'
+$Log = Join-Path $State 'supervisor.log'
 $PidFile = Join-Path $State 'child.pid'
-
-# Hardening knobs.
-$MaxLogBytes   = 5MB   # rotate supervisor.log past this
-$MaxArchives   = 5     # keep this many server.std*.log archives
-$RepeatFlush   = 60    # re-emit a stuck repeating message every N occurrences (~15min at 15s)
-$BackoffMax    = 300   # cap the restart backoff at 5 minutes
-$OwnerFailureThreshold = 3 # require consecutive failed local probes before reclaiming a live owned listener
-$HealthRecheckSeconds = 2   # final confirmation delay immediately before an owned-listener reclaim
-
+$MaxLogBytes = 5MB
+$MaxArchives = 5
+$RepeatFlush = 60
+$BackoffMax = 300
+$OwnerFailureThreshold = 3
+$HealthRecheckSeconds = 2
 $script:lastMsg = $null
 $script:repeat = 0
 $script:failStreak = 0
 $script:ownedHealthFailures = 0
 
 function RotateIfLarge([string]$Path) {
-    try {
-        if ((Test-Path $Path) -and ((Get-Item $Path).Length -gt $MaxLogBytes)) {
-            Move-Item $Path "$Path.1" -Force
-        }
-    } catch {}
+    try { if ((Test-Path $Path) -and ((Get-Item $Path).Length -gt $MaxLogBytes)) { Move-Item $Path "$Path.1" -Force } } catch {}
 }
-
-# Collapses consecutive identical messages instead of writing one line per poll.
-# A permanently stuck condition logged once every 15s produced ~600 lines in 2h;
-# now it logs once, then a periodic "repeated N times" heartbeat.
-function Log([string]$s) {
-    if ($s -eq $script:lastMsg) {
+function Log([string]$Message) {
+    if ($Message -eq $script:lastMsg) {
         $script:repeat++
         if ($script:repeat % $RepeatFlush -ne 0) { return }
-        $s = "$s (repeated $($script:repeat) times)"
+        $Message = "$Message (repeated $($script:repeat) times)"
     } else {
         if ($script:repeat -gt 0 -and $script:lastMsg) {
-            RotateIfLarge $log
-            Add-Content $log ((Get-Date).ToString('o')+" previous message repeated $($script:repeat) time(s)") -Encoding UTF8
+            RotateIfLarge $Log
+            Add-Content $Log ((Get-Date).ToString('o')+" previous message repeated $($script:repeat) time(s)") -Encoding UTF8
         }
-        $script:lastMsg = $s
+        $script:lastMsg = $Message
         $script:repeat = 0
     }
-    RotateIfLarge $log
-    Add-Content $log ((Get-Date).ToString('o')+' '+$s) -Encoding UTF8
+    RotateIfLarge $Log
+    Add-Content $Log ((Get-Date).ToString('o')+' '+$Message) -Encoding UTF8
 }
 
-# Identity-checked health. A bare {"status":"ok"} from some *other* service on this
-# port previously satisfied this probe, so the supervisor believed the server was up,
-# never started it, and pointed the public Funnel at the wrong process.
-function Healthy { try { $r = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 3; return ($r.status -eq 'ok' -and $r.name -eq $ServerName) } catch { $false } }
-function PublicHealthy { if (-not $Origin) { return $false }; try { $r = Invoke-RestMethod ($Origin.TrimEnd('/')+'/health') -TimeoutSec 5; return ($r.status -eq 'ok' -and $r.name -eq $ServerName) } catch { $false } }
-
+function Healthy {
+    try {
+        $response = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 3
+        if ($response.status -ne 'ok' -or $response.name -ne $ServerName -or [int]$response.port -ne $Port) { return $false }
+        if ($Role -eq 'Backend') { return ($response.role -eq $ExpectedRole) }
+        if ($Role -eq 'Legacy') { return (-not $response.role -or $response.role -eq 'direct') }
+        return ([int]$response.pid -eq (PortOwner) -and (IsOwnedListener ([int]$response.pid)))
+    } catch { return $false }
+}
+function PublicHealthy {
+    if ($Role -ne 'FrontDoor' -or -not $Origin) { return $false }
+    try {
+        $response = Invoke-RestMethod ($Origin.TrimEnd('/')+'/health') -TimeoutSec 5
+        return ($response.status -eq 'ok' -and $response.name -eq $ServerName -and [int]$response.port -eq $Port)
+    } catch { return $false }
+}
 function FunnelConfigured {
-    if (-not $Origin -or -not (Test-Path $Tailscale)) { return $false }
+    if ($TestMode -or $Role -ne 'FrontDoor' -or -not $Origin -or -not (Test-Path $Tailscale)) { return $false }
     try {
         $status = (& $Tailscale funnel status --json | ConvertFrom-Json)
         $hostKey = ([uri]$Origin).Host + ':443'
-        $tcp443 = $status.TCP.'443'
-        $webHost = $status.Web.$hostKey
-        $handler = $webHost.Handlers.'/'
-        $allowed = $status.AllowFunnel.$hostKey
-        return ($tcp443.HTTPS -eq $true -and $handler.Proxy -eq "http://127.0.0.1:$Port" -and $allowed -eq $true)
+        return ($status.TCP.'443'.HTTPS -eq $true -and $status.Web.$hostKey.Handlers.'/'.Proxy -eq "http://127.0.0.1:$Port" -and $status.AllowFunnel.$hostKey -eq $true)
     } catch { return $false }
 }
 function EnsureFunnelConfiguration {
-    if (-not $Origin -or -not (Test-Path $Tailscale) -or -not (Healthy) -or (FunnelConfigured)) { return }
+    if ($TestMode -or $Role -ne 'FrontDoor' -or -not $Origin -or -not (Test-Path $Tailscale) -or -not (Healthy) -or (FunnelConfigured)) { return }
     & $Tailscale funnel --yes --bg --https=443 "http://127.0.0.1:$Port" | Out-Null
-    if ($LASTEXITCODE -eq 0 -and (FunnelConfigured)) { Log 'restored policy-compliant Tailscale Funnel configuration' }
+    if ($LASTEXITCODE -eq 0 -and (FunnelConfigured)) { Log 'restored Tailscale Funnel to the stable front door' }
     else { Log 'Tailscale Funnel configuration repair failed' }
 }
 
-function PortOwner { $l = netstat -ano | Select-String ":$Port\s" | Select-String 'LISTENING' | Select-Object -First 1; if (-not $l) { return $null }; return [int](($l -replace '\s+',' ').ToString().Trim().Split(' ')[-1]) }
-
+function PortOwner {
+    $listener = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($listener) { return [int]$listener.OwningProcess }
+    return $null
+}
 function RecordedPid { try { if (Test-Path $PidFile) { return [int](Get-Content $PidFile -Raw).Trim() } } catch {}; return 0 }
-
-# Ownership test. The CommandLine probe alone is not sufficient: an elevated process
-# reports a blank CommandLine to a non-elevated WMI query, so the supervisor's own
-# server can read as "foreign" and the port is never reclaimed without a human. The
-# recorded-PID check covers that case.
-function IsOwnedMcpListener([int]$ProcessId) {
+function IsOwnedListener([int]$ProcessId) {
     if ($ProcessId -gt 0 -and $ProcessId -eq (RecordedPid)) { return $true }
+    $entryPattern = if ($Role -eq 'FrontDoor') { 'dist[\\/]front-door\.js' } else { 'dist[\\/]index\.js' }
+    $parentPattern = if ($Role -eq 'FrontDoor') { 'start-front-door\.ps1' } else { 'start\.ps1' }
     try {
-        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId"
-        if (-not $proc -or $proc.Name -ne 'node.exe' -or $proc.CommandLine -notmatch 'dist[\\/]index\.js') { return $false }
-        $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.ParentProcessId)"
-        if (-not $parent) { return $false }
-        return $parent.CommandLine -like "*$Root\start.ps1*"
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId"
+        if (-not $process -or $process.Name -ne 'node.exe' -or $process.CommandLine -notmatch $entryPattern) { return $false }
+        $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($process.ParentProcessId)"
+        return [bool]($parent -and $parent.CommandLine -match $parentPattern)
     } catch { return $false }
 }
-
-# Each child receives unique redirected stdout/stderr paths. Windows keeps those handles
-# open for the lifetime of the child, so reusing or moving a fixed path during recovery
-# can produce sharing violations and obscure the real control-channel state.
 function ChildLogPath([string]$Prefix) {
     $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss-fff')
     return (Join-Path $State "$Prefix.$stamp.$([guid]::NewGuid().ToString('N')).log")
 }
-
-# Pruning is best-effort. A locked log is never a reason to stop supervising.
-function ArchiveServerLogs {
+function ArchiveChildLogs {
     try {
-        foreach ($prefix in @('server.stdout.','server.stderr.')) {
+        foreach ($prefix in @('child.stdout.','child.stderr.')) {
             Get-ChildItem $State -Filter "$prefix*.log" -ErrorAction SilentlyContinue |
                 Sort-Object LastWriteTime -Descending | Select-Object -Skip $MaxArchives |
                 ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
@@ -124,33 +157,38 @@ function ArchiveServerLogs {
     } catch {}
 }
 
-function StartServer {
+function StartChild {
     if (Healthy) { $script:failStreak = 0; $script:ownedHealthFailures = 0; return }
+    if ($Role -eq 'FrontDoor' -and -not (Test-Path $BackendConfigPath)) {
+        Log "front-door backend config is absent; refusing to bind the stable port before a candidate backend is configured"
+        return
+    }
     $owner = PortOwner
     if ($owner) {
-        if (-not (IsOwnedMcpListener $owner)) { Log "port occupied by foreign PID $owner while health is down; not killing it"; return }
+        if (-not (IsOwnedListener $owner)) { Log "port $Port is occupied by foreign PID $owner while $Role health is down; not killing it"; return }
         $script:ownedHealthFailures++
-        if ($script:ownedHealthFailures -lt $OwnerFailureThreshold) {
-            Log "owned MCP listener PID $owner failed local health probe ($($script:ownedHealthFailures)/$OwnerFailureThreshold); retaining it"
-            return
-        }
+        if ($script:ownedHealthFailures -lt $OwnerFailureThreshold) { Log "owned $Role listener PID $owner failed health ($($script:ownedHealthFailures)/$OwnerFailureThreshold); retaining it"; return }
         Start-Sleep -Seconds $HealthRecheckSeconds
         if (Healthy) { $script:failStreak = 0; $script:ownedHealthFailures = 0; return }
         if ((PortOwner) -ne $owner) { return }
-        Log "reclaiming unhealthy owned MCP listener PID $owner"
+        Log "reclaiming unhealthy owned $Role listener PID $owner"
         Stop-Process -Id $owner -Force -ErrorAction SilentlyContinue
-        for ($i=0; $i -lt 20 -and (PortOwner); $i++) { Start-Sleep -Milliseconds 100 }
-        if (PortOwner) { Log "owned MCP listener PID $owner did not release port"; return }
+        for ($attempt=0; $attempt -lt 20 -and (PortOwner); $attempt++) { Start-Sleep -Milliseconds 100 }
+        if (PortOwner) { Log "owned $Role listener PID $owner did not release port $Port"; return }
     }
-    ArchiveServerLogs
-    $stdout = ChildLogPath 'server.stdout'
-    $stderr = ChildLogPath 'server.stderr'
-    Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $Root 'start.ps1'),'-SkipBuild','-Port',[string]$Port) -WorkingDirectory $Root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr | Out-Null
-
-    # Wait for the listener and record its PID, so a later reclaim does not depend on
-    # reading a CommandLine we may not be privileged to see.
+    ArchiveChildLogs
+    $stdout = ChildLogPath 'child.stdout'
+    $stderr = ChildLogPath 'child.stderr'
+    if ($Role -eq 'FrontDoor') {
+        $startScript = Join-Path $Root 'start-front-door.ps1'
+        $arguments = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$startScript,'-SkipBuild','-Port',[string]$Port,'-BackendConfigPath',$BackendConfigPath,'-ProcessRoutePath',$ProcessRoutePath)
+    } else {
+        $startScript = Join-Path $Root 'start.ps1'
+        $arguments = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$startScript,'-SkipBuild','-Port',[string]$Port)
+    }
+    Start-Process powershell.exe -ArgumentList $arguments -WorkingDirectory $Root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr | Out-Null
     $listener = $null
-    for ($i = 0; $i -lt 30; $i++) {
+    for ($attempt=0; $attempt -lt 30; $attempt++) {
         Start-Sleep -Milliseconds 500
         if (Healthy) { $listener = PortOwner; break }
     }
@@ -158,37 +196,33 @@ function StartServer {
         Set-Content $PidFile ([string]$listener) -Encoding ASCII
         $script:failStreak = 0
         $script:ownedHealthFailures = 0
-        Log "started clean MCP child (listener PID $listener)"
+        Log "started $Role listener PID $listener on 127.0.0.1:$Port"
     } else {
         $script:failStreak++
-        Log "clean MCP child failed to become healthy (consecutive failures: $($script:failStreak))"
+        Log "$Role child failed to become healthy (consecutive failures: $($script:failStreak))"
     }
 }
 
-$mutex = New-Object System.Threading.Mutex($false,'Global\CodexLocalMcpKeepAlive'); $held=$false
+$mutexName = "Global\CodexLocalMcpKeepAlive-$RoleKey"
+$mutex = New-Object System.Threading.Mutex($false,$mutexName)
+$held = $false
 try {
-    try { $held=$mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $held=$true }
+    try { $held = $mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $held = $true }
     if (-not $held) { exit 0 }
-    Log 'clean MCP supervisor started'
+    Log "$Role supervisor started for 127.0.0.1:$Port"
     while ($true) {
-        # Nothing inside one poll may terminate the supervisor. $ErrorActionPreference is
-        # 'Stop', so without this guard any transient failure -- a locked log file, a WMI
-        # hiccup, a netstat blip -- kills supervision entirely and the server stays down.
         try {
-            StartServer
-            if (Healthy) {
+            StartChild
+            if ($Role -eq 'FrontDoor' -and -not $TestMode -and (Healthy)) {
                 EnsureFunnelConfiguration
-                if (-not (PublicHealthy)) { Log 'public MCP health probe failed while local MCP is healthy; persistent Funnel configuration left unchanged' }
+                if (-not (PublicHealthy)) { Log 'public front-door health probe failed while local front door is healthy; Funnel configuration left unchanged' }
             }
-        } catch {
-            Log "supervisor poll error (continuing): $($_.Exception.Message)"
-        }
-        # Exponential backoff on a server that will not come up, so a broken build does
-        # not get relaunched every 15s indefinitely.
+        } catch { Log "supervisor poll error (continuing): $($_.Exception.Message)" }
         $delay = $PollSeconds
-        if ($script:failStreak -gt 0) {
-            $delay = [Math]::Min($BackoffMax, $PollSeconds * [Math]::Pow(2, [Math]::Min(6, $script:failStreak)))
-        }
+        if ($script:failStreak -gt 0) { $delay = [Math]::Min($BackoffMax, $PollSeconds * [Math]::Pow(2, [Math]::Min(6, $script:failStreak))) }
         Start-Sleep -Seconds $delay
     }
-} finally { if ($held) { $mutex.ReleaseMutex() }; $mutex.Dispose() }
+} finally {
+    if ($held) { $mutex.ReleaseMutex() }
+    $mutex.Dispose()
+}
