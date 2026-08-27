@@ -123,5 +123,21 @@ check(!durableClaims.some((claim) => claim.scope === "session:gone-session"), "d
 check(!durableClaims.some((claim) => claim.scope.startsWith("process:")), "dead process claim is pruned", JSON.stringify(durableClaims));
 rmSync(STORE, { force: true });
 
+// Test 6: top-level coordinator metadata survives legacy BUSY mutations. This is the
+// compatibility seam that lets the standalone coordinator enrich the same canonical
+// state file before the MCP BUSY tools are retired.
+console.log(`\ntest 6 - unknown top-level coordinator metadata survives claim/release`);
+resetStore();
+writeFileSync(STORE, JSON.stringify({ version: 2, coordinator: { jobs: { alpha: { state: "blocked", checkpoint: "issue#125" } } }, claims: [] }, null, 2) + "\n", "utf8");
+const compatibilityStore = new BusyStore(() => false, STORE);
+await compatibilityStore.claim("compat-worker", "task:compat");
+let compatibilityRaw = JSON.parse(readFileSync(STORE, "utf8"));
+check(compatibilityRaw.version === 2, "top-level version survives claim", JSON.stringify(compatibilityRaw));
+check(compatibilityRaw.coordinator?.jobs?.alpha?.checkpoint === "issue#125", "coordinator metadata survives claim", JSON.stringify(compatibilityRaw));
+await compatibilityStore.release("compat-worker", "task:compat");
+compatibilityRaw = JSON.parse(readFileSync(STORE, "utf8"));
+check(compatibilityRaw.coordinator?.jobs?.alpha?.state === "blocked", "coordinator metadata survives release", JSON.stringify(compatibilityRaw));
+rmSync(STORE, { force: true });
+
 console.log(failures ? `\nCONCURRENCY TEST FAILED (${failures})` : "\nCONCURRENCY TEST PASSED");
 process.exit(failures ? 1 : 0);
