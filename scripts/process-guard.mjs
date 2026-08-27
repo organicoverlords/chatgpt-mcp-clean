@@ -136,6 +136,34 @@ try {
   rmSync(receiptDirectory, { recursive: true, force: true });
 }
 
+const sharedControlDirectory = mkdtempSync(join(tmpdir(), "shell-mcp-cross-clone-control-"));
+try {
+  const ownerManager = new ProcessManager({ receiptDirectory: sharedControlDirectory });
+  const backupManager = new ProcessManager({ receiptDirectory: sharedControlDirectory });
+  const started = ownerManager.start(
+    "Start-Sleep -Milliseconds 300; Write-Output 'CROSS_CLONE_LIVE_OK'; Start-Sleep -Seconds 10",
+    undefined,
+    "caller_cross_clone_owner",
+  );
+  const crossCloneReadStartedAt = Date.now();
+  const immediateFromBackup = await backupManager.readWithWait(started.process_id, 6_000, 0);
+  const crossCloneReadDurationMs = Date.now() - crossCloneReadStartedAt;
+  assert.ok(crossCloneReadDurationMs < 750, `cross-clone wait_ms=0 blocked (${crossCloneReadDurationMs}ms)`);
+  assert.equal(immediateFromBackup.running, true);
+  const liveFromBackup = await backupManager.readWithWait(started.process_id, 6_000, 1_500);
+  assert.equal(liveFromBackup.running, true);
+  assert.match(liveFromBackup.stdout, /CROSS_CLONE_LIVE_OK/);
+  const killedFromBackup = await backupManager.kill(started.process_id);
+  assert.equal(killedFromBackup.killed, true, JSON.stringify(killedFromBackup));
+  const ownerAfterKill = await waitForExit(ownerManager, started.process_id);
+  assert.equal(ownerAfterKill.running, false);
+  const completedFromBackup = backupManager.read(started.process_id);
+  assert.equal(completedFromBackup.running, false);
+  assert.match(completedFromBackup.stdout, /CROSS_CLONE_LIVE_OK/);
+} finally {
+  rmSync(sharedControlDirectory, { recursive: true, force: true });
+}
+
 const nonBlockingManager = new ProcessManager();
 let nonBlockingProcess;
 try {
@@ -164,4 +192,4 @@ try {
   if (waitingProcess) await waitingManager.kill(waitingProcess.process_id).catch(() => undefined);
 }
 
-console.log("PASS process guard enforces rate, duplicate, live-concurrency, restart-receipt, nonblocking-zero-wait, and bounded-wait behavior");
+console.log("PASS process guard enforces rate, duplicate, live-concurrency, restart-receipt, cross-clone-live-control, nonblocking-zero-wait, and bounded-wait behavior");
