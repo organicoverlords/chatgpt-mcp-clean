@@ -4,6 +4,7 @@ All notable project changes are recorded here in Keep a Changelog 1.1.0 style.
 
 ## [Unreleased]
 
+- [2026-08-27] Added path-scoped public identities for minimal MCP clones so redundant connectors can share standard HTTPS 443 behind distinct paths while preserving correct OAuth/resource metadata and leaving the production root connector unchanged (regression-research #125).
 - [2026-08-27] Added an opt-in three-tool process-only MCP profile plus repeatable two-clone launch/configuration and multi-client/cross-clone failover proof for regression-research #125; the default full MCP0 tool surface remains unchanged.
 - [2026-08-27] Preserved versioned standalone-coordinator job and checkpoint metadata across legacy MCP BUSY claim, list, prune, and release writes so redundant connector apps can share one canonical state authority (regression-research #125).
 - [2026-08-26] Restored Node's default client-error cleanup at the stable front door so reset or malformed Funnel-facing sockets are closed instead of retained, with an off-path regression probe (#7).

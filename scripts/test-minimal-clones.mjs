@@ -41,7 +41,7 @@ async function waitHealth(origin, expectedPort, timeoutMs = 15_000) {
 function startClone(id, port) {
   const state = join(temporary, id);
   mkdirSync(state, { recursive: true });
-  const publicOrigin = `https://${id}.test.ts.net`;
+  const publicOrigin = id === "clone-a" ? `https://${id}.test.ts.net/clone-a` : `https://${id}.test.ts.net`;
   const child = spawn(process.execPath, [resolve("dist/index.js")], {
     cwd: resolve("."),
     env: {
@@ -144,6 +144,17 @@ try {
   cloneA = startClone("clone-a", portA);
   cloneB = startClone("clone-b", portB);
   await Promise.all([waitHealth(cloneA.origin, portA), waitHealth(cloneB.origin, portB)]);
+
+  const aMetadata = await jsonFetch(`${cloneA.origin}/.well-known/oauth-authorization-server/clone-a`);
+  assert.equal(aMetadata.response.status, 200, aMetadata.text);
+  assert.equal(aMetadata.body.issuer, "https://clone-a.test.ts.net/clone-a/");
+  assert.equal(aMetadata.body.authorization_endpoint, "https://clone-a.test.ts.net/clone-a/authorize");
+  assert.equal(aMetadata.body.token_endpoint, "https://clone-a.test.ts.net/clone-a/token");
+  assert.equal(aMetadata.body.registration_endpoint, "https://clone-a.test.ts.net/clone-a/register");
+  const aProtected = await jsonFetch(`${cloneA.origin}/.well-known/oauth-protected-resource/clone-a/mcp`);
+  assert.equal(aProtected.response.status, 200, aProtected.text);
+  assert.equal(aProtected.body.resource, "https://clone-a.test.ts.net/clone-a/mcp");
+  assert.deepEqual(aProtected.body.authorization_servers, ["https://clone-a.test.ts.net/clone-a/"]);
 
   const [a1, a2, b1, b2] = await Promise.all([
     connect(cloneA, "clone-a-client-1"),
