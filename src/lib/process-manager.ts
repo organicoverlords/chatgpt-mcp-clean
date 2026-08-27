@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import type { Readable } from "node:stream";
-import { currentTelemetryContext, emitTelemetry, type TelemetryContext } from "./transport-telemetry.js";
+import { currentTelemetryContext, emitTelemetry, withTelemetryContext, type TelemetryContext } from "./transport-telemetry.js";
 
 const MAX_CAPTURE_CHARS = 100_000;
 // 6,000 not 20,000: the platform blocks read_output payloads above roughly 6 KB as a
@@ -20,6 +20,11 @@ const KILL_SETTLE_MS = 1_000;
 const DEFAULT_LAUNCH_BUCKET_CAPACITY = 40;
 const DEFAULT_LAUNCH_REFILL_MS = 5_000;
 const DEFAULT_MAX_LIVE_PER_CALLER = 3;
+const CONTROL_POLL_MS = 100;
+const CONTROL_HANDOFF_OVERHEAD_MS = 1_500;
+const CONTROL_KILL_TIMEOUT_MS = TASKKILL_TIMEOUT_MS + KILL_SETTLE_MS + CONTROL_HANDOFF_OVERHEAD_MS;
+const CONTROL_RETENTION_MS = COMPLETED_RETENTION_MS;
+const CONTROL_PRUNE_INTERVAL_MS = 60_000;
 type CapturedChild = ChildProcessByStdio<null, Readable, Readable>;
 
 type ProcessManagerOptions = {
@@ -51,6 +56,27 @@ type CompletedProcessReceipt = {
   signal: NodeJS.Signals | null;
   started_at: string;
   finished_at: string;
+  error?: string;
+};
+
+type ProcessControlRequest = {
+  version: 1;
+  request_id: string;
+  process_id: string;
+  action: "read" | "kill";
+  requester_caller_id: string;
+  requested_at: string;
+  deadline_at: string;
+  max_chars?: number;
+  wait_ms?: number;
+};
+
+type ProcessControlResponse = {
+  version: 1;
+  request_id: string;
+  process_id: string;
+  responded_at: string;
+  result?: Record<string, unknown>;
   error?: string;
 };
 
@@ -225,6 +251,10 @@ export class ProcessManager {
   private readonly maxLivePerCaller: number;
   private readonly now: () => number;
   private readonly receiptDirectory?: string;
+  private readonly controlRequestDirectory?: string;
+  private readonly controlResponseDirectory?: string;
+  private readonly controlRequestsInFlight = new Set<string>();
+  private lastControlPruneAt = 0;
 
   constructor(options: ProcessManagerOptions = {}) {
     this.launchBucketCapacity = options.maxLaunchesPerWindow ?? DEFAULT_LAUNCH_BUCKET_CAPACITY;
@@ -234,7 +264,14 @@ export class ProcessManager {
     this.receiptDirectory = options.receiptDirectory ? resolve(options.receiptDirectory) : undefined;
     if (this.receiptDirectory) {
       mkdirSync(this.receiptDirectory, { recursive: true });
+      this.controlRequestDirectory = join(this.receiptDirectory, ".control", "requests");
+      this.controlResponseDirectory = join(this.receiptDirectory, ".control", "responses");
+      mkdirSync(this.controlRequestDirectory, { recursive: true });
+      mkdirSync(this.controlResponseDirectory, { recursive: true });
       this.pruneReceipts();
+      this.pruneControlFiles();
+      const controlTimer = setInterval(() => this.sweepControlRequests(), CONTROL_POLL_MS);
+      controlTimer.unref();
     }
   }
 
@@ -258,6 +295,187 @@ export class ProcessManager {
     }
     const retained = files.filter((file) => now - file.modifiedAt <= COMPLETED_RETENTION_MS);
     for (const file of retained.slice(0, Math.max(0, retained.length - MAX_COMPLETED_PROCESSES))) unlinkSync(file.path);
+  }
+
+  private controlPath(directory: string | undefined, requestId: string): string | undefined {
+    if (!directory || !PROCESS_ID_PATTERN.test(requestId)) return undefined;
+    return join(directory, `${requestId}.json`);
+  }
+
+  private writeControlFile(path: string, value: ProcessControlRequest | ProcessControlResponse): void {
+    const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(temporaryPath, JSON.stringify(value), { encoding: "utf8", flag: "wx" });
+      renameSync(temporaryPath, path);
+    } finally {
+      try { unlinkSync(temporaryPath); } catch { /* already renamed or never created */ }
+    }
+  }
+
+  private pruneControlFiles(): void {
+    const now = Date.now();
+    if (now - this.lastControlPruneAt < CONTROL_PRUNE_INTERVAL_MS) return;
+    this.lastControlPruneAt = now;
+    const cutoff = now - CONTROL_RETENTION_MS;
+    for (const directory of [this.controlRequestDirectory, this.controlResponseDirectory]) {
+      if (!directory) continue;
+      let entries;
+      try {
+        entries = readdirSync(directory, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+        const path = join(directory, entry.name);
+        try {
+          if (statSync(path).mtimeMs < cutoff) unlinkSync(path);
+        } catch { /* best-effort cleanup */ }
+      }
+    }
+  }
+
+  private sweepControlRequests(): void {
+    if (!this.controlRequestDirectory || !this.controlResponseDirectory) return;
+    this.pruneControlFiles();
+    let entries;
+    try {
+      entries = readdirSync(this.controlRequestDirectory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const requestPath = join(this.controlRequestDirectory, entry.name);
+      let request: ProcessControlRequest;
+      try {
+        request = JSON.parse(readFileSync(requestPath, "utf8")) as ProcessControlRequest;
+      } catch {
+        continue;
+      }
+      if (
+        request.version !== 1 ||
+        !PROCESS_ID_PATTERN.test(request.request_id) ||
+        !PROCESS_ID_PATTERN.test(request.process_id) ||
+        (request.action !== "read" && request.action !== "kill") ||
+        typeof request.requester_caller_id !== "string" ||
+        !Number.isFinite(Date.parse(request.deadline_at))
+      ) {
+        try { unlinkSync(requestPath); } catch { /* best effort */ }
+        continue;
+      }
+      if (Date.now() > Date.parse(request.deadline_at)) {
+        try { unlinkSync(requestPath); } catch { /* best effort */ }
+        continue;
+      }
+      if (!this.processes.has(request.process_id) || this.controlRequestsInFlight.has(request.request_id)) continue;
+      this.controlRequestsInFlight.add(request.request_id);
+      void this.handleControlRequest(request, requestPath).finally(() => {
+        this.controlRequestsInFlight.delete(request.request_id);
+      });
+    }
+  }
+
+  private async handleControlRequest(request: ProcessControlRequest, requestPath: string): Promise<void> {
+    const responsePath = this.controlPath(this.controlResponseDirectory, request.request_id);
+    if (!responsePath) return;
+    const observer: TelemetryContext = {
+      request_id: request.request_id,
+      caller_id: request.requester_caller_id,
+    };
+    const response: ProcessControlResponse = {
+      version: 1,
+      request_id: request.request_id,
+      process_id: request.process_id,
+      responded_at: new Date().toISOString(),
+    };
+    try {
+      response.result = await withTelemetryContext(observer, async () => request.action === "kill"
+        ? await this.kill(request.process_id)
+        : await this.readWithWait(request.process_id, request.max_chars, request.wait_ms));
+    } catch (error) {
+      response.error = error instanceof Error ? error.message : String(error);
+    }
+    response.responded_at = new Date().toISOString();
+    try {
+      this.writeControlFile(responsePath, response);
+    } finally {
+      try { unlinkSync(requestPath); } catch { /* requester may have timed out */ }
+    }
+  }
+
+  private async requestRemoteControl(
+    processId: string,
+    action: "read" | "kill",
+    observer: TelemetryContext,
+    maxChars = MAX_READ_CHARS,
+    waitMs = 0,
+  ): Promise<Record<string, unknown>> {
+    if (!this.controlRequestDirectory || !this.controlResponseDirectory || !PROCESS_ID_PATTERN.test(processId)) {
+      throw new Error(`Unknown process_id: ${processId}`);
+    }
+    const requestId = randomUUID();
+    const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
+    const timeoutMs = action === "read"
+      ? boundedWaitMs + CONTROL_HANDOFF_OVERHEAD_MS
+      : CONTROL_KILL_TIMEOUT_MS;
+    const deadlineMs = Date.now() + timeoutMs;
+    const requestPath = this.controlPath(this.controlRequestDirectory, requestId)!;
+    const responsePath = this.controlPath(this.controlResponseDirectory, requestId)!;
+    const request: ProcessControlRequest = {
+      version: 1,
+      request_id: requestId,
+      process_id: processId,
+      action,
+      requester_caller_id: observer.caller_id ?? "caller_unknown",
+      requested_at: new Date().toISOString(),
+      deadline_at: new Date(deadlineMs).toISOString(),
+      ...(action === "read" ? { max_chars: Math.max(1, Math.min(maxChars, MAX_READ_CHARS)), wait_ms: boundedWaitMs } : {}),
+    };
+    this.writeControlFile(requestPath, request);
+    emitTelemetry({
+      event: "process_control_handoff_requested",
+      process_id: processId,
+      action,
+      request_id: requestId,
+    }, observer);
+    try {
+      while (Date.now() <= deadlineMs) {
+        try {
+          const response = JSON.parse(readFileSync(responsePath, "utf8")) as ProcessControlResponse;
+          if (response.version !== 1 || response.request_id !== requestId || response.process_id !== processId) {
+            throw new Error(`Invalid process control response for ${processId}`);
+          }
+          if (response.error) throw new Error(response.error);
+          if (!response.result || typeof response.result !== "object") throw new Error(`Empty process control response for ${processId}`);
+          emitTelemetry({
+            event: "process_control_handoff_completed",
+            process_id: processId,
+            action,
+            request_id: requestId,
+          }, observer);
+          return response.result;
+        } catch (error) {
+          const code = error instanceof Error && "code" in error ? (error as NodeJS.ErrnoException).code : undefined;
+          if (code !== "ENOENT") throw error;
+        }
+        if (action === "read") {
+          const receipt = this.readReceipt(processId, maxChars);
+          if (receipt) return receipt;
+        }
+        await delay(CONTROL_POLL_MS);
+      }
+      emitTelemetry({
+        event: "process_control_handoff_timeout",
+        process_id: processId,
+        action,
+        request_id: requestId,
+      }, observer);
+      throw new Error(`Process owner unavailable for process_id: ${processId}`);
+    } finally {
+      try { unlinkSync(requestPath); } catch { /* owner may already have consumed it */ }
+      try { unlinkSync(responsePath); } catch { /* response may not exist */ }
+    }
   }
 
   private persistReceipt(state: ProcessState): void {
@@ -536,10 +754,13 @@ export class ProcessManager {
 
   async readWithWait(processId: string, maxChars = MAX_READ_CHARS, waitMs = 0): Promise<Record<string, unknown>> {
     const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
-    if (boundedWaitMs === 0) return this.read(processId, maxChars);
-
     const state = this.processes.get(processId);
-    if (!state || state.exitCode !== null) return this.read(processId, maxChars);
+    if (!state) {
+      const receipt = this.readReceipt(processId, maxChars);
+      if (receipt) return receipt;
+      return await this.requestRemoteControl(processId, "read", currentTelemetryContext(), maxChars, boundedWaitMs);
+    }
+    if (boundedWaitMs === 0 || state.exitCode !== null) return this.read(processId, maxChars);
     const observer = currentTelemetryContext();
     const observerCallerId = observer.caller_id ?? "caller_unknown";
     const lastReadRevision = state.lastReadRevisionByCaller.get(observerCallerId) ?? 0;
@@ -562,8 +783,21 @@ export class ProcessManager {
   }
 
   async kill(processId: string): Promise<Record<string, unknown>> {
-    const state = this.requireProcess(processId);
     const observer = currentTelemetryContext();
+    const state = this.processes.get(processId);
+    if (!state) {
+      const receipt = this.readReceipt(processId, MAX_READ_CHARS);
+      if (receipt) {
+        return {
+          process_id: processId,
+          pid: receipt.pid,
+          killed: false,
+          already_exited: true,
+          exit_code: receipt.exit_code,
+        };
+      }
+      return await this.requestRemoteControl(processId, "kill", observer);
+    }
     if (state.exitCode !== null) {
       emitTelemetry({
         event: "process_kill_skipped",
@@ -623,9 +857,4 @@ export class ProcessManager {
     return Boolean(state && state.exitCode === null);
   }
 
-  private requireProcess(processId: string): ProcessState {
-    const state = this.processes.get(processId);
-    if (!state) throw new Error(`Unknown process_id: ${processId}`);
-    return state;
-  }
 }

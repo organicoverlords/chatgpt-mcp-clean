@@ -186,6 +186,17 @@ try {
   assert.equal(handedOff.running, false);
   assert.match(handedOff.stdout, /DONE/);
 
+  const liveStarted = await a1.call("start_process", {
+    command: "Start-Sleep -Milliseconds 300; Write-Output 'CLONE_LIVE_HANDOFF'; Start-Sleep -Seconds 10",
+  });
+  const liveSeenFromB = await b1.call("read_output", { process_id: liveStarted.process_id, wait_ms: 1_500 });
+  assert.equal(liveSeenFromB.running, true, JSON.stringify(liveSeenFromB));
+  assert.match(liveSeenFromB.stdout, /CLONE_LIVE_HANDOFF/);
+  const killedFromB = await b1.call("kill_process", { process_id: liveStarted.process_id });
+  assert.equal(killedFromB.killed, true, JSON.stringify(killedFromB));
+  const killedSeenFromA = await a2.call("read_output", { process_id: liveStarted.process_id, wait_ms: 1_000 });
+  assert.equal(killedSeenFromA.running, false, JSON.stringify(killedSeenFromA));
+
   cloneA.child.kill();
   await new Promise((resolveExit) => cloneA.child.once("exit", resolveExit));
   const bHealth = await waitHealth(cloneB.origin, portB);
@@ -199,7 +210,7 @@ try {
   }
   assert.match(bOutput.stdout, /B_SURVIVED_A/);
 
-  console.log(JSON.stringify({ result: "PASS", tools: expected, independent_clones: 2, independent_oauth_clients: 4, cross_client_reassociation: true, completed_process_cross_clone_read: true, clone_b_survived_clone_a_exit: true }));
+  console.log(JSON.stringify({ result: "PASS", tools: expected, independent_clones: 2, independent_oauth_clients: 4, cross_client_reassociation: true, completed_process_cross_clone_read: true, live_process_cross_clone_read: true, live_process_cross_clone_kill: true, clone_b_survived_clone_a_exit: true }));
 } finally {
   for (const child of children) if (child.exitCode === null) child.kill();
   await sleep(100);
