@@ -11,6 +11,7 @@ const temporary = mkdtempSync(join(tmpdir(), "shell-mcp-front-door-"));
 const configPath = join(temporary, "active-backend.json");
 const routesPath = join(temporary, "process-routes.json");
 const requestLogPath = join(temporary, "front-door-request.jsonl");
+const staticRoutePath = join(temporary, "static-routes.json");
 const processId = "11111111-1111-4111-8111-111111111111";
 let releaseSlow;
 const slowGate = new Promise((resolveSlow) => { releaseSlow = resolveSlow; });
@@ -39,6 +40,10 @@ async function backend(name) {
     }
     if (request.url === "/identity") {
       response.end(name);
+      return;
+    }
+    if (request.url?.startsWith("/.well-known/")) {
+      response.end(request.url);
       return;
     }
     const raw = await requestBody(request);
@@ -123,8 +128,8 @@ async function malformedConnectionCloses(port) {
   });
 }
 
-async function toolCall(origin, name, args) {
-  return fetch(`${origin}/mcp`, {
+async function toolCall(origin, name, args, path = "/mcp") {
+  return fetch(`${origin}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name, arguments: args } }),
@@ -134,13 +139,16 @@ async function toolCall(origin, name, args) {
 let frontDoor;
 let first;
 let second;
+let clone;
 try {
   first = await backend("blue");
   second = await backend("green");
+  clone = await backend("clone-a");
+  writeFileSync(staticRoutePath, `${JSON.stringify({ version: 1, routes: { "clone-a": clone.port } }, null, 2)}\n`, "utf8");
   const frontDoorPort = await unusedPort();
   writeTarget(first.port, "blue-1");
   frontDoor = spawn(process.execPath, [resolve("dist/front-door.js")], {
-    env: { ...process.env, FRONT_DOOR_PORT: String(frontDoorPort), MCP_BACKEND_CONFIG_PATH: configPath, MCP_PROCESS_ROUTE_PATH: routesPath, FRONT_DOOR_REQUEST_LOG_PATH: requestLogPath },
+    env: { ...process.env, FRONT_DOOR_PORT: String(frontDoorPort), MCP_BACKEND_CONFIG_PATH: configPath, MCP_PROCESS_ROUTE_PATH: routesPath, FRONT_DOOR_REQUEST_LOG_PATH: requestLogPath, FRONT_DOOR_STATIC_ROUTE_PATH: staticRoutePath },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -149,6 +157,11 @@ try {
   const origin = `http://127.0.0.1:${frontDoorPort}`;
   await waitForHealth(origin);
   assert.equal(await malformedConnectionCloses(frontDoorPort), true, "front door retained a malformed client socket after clientError");
+  assert.equal(await (await fetch(`${origin}/clone-a/identity`)).text(), "clone-a", "static clone route did not strip the public path prefix");
+  assert.equal(await (await fetch(`${origin}/.well-known/oauth-authorization-server/clone-a`)).text(), "/.well-known/oauth-authorization-server/clone-a", "clone well-known route was not preserved");
+  const cloneTool = await toolCall(origin, "read_output", { process_id: processId }, "/clone-a/mcp");
+  assert.equal(cloneTool.status, 200);
+  assert.equal(JSON.parse(JSON.parse(await cloneTool.text()).result.content[0].text).stdout, "clone-a", "clone MCP call did not reach the static backend");
 
   const healthFailures = [];
   let monitor = true;
@@ -206,6 +219,7 @@ try {
   if (frontDoor && frontDoor.exitCode === null) frontDoor.kill();
   if (first?.server.listening) await new Promise((resolveClose) => first.server.close(resolveClose));
   if (second?.server.listening) await new Promise((resolveClose) => second.server.close(resolveClose));
+  if (clone?.server.listening) await new Promise((resolveClose) => clone.server.close(resolveClose));
   await sleep(50);
   rmSync(temporary, { recursive: true, force: true });
 }
