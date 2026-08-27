@@ -136,6 +136,20 @@ try {
   rmSync(receiptDirectory, { recursive: true, force: true });
 }
 
+const nonBlockingManager = new ProcessManager();
+let nonBlockingProcess;
+try {
+  nonBlockingProcess = nonBlockingManager.start("Start-Sleep -Milliseconds 1500; Write-Output 'LATE_OUTPUT'", undefined, "caller_wait0_test");
+  const startedReadAt = Date.now();
+  const immediate = await nonBlockingManager.readWithWait(nonBlockingProcess.process_id, 6_000, 0);
+  const readDurationMs = Date.now() - startedReadAt;
+  assert.ok(readDurationMs < 500, `readWithWait(wait_ms=0) blocked (${readDurationMs}ms)`);
+  assert.equal(immediate.running, true, "wait_ms=0 should observe the still-running process rather than await completion");
+  assert.ok(immediate.elapsed_ms >= 0, "elapsed_ms remains process age, not read-call latency");
+} finally {
+  if (nonBlockingProcess) await nonBlockingManager.kill(nonBlockingProcess.process_id).catch(() => undefined);
+}
+
 const waitingManager = new ProcessManager();
 let waitingProcess;
 try {
@@ -150,4 +164,4 @@ try {
   if (waitingProcess) await waitingManager.kill(waitingProcess.process_id).catch(() => undefined);
 }
 
-console.log("PASS process guard enforces rate, duplicate, live-concurrency, restart-receipt, and bounded-wait behavior");
+console.log("PASS process guard enforces rate, duplicate, live-concurrency, restart-receipt, nonblocking-zero-wait, and bounded-wait behavior");
