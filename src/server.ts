@@ -55,9 +55,10 @@ export function createServer(callerId: string): McpServer {
       inputSchema: z.object({
         command: z.string().min(1),
         working_directory: z.string().optional(),
+        wait_ms: z.number().int().min(0).max(10_000).optional(),
       }),
     },
-    async ({ command, working_directory }) => textResult(processManager.start(command, working_directory, callerId), callerId),
+    async ({ command, working_directory, wait_ms }) => textResult(await processManager.startWithWait(command, working_directory, callerId, wait_ms ?? 750), callerId),
   );
 
   server.registerTool(

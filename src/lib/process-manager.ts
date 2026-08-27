@@ -707,6 +707,21 @@ export class ProcessManager {
     return { ...processResponseState(state.startedAt, true), process_id: state.id, pid: state.pid, cwd: state.cwd, running: true } as const;
   }
 
+  async startWithWait(
+    command: string,
+    workingDirectory?: string,
+    callerId = "caller_unknown",
+    waitMs = 750,
+  ): Promise<Record<string, unknown>> {
+    const started = this.start(command, workingDirectory, callerId);
+    const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
+    if (boundedWaitMs === 0) return started;
+    const state = this.processes.get(started.process_id);
+    if (!state || state.exitCode !== null) return this.read(started.process_id);
+    await Promise.race([state.done, delay(boundedWaitMs)]);
+    return this.read(started.process_id);
+  }
+
   read(processId: string, maxChars = MAX_READ_CHARS): Record<string, unknown> {
     this.pruneCompleted();
     const limit = Math.max(1, Math.min(maxChars, MAX_READ_CHARS));
