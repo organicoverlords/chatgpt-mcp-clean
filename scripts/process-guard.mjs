@@ -178,6 +178,29 @@ try {
   if (nonBlockingProcess) await nonBlockingManager.kill(nonBlockingProcess.process_id).catch(() => undefined);
 }
 
+const fastPathManager = new ProcessManager();
+const fastPathStartedAt = Date.now();
+const fastPath = await fastPathManager.startWithWait("Write-Output 'FAST_PATH_OK'", undefined, "caller_fast_path_test", 2_000);
+const fastPathDurationMs = Date.now() - fastPathStartedAt;
+assert.equal(fastPath.running, false, JSON.stringify(fastPath));
+assert.equal(fastPath.next_action, "STOP_READING");
+assert.match(fastPath.stdout, /FAST_PATH_OK/);
+assert.ok(fastPathDurationMs < 2_000, `startWithWait did not collapse the short command (${fastPathDurationMs}ms)`);
+
+const boundedStartManager = new ProcessManager();
+let boundedStart;
+try {
+  const boundedStartedAt = Date.now();
+  boundedStart = await boundedStartManager.startWithWait("Start-Sleep -Seconds 5; Write-Output 'TOO_LATE'", undefined, "caller_bounded_start_test", 150);
+  const boundedDurationMs = Date.now() - boundedStartedAt;
+  assert.equal(boundedStart.running, true, JSON.stringify(boundedStart));
+  assert.equal(boundedStart.next_action, "READ_SAME_PROCESS_ID");
+  assert.ok(boundedDurationMs >= 100, `startWithWait returned before its bounded wait (${boundedDurationMs}ms)`);
+  assert.ok(boundedDurationMs < 1_000, `startWithWait blocked too long (${boundedDurationMs}ms)`);
+} finally {
+  if (boundedStart) await boundedStartManager.kill(boundedStart.process_id).catch(() => undefined);
+}
+
 const waitingManager = new ProcessManager();
 let waitingProcess;
 try {
