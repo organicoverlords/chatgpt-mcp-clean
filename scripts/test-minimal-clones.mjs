@@ -1,0 +1,196 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { createServer as createNetServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+
+const temporary = mkdtempSync(join(tmpdir(), "mcp-minimal-clones-"));
+const sharedReceipts = join(temporary, "shared-process-receipts");
+mkdirSync(sharedReceipts, { recursive: true });
+const children = [];
+const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+
+async function unusedPort() {
+  return new Promise((resolvePort, reject) => {
+    const server = createNetServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      server.close((error) => error ? reject(error) : resolvePort(port));
+    });
+  });
+}
+
+async function waitHealth(origin, expectedPort, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${origin}/health`);
+      if (response.ok) {
+        const body = await response.json();
+        if (body.status === "ok" && body.name === "shell-mcp" && body.port === expectedPort) return body;
+      }
+    } catch {}
+    await sleep(100);
+  }
+  throw new Error(`health timeout: ${origin}`);
+}
+
+function startClone(id, port) {
+  const state = join(temporary, id);
+  mkdirSync(state, { recursive: true });
+  const publicOrigin = `https://${id}.test.ts.net`;
+  const child = spawn(process.execPath, [resolve("dist/index.js")], {
+    cwd: resolve("."),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: "127.0.0.1",
+      MCP_BACKEND_MODE: "1",
+      MCP_TOOL_PROFILE: "process",
+      MCP_PUBLIC_ORIGIN: publicOrigin,
+      TAILSCALE_OWNER_LOGIN: "owner@example.com",
+      MCP_OAUTH_STORE_PATH: join(state, "oauth.json"),
+      MCP_TRANSPORT_LOG_PATH: join(state, "transport.jsonl"),
+      MCP_PROCESS_RECEIPT_DIR: sharedReceipts,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+  children.push(child);
+  return { id, port, publicOrigin, origin: `http://127.0.0.1:${port}`, child, stderr: () => stderr };
+}
+
+async function jsonFetch(url, options = {}) {
+  const response = await fetch(url, options);
+  const text = await response.text();
+  let body = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+  return { response, text, body };
+}
+
+async function connect(clone, clientName) {
+  const redirectUri = `https://chatgpt.com/connector/oauth/${clientName}`;
+  const resource = `${clone.publicOrigin}/mcp`;
+  const registration = await jsonFetch(`${clone.origin}/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      redirect_uris: [redirectUri],
+      token_endpoint_auth_method: "none",
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      client_name: clientName,
+    }),
+  });
+  assert.equal(registration.response.status, 201, registration.text);
+  const client = registration.body;
+  const verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~abcd";
+  const challenge = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))).toString("base64url");
+  const authorize = new URL(`${clone.origin}/authorize`);
+  for (const [key, value] of Object.entries({
+    response_type: "code",
+    client_id: client.client_id,
+    redirect_uri: redirectUri,
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+    resource,
+    scope: "mcp offline_access",
+    state: clientName,
+  })) authorize.searchParams.set(key, value);
+  const authorization = await fetch(authorize, { redirect: "manual", headers: { "tailscale-user-login": "owner@example.com" } });
+  assert.equal(authorization.status, 302, await authorization.text());
+  const code = new URL(authorization.headers.get("location")).searchParams.get("code");
+  assert.ok(code);
+  const token = await jsonFetch(`${clone.origin}/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "authorization_code", client_id: client.client_id, code, redirect_uri: redirectUri, code_verifier: verifier, resource }),
+  });
+  assert.equal(token.response.status, 200, token.text);
+  const auth = `Bearer ${token.body.access_token}`;
+  async function post(message, sessionId) {
+    const headers = { authorization: auth, "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-06-18", "x-openai-session": clientName };
+    if (sessionId) headers["mcp-session-id"] = sessionId;
+    const result = await jsonFetch(`${clone.origin}/mcp`, { method: "POST", headers, body: JSON.stringify(message) });
+    assert.ok(result.response.ok, `${result.response.status}: ${result.text}`);
+    return result;
+  }
+  const initialized = await post({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: clientName, version: "1" } } });
+  const sessionId = initialized.response.headers.get("mcp-session-id") || undefined;
+  await post({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, sessionId);
+  async function tools() {
+    const result = await post({ jsonrpc: "2.0", id: Date.now(), method: "tools/list", params: {} }, sessionId);
+    return result.body.result.tools;
+  }
+  async function call(name, args = {}) {
+    const result = await post({ jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name, arguments: args } }, sessionId);
+    const text = result.body.result.content?.[0]?.text;
+    assert.ok(text, result.text);
+    return JSON.parse(text);
+  }
+  return { tools, call };
+}
+
+let cloneA;
+let cloneB;
+try {
+  const portA = await unusedPort();
+  const portB = await unusedPort();
+  cloneA = startClone("clone-a", portA);
+  cloneB = startClone("clone-b", portB);
+  await Promise.all([waitHealth(cloneA.origin, portA), waitHealth(cloneB.origin, portB)]);
+
+  const [a1, a2, b1, b2] = await Promise.all([
+    connect(cloneA, "clone-a-client-1"),
+    connect(cloneA, "clone-a-client-2"),
+    connect(cloneB, "clone-b-client-1"),
+    connect(cloneB, "clone-b-client-2"),
+  ]);
+  const expected = ["kill_process", "read_output", "start_process"];
+  for (const client of [a1, a2, b1, b2]) {
+    const names = (await client.tools()).map((tool) => tool.name).sort();
+    assert.deepEqual(names, expected);
+  }
+
+  const started = await a1.call("start_process", { command: "Write-Output 'CLONE_MULTI_CLIENT'; Start-Sleep -Milliseconds 600; Write-Output 'DONE'" });
+  assert.ok(started.process_id);
+  const seenByOtherClient = await a2.call("read_output", { process_id: started.process_id, wait_ms: 1000 });
+  assert.match(seenByOtherClient.stdout, /CLONE_MULTI_CLIENT/);
+  assert.notEqual(seenByOtherClient.caller_id, started.caller_id, "distinct GPT connections must remain distinct callers while sharing process access");
+
+  let completed = seenByOtherClient;
+  for (let i = 0; i < 30 && completed.running; i++) {
+    await sleep(100);
+    completed = await a2.call("read_output", { process_id: started.process_id });
+  }
+  assert.equal(completed.running, false, JSON.stringify(completed));
+  assert.match(completed.stdout, /DONE/);
+
+  const handedOff = await b1.call("read_output", { process_id: started.process_id });
+  assert.equal(handedOff.running, false);
+  assert.match(handedOff.stdout, /DONE/);
+
+  cloneA.child.kill();
+  await new Promise((resolveExit) => cloneA.child.once("exit", resolveExit));
+  const bHealth = await waitHealth(cloneB.origin, portB);
+  assert.equal(bHealth.status, "ok");
+  const afterAFailure = await b2.call("start_process", { command: "Write-Output 'B_SURVIVED_A'" });
+  let bOutput;
+  for (let i = 0; i < 30; i++) {
+    await sleep(50);
+    bOutput = await b2.call("read_output", { process_id: afterAFailure.process_id });
+    if (!bOutput.running) break;
+  }
+  assert.match(bOutput.stdout, /B_SURVIVED_A/);
+
+  console.log(JSON.stringify({ result: "PASS", tools: expected, independent_clones: 2, independent_oauth_clients: 4, cross_client_reassociation: true, completed_process_cross_clone_read: true, clone_b_survived_clone_a_exit: true }));
+} finally {
+  for (const child of children) if (child.exitCode === null) child.kill();
+  await sleep(100);
+  rmSync(temporary, { recursive: true, force: true });
+}

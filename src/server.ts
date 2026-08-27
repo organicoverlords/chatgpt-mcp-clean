@@ -5,14 +5,18 @@ import { BusyStore } from "./lib/busy-store.js";
 import { viewImage } from "./lib/image-viewer.js";
 import { ProcessManager } from "./lib/process-manager.js";
 
+const toolProfile = (process.env.MCP_TOOL_PROFILE || "full").trim().toLowerCase();
+if (toolProfile !== "full" && toolProfile !== "process") throw new Error("MCP_TOOL_PROFILE must be full or process");
+const fullToolProfile = toolProfile === "full";
+
 const processManager = new ProcessManager({
   receiptDirectory: resolve(process.env.MCP_PROCESS_RECEIPT_DIR || ".state/process-receipts"),
 });
 const liveSessions = new Set<string>();
-const busyStore = new BusyStore((scope) => {
+const busyStore = fullToolProfile ? new BusyStore((scope) => {
   const sessionId = scope.startsWith("session:") ? scope.slice("session:".length) : scope;
   return liveSessions.has(sessionId) || processManager.hasLiveScope(scope);
-});
+}) : undefined;
 
 function textResult(value: unknown, id: string) {
   const data = value && typeof value === "object" && !Array.isArray(value)
@@ -29,8 +33,9 @@ export function markSessionLive(sessionId: string, live: boolean): void {
 export function createServer(callerId: string): McpServer {
   const server = new McpServer({ name: "shell-mcp", version: "0.1.0" });
 
+  if (fullToolProfile) {
   server.registerTool(
-    "view_image",
+      "view_image",
     {
       description: "Inspect one local PNG, JPEG, GIF, or WebP file for model-only visual analysis. This tool does not attach or display the file in the user's chat. Call at most once per artifact and never retry it as a delivery mechanism.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
@@ -41,6 +46,7 @@ export function createServer(callerId: string): McpServer {
       return { content: [{ type: "text" as const, text: JSON.stringify({ caller_id: callerId }) }, ...result.content] };
     },
   );
+  }
 
   server.registerTool(
     "start_process",
@@ -76,8 +82,9 @@ export function createServer(callerId: string): McpServer {
     async ({ process_id }) => textResult(await processManager.kill(process_id), callerId),
   );
 
+  if (fullToolProfile) {
   server.registerTool(
-    "busy_list",
+      "busy_list",
     {
       description: "List current exact-scope BUSY claims.",
       // Explicit empty shape, not an omitted inputSchema. Omitting it makes the SDK
@@ -85,7 +92,7 @@ export function createServer(callerId: string): McpServer {
       // every other tool here; strict clients reject that tool on first call.
       inputSchema: z.object({}),
     },
-    async () => textResult({ claims: await busyStore.list() }, callerId),
+    async () => textResult({ claims: await busyStore!.list() }, callerId),
   );
 
   server.registerTool(
@@ -94,7 +101,7 @@ export function createServer(callerId: string): McpServer {
       description: "Claim one exact scope for an actor, or report the existing claim without changing it.",
       inputSchema: z.object({ actor: z.string().min(1), scope: z.string().min(1) }),
     },
-    async ({ actor, scope }) => textResult(await busyStore.claim(actor, scope), callerId),
+    async ({ actor, scope }) => textResult(await busyStore!.claim(actor, scope), callerId),
   );
 
   server.registerTool(
@@ -103,8 +110,9 @@ export function createServer(callerId: string): McpServer {
       description: "Release only the named actor's claim for one exact scope.",
       inputSchema: z.object({ actor: z.string().min(1), scope: z.string().min(1) }),
     },
-    async ({ actor, scope }) => textResult(await busyStore.release(actor, scope), callerId),
+    async ({ actor, scope }) => textResult(await busyStore!.release(actor, scope), callerId),
   );
+  }
 
   return server;
 }
