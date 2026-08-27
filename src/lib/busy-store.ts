@@ -40,6 +40,7 @@ function isAutoPrunableScope(scope: string): boolean {
 
 export class BusyStore {
   private readonly claims = new Map<string, BusyClaim>();
+  private passthrough: Record<string, unknown> = {};
   private readonly storePath: string;
 
   constructor(
@@ -160,12 +161,12 @@ export class BusyStore {
     try {
       raw = readFileSync(this.storePath, "utf8");
     } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") this.claims.clear();
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") { this.claims.clear(); this.passthrough = {}; }
       return;
     }
-    let parsed: Partial<BusyFile>;
+    let parsed: Partial<BusyFile> & Record<string, unknown>;
     try {
-      parsed = JSON.parse(raw) as Partial<BusyFile>;
+      parsed = JSON.parse(raw) as Partial<BusyFile> & Record<string, unknown>;
     } catch {
       return;
     }
@@ -178,12 +179,14 @@ export class BusyStore {
     }
     this.claims.clear();
     for (const [scope, claim] of next) this.claims.set(scope, claim);
+    const { claims: _claims, ...passthrough } = parsed;
+    this.passthrough = passthrough;
   }
 
   private persist(): void {
     mkdirSync(dirname(this.storePath), { recursive: true });
     const tempPath = `${this.storePath}.${process.pid}.tmp`;
-    writeFileSync(tempPath, `${JSON.stringify({ claims: [...this.claims.values()] }, null, 2)}\n`, "utf8");
+    writeFileSync(tempPath, `${JSON.stringify({ ...this.passthrough, claims: [...this.claims.values()] }, null, 2)}\n`, "utf8");
     renameSync(tempPath, this.storePath);
   }
 
