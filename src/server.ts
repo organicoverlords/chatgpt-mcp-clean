@@ -66,7 +66,7 @@ export function createServer(callerId: string): McpServer {
       description: "Read a bounded tail of accumulated stdout and stderr. wait_ms=0 is server-side nonblocking; positive wait_ms waits for new output or process exit, up to 10 seconds. The returned elapsed_ms is process age, not read-call latency. A disconnect is not evidence that the process stopped; reconnect and reuse the same process_id. Each stream is limited to 32,000 characters and marks truncation explicitly; page output that exceeds that bound rather than assuming process failure.",
       inputSchema: z.object({
         process_id: z.string().min(1),
-        max_chars: z.number().int().min(1).max(6_000).optional(),
+        max_chars: z.number().int().min(1).max(32_000).optional(),
         wait_ms: z.number().int().min(0).max(10_000).optional(),
       }),
     },

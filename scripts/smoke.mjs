@@ -139,6 +139,7 @@ const listed = await mcpPost(sessionA, { jsonrpc: "2.0", id: 2, method: "tools/l
 const names = listed.body.result.tools.map((tool) => tool.name).sort();
 assert.deepEqual(names, ["busy_claim", "busy_list", "busy_release", "kill_process", "read_output", "start_process", "view_image"]);
 const readOutputTool = listed.body.result.tools.find((tool) => tool.name === "read_output");
+assert.equal(readOutputTool.inputSchema.properties.max_chars.maximum, 32_000);
 assert.equal(readOutputTool.inputSchema.properties.wait_ms.maximum, 10_000);
 assert.equal(readOutputTool.inputSchema.properties.wait_ms.minimum, 0);
 
