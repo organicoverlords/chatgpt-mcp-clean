@@ -4,6 +4,7 @@ All notable project changes are recorded here in Keep a Changelog 1.1.0 style.
 
 ## [Unreleased]
 
+- [2026-08-30] Raised the bounded `read_output` stream window from 6,000 to 32,000 characters after the old ~6 KB transport-wall hypothesis was rejected; added a regression proving a 24 KB result is delivered whole while oversized output remains explicitly truncated. Live ChatGPT connector delivery still requires a separate canary before deployment.
 - [2026-08-27] Added optional static clone routing at the stable front door so `/clone-a` and `/clone-b` can share one Funnel target on port 3003 instead of exposing ports 3011/3012 directly; root generation/process pinning is unchanged and clone OAuth metadata paths remain intact (regression-research #125).
 - [2026-08-27] Added owner-relayed cross-clone live-process control for the minimal connector pool: a backup clone can read or kill a still-running process through the shared local control mailbox while the creating clone remains the only process owner; completed receipts remain the durable handoff path (regression-research #125).
 - [2026-08-27] Proved `read_output(wait_ms=0)` is server-side nonblocking and clarified that response `elapsed_ms` is process age after #125 transport evidence showed a 3.2-second user-visible delay occurred before the follow-up request reached MCP, not inside `read_output`.

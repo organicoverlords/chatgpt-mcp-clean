@@ -6,12 +6,11 @@ import type { Readable } from "node:stream";
 import { currentTelemetryContext, emitTelemetry, withTelemetryContext, type TelemetryContext } from "./transport-telemetry.js";
 
 const MAX_CAPTURE_CHARS = 100_000;
-// 6,000 not 20,000: the platform blocks read_output payloads above roughly 6 KB as a
-// safety error AFTER the process has already run, so a larger cap produces an invisible
-// failure -- the output sits complete in the receipt while the caller sees only a block.
-// Measured 2026-08-25: 6.4 KB delivered, 12.8 KB and 14.4 KB blocked. Truncating below
-// that ceiling turns a silent loss into a marked stdout_truncated read the caller can page.
-const MAX_READ_CHARS = 6_000;
+// Keep one read large enough for the current ChatGPT bootstrap plus its compact recent-memory
+// glance. The old 6,000-character ceiling was a defensive workaround for an Aug 25 transport
+// hypothesis that later evidence rejected as a universal payload wall. 32,000 is deliberately
+// below the 100,000-character capture ceiling; caller-side delivery still requires a live canary.
+const MAX_READ_CHARS = 32_000;
 const MAX_COMMAND_REPORT_CHARS = 4_000;
 const COMPLETED_RETENTION_MS = 30 * 60 * 1000;
 const MAX_COMPLETED_PROCESSES = 64;
