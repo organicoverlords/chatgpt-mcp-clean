@@ -178,6 +178,14 @@ try {
   assert.equal(killed.killed, true);
   execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `if (Get-Process -Id ${childPid} -ErrorAction SilentlyContinue) { exit 1 } else { exit 0 }`], { encoding: "utf8" });
 
+  const windowJob = await callTool(sessionA, "start_process", { command: "Write-Output ('WINDOW_BEGIN_' + ('W' * 24000) + '_WINDOW_END')" });
+  const windowOutput = await waitForExit(sessionA, windowJob.process_id);
+  assert.equal(windowOutput.running, false);
+  assert.equal(windowOutput.stdout_truncated, undefined);
+  assert.match(windowOutput.stdout, /^WINDOW_BEGIN_/);
+  assert.match(windowOutput.stdout, /_WINDOW_END\r?\n?$/);
+  assert.ok(windowOutput.stdout.length > 24_000, `read_output unexpectedly shortened ${windowOutput.stdout.length} characters`);
+
   floodJob = await callTool(sessionA, "start_process", { command: "$payload = 'X' * 200; 1..10000 | ForEach-Object { Write-Output (('FLOOD_{0}_{1}' -f $_,$payload)) }" });
   const healthStarted = Date.now();
   const healthDuringFlood = await jsonFetch(`${origin}/health`, { signal: AbortSignal.timeout(5_000) });
@@ -185,7 +193,8 @@ try {
   assert.ok(Date.now() - healthStarted < 5_000, "health probe stalled during high-output process");
   const floodOutput = await waitForExit(sessionA, floodJob.process_id);
   assert.equal(floodOutput.running, false);
-  assert.ok(floodOutput.stdout.length <= 6_000, `read_output returned ${floodOutput.stdout.length} characters`);
+  assert.ok(floodOutput.stdout.length <= 32_000, `read_output returned ${floodOutput.stdout.length} characters`);
+  assert.ok(floodOutput.stdout.length > 6_000, `read_output regressed to the old 6k window: ${floodOutput.stdout.length} characters`);
   assert.equal(floodOutput.stdout_truncated, true);
   assert.match(floodOutput.stdout, /FLOOD_10000_/);
 
