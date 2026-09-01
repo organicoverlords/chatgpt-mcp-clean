@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import "dotenv/config";
-import { createServer, request as httpRequest } from "node:http";
+import { Agent, createServer, request as httpRequest } from "node:http";
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 import { createWriteStream, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -22,6 +22,7 @@ const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
 const MAX_CAPTURE_BYTES = 1024 * 1024;
 const PROCESS_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HOP_BY_HOP_HEADERS = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"]);
+const backendAgent = new Agent({ keepAlive: true, maxSockets: 128, maxFreeSockets: 32 });
 
 if (HOST !== "127.0.0.1" || !Number.isInteger(PORT) || PORT < 1024 || PORT > 65535) {
   throw new Error("The MCP front door must bind a non-privileged port on 127.0.0.1");
@@ -237,7 +238,7 @@ async function proxyRequest(request: IncomingMessage, response: ServerResponse, 
     method: request.method,
     path: request.url,
     headers: outgoingHeaders(request.headers, target),
-    agent: false,
+    agent: backendAgent,
   }, (backendResponse) => {
     if (requestId) frontDoorLog("front_backend_response", { request_id: requestId, backend_port: target.port, status: backendResponse.statusCode || null });
     if (!response.destroyed && !response.headersSent) {
@@ -298,7 +299,7 @@ async function proxyStaticRequest(request: IncomingMessage, response: ServerResp
     method: request.method,
     path: match.upstreamPath,
     headers: outgoingHeaders(request.headers, match.route),
-    agent: false,
+    agent: backendAgent,
   }, (backendResponse) => {
     if (requestId) frontDoorLog("front_static_response", { request_id: requestId, route: match.route.slug, backend_port: match.route.port, status: backendResponse.statusCode || null });
     if (!response.destroyed && !response.headersSent) {
@@ -398,7 +399,7 @@ server.headersTimeout = 40_000;
 server.requestTimeout = 35_000;
 server.timeout = 0;
 const stop = () => {
-  server.close(() => requestLogStream.end(() => process.exit(0)));
+  server.close(() => { backendAgent.destroy(); requestLogStream.end(() => process.exit(0)); });
   setTimeout(() => process.exit(1), 5_000).unref();
 };
 process.on("SIGINT", stop);
