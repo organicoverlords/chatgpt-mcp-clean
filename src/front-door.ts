@@ -9,8 +9,15 @@ type BackendTarget = { version: 1; port: number; generation: string };
 type ProcessRoute = { port: number; generation: string; created_at: string };
 type ProcessRouteFile = { version: 1; routes: Record<string, ProcessRoute> };
 type McpCall = { tool?: string; processId?: string };
-type StaticRouteFile = { version: 1; routes: Record<string, number> };
-type StaticRoute = { slug: string; port: number };
+type StaticRouteFile = { version: 1; routes: Record<string, number | number[]> };
+type StaticRoute = { slug: string; ports: number[] };
+type StaticAttempt = {
+  port: number;
+  statusCode: number;
+  statusMessage?: string;
+  headers: IncomingHttpHeaders;
+  body: Buffer;
+};
 
 const HOST = process.env.FRONT_DOOR_HOST || "127.0.0.1";
 const PORT = Number(process.env.FRONT_DOOR_PORT || 3003);
@@ -46,9 +53,10 @@ function staticRoutes(): StaticRoute[] {
   try {
     const parsed = JSON.parse(readFileSync(STATIC_ROUTE_PATH, "utf8").replace(/^\uFEFF/, "")) as Partial<StaticRouteFile>;
     if (parsed.version !== 1 || !parsed.routes || typeof parsed.routes !== "object") throw new Error("invalid static route config");
-    const routes = Object.entries(parsed.routes).map(([slug, port]) => {
-      if (!/^[a-z0-9][a-z0-9-]{0,62}$/i.test(slug) || !Number.isInteger(port) || port < 1024 || port > 65535 || port === PORT) throw new Error("invalid static route");
-      return { slug, port };
+    const routes = Object.entries(parsed.routes).map(([slug, configuredPorts]) => {
+      const ports = [...new Set(Array.isArray(configuredPorts) ? configuredPorts : [configuredPorts])];
+      if (!/^[a-z0-9][a-z0-9-]{0,62}$/i.test(slug) || ports.length === 0 || ports.some((port) => !Number.isInteger(port) || port < 1024 || port > 65535 || port === PORT)) throw new Error("invalid static route");
+      return { slug, ports };
     });
     lastStaticRoutes = routes;
   } catch (error) {
@@ -179,8 +187,8 @@ function outgoingHeaders(headers: IncomingHttpHeaders, target: { port: number })
   return next;
 }
 
-function copyResponseHeaders(source: IncomingMessage, response: ServerResponse): void {
-  for (const [name, value] of Object.entries(source.headers)) {
+function copyResponseHeaders(headers: IncomingHttpHeaders, response: ServerResponse): void {
+  for (const [name, value] of Object.entries(headers)) {
     if (value !== undefined && !HOP_BY_HOP_HEADERS.has(name.toLowerCase())) response.setHeader(name, value);
   }
 }
@@ -244,7 +252,7 @@ async function proxyRequest(request: IncomingMessage, response: ServerResponse, 
     if (!response.destroyed && !response.headersSent) {
       response.statusCode = backendResponse.statusCode || 502;
       response.statusMessage = backendResponse.statusMessage || response.statusMessage;
-      copyResponseHeaders(backendResponse, response);
+      copyResponseHeaders(backendResponse.headers, response);
     }
     const captured: Buffer[] = [];
     let capturedBytes = 0;
@@ -283,46 +291,127 @@ async function proxyRequest(request: IncomingMessage, response: ServerResponse, 
   upstream.end(body);
 }
 
+function staticAttempt(request: IncomingMessage, body: Buffer, match: { route: StaticRoute; upstreamPath: string }, port: number): Promise<StaticAttempt> {
+  return new Promise((resolveAttempt, rejectAttempt) => {
+    let settled = false;
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      rejectAttempt(error);
+    };
+    const upstream = httpRequest({
+      host: "127.0.0.1",
+      port,
+      method: request.method,
+      path: match.upstreamPath,
+      headers: outgoingHeaders(request.headers, { port }),
+      agent: backendAgent,
+    }, (backendResponse) => {
+      const chunks: Buffer[] = [];
+      let capturedBytes = 0;
+      backendResponse.on("data", (chunk: Buffer) => {
+        capturedBytes += chunk.length;
+        if (capturedBytes > MAX_CAPTURE_BYTES) {
+          backendResponse.destroy(new Error("static backend response exceeded capture limit"));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      backendResponse.on("end", () => {
+        if (settled) return;
+        settled = true;
+        resolveAttempt({
+          port,
+          statusCode: backendResponse.statusCode || 502,
+          statusMessage: backendResponse.statusMessage,
+          headers: backendResponse.headers,
+          body: Buffer.concat(chunks),
+        });
+      });
+      backendResponse.on("error", fail);
+    });
+    // A normal start_process request may intentionally wait for output before
+    // returning. Match the dynamic proxy's bound so a successful command is
+    // not reported as 503 merely because wait_ms exceeds the health-probe
+    // timeout. Ambiguous timeouts are still never retried.
+    upstream.setTimeout(35_000, () => upstream.destroy(new Error("static backend request timeout")));
+    upstream.on("error", fail);
+    upstream.end(body);
+  });
+}
+
+function staticBackendHealthy(port: number): Promise<boolean> {
+  return new Promise((resolveHealthy) => {
+    let settled = false;
+    const finish = (healthy: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolveHealthy(healthy);
+    };
+    const probe = httpRequest({ host: "127.0.0.1", port, path: "/health", method: "GET", agent: false }, (probeResponse) => {
+      const chunks: Buffer[] = [];
+      probeResponse.on("data", (chunk: Buffer) => chunks.push(chunk));
+      probeResponse.on("end", () => {
+        try {
+          const health = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { status?: unknown; name?: unknown; port?: unknown };
+          finish(probeResponse.statusCode === 200 && health.status === "ok" && health.name === "shell-mcp" && health.port === port);
+        } catch { finish(false); }
+      });
+    });
+    probe.setTimeout(1_000, () => probe.destroy(new Error("static backend health timeout")));
+    probe.on("error", () => finish(false));
+    probe.end();
+  });
+}
+
+function retryableStaticStatus(statusCode: number): boolean {
+  // These responses prove the replacement rejected the request before a tool
+  // ran. Retrying an ambiguous timeout or 5xx could execute start_process twice.
+  return statusCode === 401 || statusCode === 403 || statusCode === 404;
+}
+
 async function proxyStaticRequest(request: IncomingMessage, response: ServerResponse, body: Buffer, match: { route: StaticRoute; upstreamPath: string }, requestId?: string): Promise<void> {
   activeRequests += 1;
   totalRequests += 1;
-  let settled = false;
-  const finish = () => {
-    if (settled) return;
-    settled = true;
-    activeRequests -= 1;
-  };
-  if (requestId) frontDoorLog("front_static_dispatch", { request_id: requestId, route: match.route.slug, backend_port: match.route.port, upstream_path: match.upstreamPath.split("?", 1)[0] });
-  const upstream = httpRequest({
-    host: "127.0.0.1",
-    port: match.route.port,
-    method: request.method,
-    path: match.upstreamPath,
-    headers: outgoingHeaders(request.headers, match.route),
-    agent: backendAgent,
-  }, (backendResponse) => {
-    if (requestId) frontDoorLog("front_static_response", { request_id: requestId, route: match.route.slug, backend_port: match.route.port, status: backendResponse.statusCode || null });
-    if (!response.destroyed && !response.headersSent) {
-      response.statusCode = backendResponse.statusCode || 502;
-      response.statusMessage = backendResponse.statusMessage || response.statusMessage;
-      copyResponseHeaders(backendResponse, response);
+  let lastAttempt: StaticAttempt | undefined;
+  try {
+    for (let index = 0; index < match.route.ports.length; index += 1) {
+      const port = match.route.ports[index];
+      if (!await staticBackendHealthy(port)) {
+        if (requestId) frontDoorLog("front_static_unhealthy", { request_id: requestId, route: match.route.slug, backend_port: port, fallback_index: index });
+        if (index === match.route.ports.length - 1) throw new Error("all static backends are unhealthy");
+        if (requestId) frontDoorLog("front_static_retry", { request_id: requestId, route: match.route.slug, failed_backend_port: port, status: null, next_backend_port: match.route.ports[index + 1] });
+        continue;
+      }
+      if (requestId) frontDoorLog("front_static_dispatch", { request_id: requestId, route: match.route.slug, backend_port: port, upstream_path: match.upstreamPath.split("?", 1)[0], fallback_index: index });
+      try {
+        const attempt = await staticAttempt(request, body, match, port);
+        lastAttempt = attempt;
+        if (requestId) frontDoorLog("front_static_response", { request_id: requestId, route: match.route.slug, backend_port: port, status: attempt.statusCode, fallback_index: index });
+        if (!retryableStaticStatus(attempt.statusCode) || index === match.route.ports.length - 1) break;
+        if (requestId) frontDoorLog("front_static_retry", { request_id: requestId, route: match.route.slug, failed_backend_port: port, status: attempt.statusCode, next_backend_port: match.route.ports[index + 1] });
+      } catch (error) {
+        if (requestId) frontDoorLog("front_static_error", { request_id: requestId, route: match.route.slug, backend_port: port, error: error instanceof Error ? error.message : String(error), fallback_index: index });
+        throw error;
+      }
     }
-    backendResponse.on("data", (chunk: Buffer) => { if (!response.destroyed) response.write(chunk); });
-    backendResponse.on("end", () => { if (!response.destroyed) response.end(); finish(); });
-    backendResponse.on("error", () => { if (!response.destroyed) response.destroy(); finish(); });
-  });
-  upstream.setTimeout(35_000, () => upstream.destroy(new Error("static backend request timeout")));
-  upstream.on("error", (error) => {
-    if (requestId) frontDoorLog("front_static_error", { request_id: requestId, route: match.route.slug, backend_port: match.route.port, error: error.message });
+    if (!lastAttempt) throw new Error("no static backend returned a response");
+    if (!response.destroyed && !response.headersSent) {
+      response.statusCode = lastAttempt.statusCode;
+      response.statusMessage = lastAttempt.statusMessage || response.statusMessage;
+      copyResponseHeaders(lastAttempt.headers, response);
+      response.end(lastAttempt.body);
+    }
+  } catch {
     if (!response.destroyed && !response.headersSent) {
       response.statusCode = 503;
       response.setHeader("content-type", "application/json");
       response.setHeader("retry-after", "1");
       response.end(JSON.stringify({ error: "Service unavailable" }));
     } else if (!response.destroyed) response.destroy();
-    finish();
-  });
-  upstream.end(body);
+  } finally {
+    activeRequests -= 1;
+  }
 }
 
 async function readBody(request: IncomingMessage): Promise<Buffer> {
