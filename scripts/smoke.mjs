@@ -1,11 +1,15 @@
-import "dotenv/config";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 
-const origin = (process.env.MCP_SMOKE_ORIGIN || process.env.MCP_PUBLIC_ORIGIN || "http://127.0.0.1:3000").replace(/\/$/, "");
+const origin = (process.env.MCP_SMOKE_ORIGIN || "http://127.0.0.1:3000").replace(/\/$/, "");
+const parsedOrigin = new URL(origin);
+const loopbackOrigin = parsedOrigin.hostname === "127.0.0.1" || parsedOrigin.hostname === "localhost";
+if (!loopbackOrigin && process.env.MCP_ALLOW_EXTERNAL_SMOKE !== "1") {
+  throw new Error("smoke.mjs requires a loopback MCP_SMOKE_ORIGIN; set MCP_ALLOW_EXTERNAL_SMOKE=1 only for an explicit external smoke run");
+}
 const ownerLogin = (process.env.TAILSCALE_OWNER_LOGIN || "owner@example.com").trim();
 const redirectUri = "https://chatgpt.com/connector/oauth/smoke";
-const resource = `${origin}/mcp`;
+const resource = process.env.MCP_SMOKE_RESOURCE || `${origin}/mcp`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function jsonFetch(url, options = {}) {

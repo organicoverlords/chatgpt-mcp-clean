@@ -6,6 +6,9 @@ dist/
 
 # Local scratch: contains a nested git checkout, must not become a gitlink.
 work/
+# Runtime state for the optional minimal connector clones; source/configuration
+# belongs in config/ and scripts/, while credentials, logs, and receipts stay local.
+minimal-connectors/
 # Timestamped safety copies made during repair; history is the real record.
 *.bak-*
 *.prehardening-*

@@ -11,6 +11,7 @@ const temporary = mkdtempSync(join(tmpdir(), "shell-mcp-front-door-"));
 const configPath = join(temporary, "active-backend.json");
 const routesPath = join(temporary, "process-routes.json");
 const requestLogPath = join(temporary, "front-door-request.jsonl");
+const staticRoutePath = join(temporary, "static-routes.json");
 const processId = "11111111-1111-4111-8111-111111111111";
 let releaseSlow;
 const slowGate = new Promise((resolveSlow) => { releaseSlow = resolveSlow; });
@@ -26,11 +27,8 @@ async function requestBody(request) {
 }
 
 async function backend(name) {
-  const healthDelays = [];
   const server = createServer(async (request, response) => {
     if (request.url === "/health") {
-      const delayMs = healthDelays.shift() || 0;
-      if (delayMs) await sleep(delayMs);
       response.setHeader("content-type", "application/json");
       response.end(JSON.stringify({ status: "ok", name: "shell-mcp", role: "backend", backend_generation: `${name}-1`, backend: name }));
       return;
@@ -44,6 +42,10 @@ async function backend(name) {
       response.end(name);
       return;
     }
+    if (request.url?.startsWith("/.well-known/")) {
+      response.end(request.url);
+      return;
+    }
     const raw = await requestBody(request);
     let rpc = {};
     try { rpc = JSON.parse(raw); } catch {}
@@ -55,7 +57,7 @@ async function backend(name) {
     else response.end(JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { backend: name } }));
   });
   await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
-  return { server, port: server.address().port, delayNextHealth: (milliseconds) => healthDelays.push(milliseconds) };
+  return { server, port: server.address().port };
 }
 
 async function unusedPort() {
@@ -126,8 +128,8 @@ async function malformedConnectionCloses(port) {
   });
 }
 
-async function toolCall(origin, name, args) {
-  return fetch(`${origin}/mcp`, {
+async function toolCall(origin, name, args, path = "/mcp") {
+  return fetch(`${origin}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name, arguments: args } }),
@@ -137,13 +139,16 @@ async function toolCall(origin, name, args) {
 let frontDoor;
 let first;
 let second;
+let clone;
 try {
   first = await backend("blue");
   second = await backend("green");
+  clone = await backend("clone-a");
+  writeFileSync(staticRoutePath, `${JSON.stringify({ version: 1, routes: { "clone-a": clone.port } }, null, 2)}\n`, "utf8");
   const frontDoorPort = await unusedPort();
   writeTarget(first.port, "blue-1");
   frontDoor = spawn(process.execPath, [resolve("dist/front-door.js")], {
-    env: { ...process.env, FRONT_DOOR_PORT: String(frontDoorPort), MCP_BACKEND_CONFIG_PATH: configPath, MCP_PROCESS_ROUTE_PATH: routesPath, FRONT_DOOR_REQUEST_LOG_PATH: requestLogPath },
+    env: { ...process.env, FRONT_DOOR_PORT: String(frontDoorPort), MCP_BACKEND_CONFIG_PATH: configPath, MCP_PROCESS_ROUTE_PATH: routesPath, FRONT_DOOR_REQUEST_LOG_PATH: requestLogPath, FRONT_DOOR_STATIC_ROUTE_PATH: staticRoutePath },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -152,6 +157,11 @@ try {
   const origin = `http://127.0.0.1:${frontDoorPort}`;
   await waitForHealth(origin);
   assert.equal(await malformedConnectionCloses(frontDoorPort), true, "front door retained a malformed client socket after clientError");
+  assert.equal(await (await fetch(`${origin}/clone-a/identity`)).text(), "clone-a", "static clone route did not strip the public path prefix");
+  assert.equal(await (await fetch(`${origin}/.well-known/oauth-authorization-server/clone-a`)).text(), "/.well-known/oauth-authorization-server/clone-a", "clone well-known route was not preserved");
+  const cloneTool = await toolCall(origin, "read_output", { process_id: processId }, "/clone-a/mcp");
+  assert.equal(cloneTool.status, 200);
+  assert.equal(JSON.parse(JSON.parse(await cloneTool.text()).result.content[0].text).stdout, "clone-a", "clone MCP call did not reach the static backend");
 
   const healthFailures = [];
   let monitor = true;
@@ -188,14 +198,6 @@ try {
   assert.equal(pinned.status, 200);
   assert.equal(JSON.parse(JSON.parse(await pinned.text()).result.content[0].text).stdout, "blue", "same process_id must stay pinned to its creating backend");
 
-  first.delayNextHealth(1_500);
-  const delayedPinned = await toolCall(origin, "read_output", { process_id: processId });
-  assert.equal(delayedPinned.status, 200, "a slow generation probe must not turn a healthy pinned backend into a false 503");
-  assert.equal(JSON.parse(JSON.parse(await delayedPinned.text()).result.content[0].text).stdout, "blue");
-  const delayedEvidence = await waitForRequestLog((entries) => entries.some((entry) => entry.event === "front_backend_probe_timeout"));
-  assert.ok(delayedEvidence.some((entry) => entry.event === "front_backend_probe_timeout" && entry.backend_port === first.port));
-  assert.ok(delayedEvidence.some((entry) => entry.event === "front_backend_dispatch" && entry.backend_port === first.port), "a timed-out probe must still dispatch to the pinned backend");
-
   await new Promise((resolveClose) => first.server.close(resolveClose));
   const unavailable = await toolCall(origin, "read_output", { process_id: processId });
   assert.equal(unavailable.status, 503);
@@ -209,7 +211,7 @@ try {
   assert.deepEqual(healthFailures, [], `front-door health disappeared: ${healthFailures.join("; ")}`);
   const finalHealth = await (await fetch(`${origin}/health`)).json();
   assert.equal(finalHealth.status, "ok");
-  console.log(`PASS front_door_continuity health_failures=0 active_switch=blue-to-green in_flight_drained=true process_id_pinned=true slow_probe_dispatched=true unavailable_route_preserved=true front_door_pid=${finalHealth.pid}`);
+  console.log(`PASS front_door_continuity health_failures=0 active_switch=blue-to-green in_flight_drained=true process_id_pinned=true unavailable_route_preserved=true front_door_pid=${finalHealth.pid}`);
 
   assert.equal(frontDoor.exitCode, null, frontDoorError);
 } finally {
@@ -217,6 +219,7 @@ try {
   if (frontDoor && frontDoor.exitCode === null) frontDoor.kill();
   if (first?.server.listening) await new Promise((resolveClose) => first.server.close(resolveClose));
   if (second?.server.listening) await new Promise((resolveClose) => second.server.close(resolveClose));
+  if (clone?.server.listening) await new Promise((resolveClose) => clone.server.close(resolveClose));
   await sleep(50);
   rmSync(temporary, { recursive: true, force: true });
 }

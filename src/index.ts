@@ -29,8 +29,11 @@ if (PORT !== 3000 && !backendMode) throw new Error("Alternate loopback ports req
 if (!ORIGIN || !OWNER) throw new Error("MCP_PUBLIC_ORIGIN and TAILSCALE_OWNER_LOGIN are required");
 
 const publicOrigin = new URL(ORIGIN);
-if (publicOrigin.protocol !== "https:" || !publicOrigin.hostname.endsWith(".ts.net")) throw new Error("MCP_PUBLIC_ORIGIN must be an HTTPS .ts.net origin");
-const resource = new URL("/mcp", publicOrigin);
+if (publicOrigin.protocol !== "https:" || !publicOrigin.hostname.endsWith(".ts.net") || publicOrigin.search || publicOrigin.hash) throw new Error("MCP_PUBLIC_ORIGIN must be an HTTPS .ts.net origin without query or fragment");
+if (!publicOrigin.pathname.endsWith("/")) publicOrigin.pathname += "/";
+const publicBasePath = publicOrigin.pathname === "/" ? "" : publicOrigin.pathname.replace(/\/$/, "");
+const publicUrl = (path: string): URL => new URL(path.replace(/^\/+/, ""), publicOrigin);
+const resource = publicUrl("mcp");
 const oauth = new LocalOAuthProvider(resource, OWNER, STORE);
 const bearer = requireBearerAuth({ verifier: oauth, requiredScopes: ["mcp"], resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resource) });
 
@@ -159,9 +162,9 @@ app.use("/authorize", (req, res, next) => {
 });
 const oauthMetadata = {
   issuer: publicOrigin.href,
-  authorization_endpoint: new URL("/authorize", publicOrigin).href,
-  token_endpoint: new URL("/token", publicOrigin).href,
-  registration_endpoint: new URL("/register", publicOrigin).href,
+  authorization_endpoint: publicUrl("authorize").href,
+  token_endpoint: publicUrl("token").href,
+  registration_endpoint: publicUrl("register").href,
   response_types_supported: ["code"],
   grant_types_supported: ["authorization_code", "refresh_token"],
   token_endpoint_auth_methods_supported: ["client_secret_post", "none"],
@@ -170,9 +173,16 @@ const oauthMetadata = {
 };
 
 app.get("/.well-known/openid-configuration", (_req, res) => res.json(oauthMetadata));
+// Path-scoped connector identities use RFC 8414 discovery with the issuer path
+// inserted after the well-known prefix. Keep these explicit routes ahead of the
+// SDK router because its authorization endpoint generation is root-oriented.
+if (publicBasePath) {
+  app.get(`/.well-known/oauth-authorization-server${publicBasePath}`, (_req, res) => res.json(oauthMetadata));
+  app.get(`/.well-known/openid-configuration${publicBasePath}`, (_req, res) => res.json(oauthMetadata));
+}
 // Traycer probes the RFC 8414 path relative to the protected resource before
-// falling back to the issuer root.  The SDK serves the root path, so mirror
-// the same metadata at the resource-specific path as well.
+// falling back to the issuer root. The root-origin compatibility route stays
+// available for the existing production connector.
 app.get("/.well-known/oauth-authorization-server/mcp", (_req, res) => res.json(oauthMetadata));
 app.use(mcpAuthRouter({ provider: oauth, issuerUrl: publicOrigin, resourceServerUrl: resource, scopesSupported: ["mcp", "offline_access"], resourceName: "Shell MCP", clientRegistrationOptions: { rateLimit: { windowMs: 60 * 60 * 1000, max: 300 } } }));
 

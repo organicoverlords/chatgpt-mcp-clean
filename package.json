@@ -6,7 +6,7 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "test": "tsc && node scripts/check-readme-timeline.mjs && node scripts/test-front-door-continuity.mjs && node scripts/prove-offpath-backend-replacement.mjs && node scripts/test-supervisor-continuity.mjs && node scripts/test-oauth-client-retention.mjs && node scripts/concurrency-busy.mjs && node scripts/smoke.mjs",
+    "test": "tsc && node scripts/check-readme-timeline.mjs && node scripts/test-front-door-continuity.mjs && node scripts/prove-offpath-backend-replacement.mjs && node scripts/test-supervisor-continuity.mjs && node scripts/test-oauth-client-retention.mjs && node scripts/process-guard.mjs && node scripts/concurrency-busy.mjs && node scripts/test-minimal-clones.mjs && node scripts/test-smoke-isolated.mjs",
     "start": "node dist/index.js"
   },
   "dependencies": {

@@ -10,6 +10,7 @@ const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)
 const temporary = mkdtempSync(join(tmpdir(), "shell-mcp-replacement-proof-"));
 const configPath = join(temporary, "active-backend.json");
 const routesPath = join(temporary, "process-routes.json");
+const staticRoutePath = join(temporary, "static-routes.json");
 const oauthPath = join(temporary, "oauth.json");
 const busyPath = join(temporary, "busy.json");
 const receiptPath = join(temporary, "receipts");
@@ -87,7 +88,7 @@ try {
   const blueHealth = await waitHealth(`http://127.0.0.1:${bluePort}`, (body) => body.role === "backend" && body.port === bluePort);
   await waitHealth(`http://127.0.0.1:${greenPort}`, (body) => body.role === "backend" && body.port === greenPort);
   writeTarget(bluePort, blueHealth.backend_generation);
-  const frontDoor = launch("dist/front-door.js", { FRONT_DOOR_PORT: String(frontDoorPort), MCP_BACKEND_CONFIG_PATH: configPath, MCP_PROCESS_ROUTE_PATH: routesPath });
+  const frontDoor = launch("dist/front-door.js", { FRONT_DOOR_PORT: String(frontDoorPort), MCP_BACKEND_CONFIG_PATH: configPath, MCP_PROCESS_ROUTE_PATH: routesPath, FRONT_DOOR_STATIC_ROUTE_PATH: staticRoutePath });
   const frontDoorOrigin = `http://127.0.0.1:${frontDoorPort}`;
   const firstHealth = await waitHealth(frontDoorOrigin, (body) => body.name === "shell-mcp" && body.port === frontDoorPort);
 

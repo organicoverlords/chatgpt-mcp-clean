@@ -9,12 +9,15 @@ type BackendTarget = { version: 1; port: number; generation: string };
 type ProcessRoute = { port: number; generation: string; created_at: string };
 type ProcessRouteFile = { version: 1; routes: Record<string, ProcessRoute> };
 type McpCall = { tool?: string; processId?: string };
+type StaticRouteFile = { version: 1; routes: Record<string, number> };
+type StaticRoute = { slug: string; port: number };
 
 const HOST = process.env.FRONT_DOOR_HOST || "127.0.0.1";
 const PORT = Number(process.env.FRONT_DOOR_PORT || 3003);
 const BACKEND_CONFIG_PATH = resolve(process.env.MCP_BACKEND_CONFIG_PATH || ".state/front-door/active-backend.json");
 const PROCESS_ROUTES_PATH = resolve(process.env.MCP_PROCESS_ROUTE_PATH || ".state/front-door/process-routes.json");
 const REQUEST_LOG_PATH = resolve(process.env.FRONT_DOOR_REQUEST_LOG_PATH || ".state/front-door/request.jsonl");
+const STATIC_ROUTE_PATH = resolve(process.env.FRONT_DOOR_STATIC_ROUTE_PATH || ".state/front-door/static-routes.json");
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
 const MAX_CAPTURE_BYTES = 1024 * 1024;
 const PROCESS_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -35,6 +38,42 @@ function validBackend(value: unknown): value is BackendTarget {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<BackendTarget>;
   return candidate.version === 1 && Number.isInteger(candidate.port) && candidate.port! >= 1024 && candidate.port! <= 65535 && candidate.port !== PORT && typeof candidate.generation === "string" && candidate.generation.length > 0;
+}
+
+let lastStaticRoutes: StaticRoute[] = [];
+function staticRoutes(): StaticRoute[] {
+  try {
+    const parsed = JSON.parse(readFileSync(STATIC_ROUTE_PATH, "utf8").replace(/^\uFEFF/, "")) as Partial<StaticRouteFile>;
+    if (parsed.version !== 1 || !parsed.routes || typeof parsed.routes !== "object") throw new Error("invalid static route config");
+    const routes = Object.entries(parsed.routes).map(([slug, port]) => {
+      if (!/^[a-z0-9][a-z0-9-]{0,62}$/i.test(slug) || !Number.isInteger(port) || port < 1024 || port > 65535 || port === PORT) throw new Error("invalid static route");
+      return { slug, port };
+    });
+    lastStaticRoutes = routes;
+  } catch (error) {
+    if (lastStaticRoutes.length === 0) {
+      try { readFileSync(STATIC_ROUTE_PATH, "utf8"); } catch { return []; }
+      throw error;
+    }
+  }
+  return lastStaticRoutes;
+}
+
+function staticRouteForUrl(rawUrl: string, requestPath: string): { route: StaticRoute; upstreamPath: string } | undefined {
+  const queryIndex = rawUrl.indexOf("?");
+  const query = queryIndex >= 0 ? rawUrl.slice(queryIndex) : "";
+  for (const route of staticRoutes()) {
+    const prefix = `/${route.slug}`;
+    if (requestPath === prefix || requestPath.startsWith(`${prefix}/`)) {
+      const stripped = requestPath.slice(prefix.length) || "/";
+      return { route, upstreamPath: `${stripped}${query}` };
+    }
+    for (const base of ["/.well-known/oauth-authorization-server/", "/.well-known/oauth-protected-resource/", "/.well-known/openid-configuration/"]) {
+      const marker = `${base}${route.slug}`;
+      if (requestPath === marker || requestPath.startsWith(`${marker}/`)) return { route, upstreamPath: rawUrl };
+    }
+  }
+  return undefined;
 }
 
 let lastBackend: BackendTarget | undefined;
@@ -128,7 +167,7 @@ function updateProcessRoute(call: McpCall, target: BackendTarget, responseBody: 
   }
 }
 
-function outgoingHeaders(headers: IncomingHttpHeaders, target: BackendTarget): IncomingHttpHeaders {
+function outgoingHeaders(headers: IncomingHttpHeaders, target: { port: number }): IncomingHttpHeaders {
   const next: IncomingHttpHeaders = {};
   for (const [name, value] of Object.entries(headers)) {
     if (!HOP_BY_HOP_HEADERS.has(name.toLowerCase())) next[name] = value;
@@ -148,29 +187,22 @@ function copyResponseHeaders(source: IncomingMessage, response: ServerResponse):
 let activeRequests = 0;
 let totalRequests = 0;
 
-type GenerationProbeResult = "match" | "unavailable" | "timeout";
-
-async function targetGenerationMatches(target: BackendTarget): Promise<GenerationProbeResult> {
+async function targetGenerationMatches(target: BackendTarget): Promise<boolean> {
   return new Promise((resolveMatch) => {
-    let timedOut = false;
     const probe = httpRequest({ host: "127.0.0.1", port: target.port, path: "/health", method: "GET", agent: false }, (probeResponse) => {
       const chunks: Buffer[] = [];
       probeResponse.on("data", (chunk: Buffer) => chunks.push(chunk));
       probeResponse.on("end", () => {
         try {
           const health = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { status?: unknown; name?: unknown; pid?: unknown; backend_generation?: unknown };
-          if (health.status !== "ok" || health.name !== "shell-mcp") return resolveMatch("unavailable");
-          if (target.generation.startsWith("legacy-")) return resolveMatch(String(health.pid) === target.generation.slice("legacy-".length) ? "match" : "unavailable");
-          resolveMatch(health.backend_generation === target.generation ? "match" : "unavailable");
-        } catch { resolveMatch("unavailable"); }
+          if (health.status !== "ok" || health.name !== "shell-mcp") return resolveMatch(false);
+          if (target.generation.startsWith("legacy-")) return resolveMatch(String(health.pid) === target.generation.slice("legacy-".length));
+          resolveMatch(health.backend_generation === target.generation);
+        } catch { resolveMatch(false); }
       });
     });
-    probe.setTimeout(1_000, () => {
-      timedOut = true;
-      resolveMatch("timeout");
-      probe.destroy();
-    });
-    probe.on("error", () => resolveMatch(timedOut ? "timeout" : "unavailable"));
+    probe.setTimeout(1_000, () => probe.destroy());
+    probe.on("error", () => resolveMatch(false));
     probe.end();
   });
 }
@@ -180,8 +212,7 @@ async function proxyRequest(request: IncomingMessage, response: ServerResponse, 
   const pinned = call.processId ? processRoutes.get(call.processId) : undefined;
   const target = pinned ? { version: 1 as const, port: pinned.port, generation: pinned.generation } : active;
   if (requestId) frontDoorLog("front_backend_select", { request_id: requestId, tool: call.tool || null, process_id: call.processId || null, backend_port: target.port, backend_generation: target.generation, pinned: Boolean(pinned) });
-  const generationProbe = await targetGenerationMatches(target);
-  if (generationProbe === "unavailable") {
+  if (!await targetGenerationMatches(target)) {
     if (requestId) frontDoorLog("front_backend_unavailable", { request_id: requestId, backend_port: target.port, backend_generation: target.generation });
     if (!response.destroyed && !response.headersSent) {
       response.statusCode = 503;
@@ -190,9 +221,6 @@ async function proxyRequest(request: IncomingMessage, response: ServerResponse, 
       response.end(JSON.stringify({ error: "Service unavailable" }));
     }
     return;
-  }
-  if (generationProbe === "timeout" && requestId) {
-    frontDoorLog("front_backend_probe_timeout", { request_id: requestId, backend_port: target.port, backend_generation: target.generation });
   }
   activeRequests += 1;
   totalRequests += 1;
@@ -254,6 +282,48 @@ async function proxyRequest(request: IncomingMessage, response: ServerResponse, 
   upstream.end(body);
 }
 
+async function proxyStaticRequest(request: IncomingMessage, response: ServerResponse, body: Buffer, match: { route: StaticRoute; upstreamPath: string }, requestId?: string): Promise<void> {
+  activeRequests += 1;
+  totalRequests += 1;
+  let settled = false;
+  const finish = () => {
+    if (settled) return;
+    settled = true;
+    activeRequests -= 1;
+  };
+  if (requestId) frontDoorLog("front_static_dispatch", { request_id: requestId, route: match.route.slug, backend_port: match.route.port, upstream_path: match.upstreamPath.split("?", 1)[0] });
+  const upstream = httpRequest({
+    host: "127.0.0.1",
+    port: match.route.port,
+    method: request.method,
+    path: match.upstreamPath,
+    headers: outgoingHeaders(request.headers, match.route),
+    agent: false,
+  }, (backendResponse) => {
+    if (requestId) frontDoorLog("front_static_response", { request_id: requestId, route: match.route.slug, backend_port: match.route.port, status: backendResponse.statusCode || null });
+    if (!response.destroyed && !response.headersSent) {
+      response.statusCode = backendResponse.statusCode || 502;
+      response.statusMessage = backendResponse.statusMessage || response.statusMessage;
+      copyResponseHeaders(backendResponse, response);
+    }
+    backendResponse.on("data", (chunk: Buffer) => { if (!response.destroyed) response.write(chunk); });
+    backendResponse.on("end", () => { if (!response.destroyed) response.end(); finish(); });
+    backendResponse.on("error", () => { if (!response.destroyed) response.destroy(); finish(); });
+  });
+  upstream.setTimeout(35_000, () => upstream.destroy(new Error("static backend request timeout")));
+  upstream.on("error", (error) => {
+    if (requestId) frontDoorLog("front_static_error", { request_id: requestId, route: match.route.slug, backend_port: match.route.port, error: error.message });
+    if (!response.destroyed && !response.headersSent) {
+      response.statusCode = 503;
+      response.setHeader("content-type", "application/json");
+      response.setHeader("retry-after", "1");
+      response.end(JSON.stringify({ error: "Service unavailable" }));
+    } else if (!response.destroyed) response.destroy();
+    finish();
+  });
+  upstream.end(body);
+}
+
 async function readBody(request: IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -267,8 +337,11 @@ async function readBody(request: IncomingMessage): Promise<Buffer> {
 }
 
 const server = createServer(async (request, response) => {
-  const requestPath = request.url?.split("?", 1)[0] || "";
-  const requestId = requestPath === "/mcp" ? `${process.pid}-${Date.now()}-${++requestSequence}` : undefined;
+  const rawUrl = request.url || "";
+  const requestPath = rawUrl.split("?", 1)[0] || "";
+  const staticMatch = staticRouteForUrl(rawUrl, requestPath);
+  const isMcpRequest = requestPath === "/mcp" || staticMatch?.upstreamPath.split("?", 1)[0] === "/mcp";
+  const requestId = isMcpRequest ? `${process.pid}-${Date.now()}-${++requestSequence}` : undefined;
   const requestStartedAt = Date.now();
   let requestFinished = false;
   if (requestId) {
@@ -291,9 +364,10 @@ const server = createServer(async (request, response) => {
   }
   try {
     const body = await readBody(request);
-    const call = requestPath === "/mcp" ? parseMcpCall(body) : {};
-    if (requestId) frontDoorLog("front_request_parsed", { request_id: requestId, tool: call.tool || null, process_id: call.processId || null });
-    await proxyRequest(request, response, body, call, requestId);
+    const call = isMcpRequest ? parseMcpCall(body) : {};
+    if (requestId) frontDoorLog("front_request_parsed", { request_id: requestId, tool: call.tool || null, process_id: call.processId || null, static_route: staticMatch?.route.slug || null });
+    if (staticMatch) await proxyStaticRequest(request, response, body, staticMatch, requestId);
+    else await proxyRequest(request, response, body, call, requestId);
   } catch (error) {
     if (!response.headersSent) {
       response.statusCode = error instanceof Error && error.message === "request_too_large" ? 413 : 500;
