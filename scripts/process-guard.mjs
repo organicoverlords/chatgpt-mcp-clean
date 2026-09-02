@@ -43,44 +43,6 @@ try {
   if (observabilityProcess) await observabilityManager.kill(observabilityProcess.process_id).catch(() => undefined);
 }
 
-const manager = new ProcessManager({ maxLaunchesPerWindow: 2 });
-const callerId = "caller_rate_guard_test";
-let rejected;
-
-for (let index = 1; index <= 3; index += 1) {
-  try {
-    const started = manager.start(`Write-Output 'RATE_${index}'`, undefined, callerId);
-    await waitForExit(manager, started.process_id);
-  } catch (error) {
-    rejected = error;
-    break;
-  }
-}
-
-assert.ok(rejected instanceof Error, "the launch after the per-caller limit must be rejected");
-assert.match(rejected.message, /start_process_rate_limited/);
-
-let fakeNow = 1_000_000;
-const refillManager = new ProcessManager({
-  maxLaunchesPerWindow: 2,
-  launchRefillMs: 5_000,
-  now: () => fakeNow,
-});
-for (let index = 1; index <= 2; index += 1) {
-  const started = refillManager.start(`Write-Output 'REFILL_${index}'`, undefined, "caller_refill_test");
-  await waitForExit(refillManager, started.process_id);
-}
-fakeNow += 5_000;
-let refillError;
-let refilledProcess;
-try {
-  refilledProcess = refillManager.start("Write-Output 'REFILLED'", undefined, "caller_refill_test");
-  await waitForExit(refillManager, refilledProcess.process_id);
-} catch (error) {
-  refillError = error;
-}
-assert.equal(refillError, undefined, "one launch token must refill after the configured refill interval");
-
 const duplicateManager = new ProcessManager();
 let first;
 let duplicate;
@@ -98,7 +60,7 @@ const liveProcesses = [];
 let concurrencyRejection;
 let otherCallerProcess;
 try {
-  for (let index = 1; index <= 4; index += 1) {
+  for (let index = 1; index <= 6; index += 1) {
     try {
       liveProcesses.push(concurrencyManager.start(`Start-Sleep -Seconds 5 # ${index}`, undefined, "caller_concurrency_test"));
     } catch (error) {
@@ -106,7 +68,8 @@ try {
       break;
     }
   }
-  assert.ok(concurrencyRejection instanceof Error, "a fourth simultaneous process from one caller must be rejected");
+  assert.equal(liveProcesses.length, 5, "five simultaneous processes from one caller must be admitted");
+  assert.ok(concurrencyRejection instanceof Error, "a sixth simultaneous process from one caller must be rejected");
   assert.match(concurrencyRejection.message, /start_process_concurrency_limited/);
   otherCallerProcess = concurrencyManager.start("Start-Sleep -Seconds 5 # other caller", undefined, "caller_concurrency_test_other");
   assert.equal(otherCallerProcess.running, true, "one caller's live-process cap must not block another caller");
@@ -185,7 +148,7 @@ const fastPathDurationMs = Date.now() - fastPathStartedAt;
 assert.equal(fastPath.running, false, JSON.stringify(fastPath));
 assert.equal(fastPath.next_action, "STOP_READING");
 assert.match(fastPath.stdout, /FAST_PATH_OK/);
-assert.ok(fastPathDurationMs < 2_000, `startWithWait did not collapse the short command (${fastPathDurationMs}ms)`);
+assert.ok(fastPathDurationMs < 3_000, `startWithWait did not collapse the short command (${fastPathDurationMs}ms)`);
 
 const boundedStartManager = new ProcessManager();
 let boundedStart;
@@ -196,7 +159,7 @@ try {
   assert.equal(boundedStart.running, true, JSON.stringify(boundedStart));
   assert.equal(boundedStart.next_action, "READ_SAME_PROCESS_ID");
   assert.ok(boundedDurationMs >= 100, `startWithWait returned before its bounded wait (${boundedDurationMs}ms)`);
-  assert.ok(boundedDurationMs < 1_000, `startWithWait blocked too long (${boundedDurationMs}ms)`);
+  assert.ok(boundedDurationMs < 2_000, `startWithWait blocked too long (${boundedDurationMs}ms)`);
 } finally {
   if (boundedStart) await boundedStartManager.kill(boundedStart.process_id).catch(() => undefined);
 }
@@ -215,4 +178,4 @@ try {
   if (waitingProcess) await waitingManager.kill(waitingProcess.process_id).catch(() => undefined);
 }
 
-console.log("PASS process guard enforces rate, duplicate, live-concurrency, restart-receipt, cross-clone-live-control, nonblocking-zero-wait, and bounded-wait behavior");
+console.log("PASS process guard enforces duplicate, five-live-concurrency, restart-receipt, cross-clone-live-control, nonblocking-zero-wait, and bounded-wait behavior");

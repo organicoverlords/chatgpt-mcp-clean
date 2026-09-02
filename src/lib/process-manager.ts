@@ -16,9 +16,7 @@ const COMPLETED_RETENTION_MS = 30 * 60 * 1000;
 const MAX_COMPLETED_PROCESSES = 64;
 const TASKKILL_TIMEOUT_MS = 2_000;
 const KILL_SETTLE_MS = 1_000;
-const DEFAULT_LAUNCH_BUCKET_CAPACITY = 40;
-const DEFAULT_LAUNCH_REFILL_MS = 5_000;
-const DEFAULT_MAX_LIVE_PER_CALLER = 3;
+const DEFAULT_MAX_LIVE_PER_CALLER = 5;
 const CONTROL_POLL_MS = 100;
 const CONTROL_HANDOFF_OVERHEAD_MS = 1_500;
 const CONTROL_KILL_TIMEOUT_MS = TASKKILL_TIMEOUT_MS + KILL_SETTLE_MS + CONTROL_HANDOFF_OVERHEAD_MS;
@@ -27,16 +25,9 @@ const CONTROL_PRUNE_INTERVAL_MS = 60_000;
 type CapturedChild = ChildProcessByStdio<null, Readable, Readable>;
 
 type ProcessManagerOptions = {
-  maxLaunchesPerWindow?: number;
-  launchRefillMs?: number;
   maxLivePerCaller?: number;
   now?: () => number;
   receiptDirectory?: string;
-};
-
-type LaunchBucket = {
-  tokens: number;
-  lastRefillAt: number;
 };
 
 type CompletedProcessReceipt = {
@@ -244,9 +235,6 @@ function processResponseState(startedAt: string, running: boolean, finishedAt?: 
 
 export class ProcessManager {
   private readonly processes = new Map<string, ProcessState>();
-  private readonly launchBucketsByCaller = new Map<string, LaunchBucket>();
-  private readonly launchBucketCapacity: number;
-  private readonly launchRefillMs: number;
   private readonly maxLivePerCaller: number;
   private readonly now: () => number;
   private readonly receiptDirectory?: string;
@@ -256,8 +244,6 @@ export class ProcessManager {
   private lastControlPruneAt = 0;
 
   constructor(options: ProcessManagerOptions = {}) {
-    this.launchBucketCapacity = options.maxLaunchesPerWindow ?? DEFAULT_LAUNCH_BUCKET_CAPACITY;
-    this.launchRefillMs = options.launchRefillMs ?? DEFAULT_LAUNCH_REFILL_MS;
     this.maxLivePerCaller = options.maxLivePerCaller ?? DEFAULT_MAX_LIVE_PER_CALLER;
     this.now = options.now ?? Date.now;
     this.receiptDirectory = options.receiptDirectory ? resolve(options.receiptDirectory) : undefined;
@@ -571,27 +557,6 @@ export class ProcessManager {
     };
   }
 
-  private reserveLaunch(callerId: string): void {
-    const now = this.now();
-    const bucket = this.launchBucketsByCaller.get(callerId) ?? {
-      tokens: this.launchBucketCapacity,
-      lastRefillAt: now,
-    };
-    const elapsedMs = Math.max(0, now - bucket.lastRefillAt);
-    bucket.tokens = Math.min(
-      this.launchBucketCapacity,
-      bucket.tokens + elapsedMs / this.launchRefillMs,
-    );
-    bucket.lastRefillAt = now;
-    if (bucket.tokens < 1) {
-      const retryAfterMs = Math.max(1, Math.ceil((1 - bucket.tokens) * this.launchRefillMs));
-      this.launchBucketsByCaller.set(callerId, bucket);
-      throw new Error(`start_process_rate_limited: caller launch bucket is empty; capacity=${this.launchBucketCapacity}; refill_ms=${this.launchRefillMs}; retry_after_ms=${retryAfterMs}`);
-    }
-    bucket.tokens -= 1;
-    this.launchBucketsByCaller.set(callerId, bucket);
-  }
-
   private markProcessChanged(state: ProcessState): void {
     state.revision += 1;
     for (const wake of [...state.waiters]) wake();
@@ -631,7 +596,6 @@ export class ProcessManager {
     if (liveForCaller.length >= this.maxLivePerCaller) {
       throw new Error(`start_process_concurrency_limited: caller already has ${liveForCaller.length} live processes; active_process_ids=${liveForCaller.map((state) => state.id).join(",")}`);
     }
-    this.reserveLaunch(callerId);
     const child = powershell(command, cwd);
     if (!child.pid) throw new Error("Background process did not receive a PID");
 
