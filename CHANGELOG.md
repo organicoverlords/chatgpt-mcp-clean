@@ -4,6 +4,7 @@ All notable project changes are recorded here in Keep a Changelog 1.1.0 style.
 
 ## [Unreleased]
 
+- [2026-09-02] Bounded backend transport and front-door request JSONL telemetry to 16 MiB per file with 24-hour rotation and three retained backups; added stress/restart regression while preserving the no-secret/no-command telemetry contract.
 - [2026-09-02] Restored clone-path backend TCP session reuse after array fallback health probes regressed to one fresh TCP connection per tool call; the original connection-reuse guard is back and proves 60 sequential clone requests use at most two backend connections.
 - [2026-09-02] Reconciled and pinned the process transport contract: 32,000-character reads, automatic 750 ms `start_process` wait, five live processes per caller, no rolling launch/token bucket, ordered compatible clone fallbacks, and stable OAuth/receipt reuse for replacement clones.
 - [2026-09-02] Defined the MCP/coordinator operating boundary: clean deployment lanes, bounded telemetry/temp state, one standalone ownership authority, queue reconciliation, and no connector-driven task drift.
