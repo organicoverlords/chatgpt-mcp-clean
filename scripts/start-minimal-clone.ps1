@@ -51,5 +51,7 @@ $env:MCP_PROCESS_RECEIPT_DIR = $SharedReceiptDirectory
 
 if (-not $env:TAILSCALE_OWNER_LOGIN) { throw 'TAILSCALE_OWNER_LOGIN is required (normally supplied by .env)' }
 if (-not $SkipBuild) { & npm.cmd run build --silent; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+& node.exe scripts/verify-process-contract.mjs
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & node.exe dist/index.js
 exit $LASTEXITCODE

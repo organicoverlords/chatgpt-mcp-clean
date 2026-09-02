@@ -178,4 +178,21 @@ try {
   if (waitingProcess) await waitingManager.kill(waitingProcess.process_id).catch(() => undefined);
 }
 
+
+const receiptChurnDirectory = mkdtempSync(join(tmpdir(), "mcp-receipt-churn-"));
+try {
+  const receiptChurnManager = new ProcessManager({ receiptDirectory: receiptChurnDirectory });
+  let oldestReceiptProcessId;
+  for (let index = 0; index < 80; index += 1) {
+    const completed = await receiptChurnManager.startWithWait(`Write-Output 'RECEIPT_CHURN_${index}'`, undefined, `caller_receipt_churn_${index % 8}`, 2_000);
+    assert.equal(completed.running, false, JSON.stringify(completed));
+    if (index === 0) oldestReceiptProcessId = completed.process_id;
+  }
+  const recoveryManager = new ProcessManager({ receiptDirectory: receiptChurnDirectory });
+  const recoveredOldest = recoveryManager.read(oldestReceiptProcessId);
+  assert.equal(recoveredOldest.running, false, JSON.stringify(recoveredOldest));
+  assert.match(recoveredOldest.stdout, /RECEIPT_CHURN_0/, "receipt churn from other callers must not evict a process before the retention window expires");
+} finally {
+  rmSync(receiptChurnDirectory, { recursive: true, force: true });
+}
 console.log("PASS process guard enforces duplicate, five-live-concurrency, restart-receipt, cross-clone-live-control, nonblocking-zero-wait, and bounded-wait behavior");

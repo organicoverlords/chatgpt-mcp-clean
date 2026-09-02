@@ -51,7 +51,7 @@ export function createServer(callerId: string): McpServer {
   server.registerTool(
     "start_process",
     {
-      description: "Start a noninteractive PowerShell process in the background and return immediately with a stable process_id. If a later MCP call disconnects, the process may still be running: reconnect and reuse this process_id with read_output; do not start a replacement without process evidence.",
+      description: "Start a noninteractive PowerShell process. By default this call waits up to 750 ms so fast commands can finish and return their output in this same tool call; set wait_ms=0 for immediate background launch or raise it up to 10 seconds for a known-short command. If next_action=STOP_READING, do not call read_output. If next_action=READ_SAME_PROCESS_ID, reuse the returned process_id; never start a replacement without process evidence.",
       inputSchema: z.object({
         command: z.string().min(1),
         working_directory: z.string().optional(),
