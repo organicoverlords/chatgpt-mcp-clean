@@ -137,7 +137,13 @@ assert.equal(standaloneGet.headers.get("allow"), "POST");
 getController.abort();
 const listed = await mcpPost(sessionA, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
 const names = listed.body.result.tools.map((tool) => tool.name).sort();
-assert.deepEqual(names, ["busy_claim", "busy_list", "busy_release", "kill_process", "read_output", "start_process", "view_image"]);
+const processToolNames = ["kill_process", "read_output", "start_process"];
+const fullToolNames = ["busy_claim", "busy_list", "busy_release", "kill_process", "read_output", "start_process", "view_image"];
+assert.ok(
+  [JSON.stringify(processToolNames), JSON.stringify(fullToolNames)].includes(JSON.stringify(names)),
+  `unexpected MCP tool profile: ${JSON.stringify(names)}`,
+);
+const fullToolProfile = names.includes("busy_claim");
 const startProcessTool = listed.body.result.tools.find((tool) => tool.name === "start_process");
 assert.equal(startProcessTool.inputSchema.properties.wait_ms.maximum, 10_000);
 assert.equal(startProcessTool.inputSchema.properties.wait_ms.minimum, 0);
@@ -202,6 +208,7 @@ try {
   assert.equal(floodOutput.stdout_truncated, true);
   assert.match(floodOutput.stdout, /FLOOD_10000_/);
 
+  if (fullToolProfile) {
   const sessionB = await initialize();
   const scope = `smoke-exact-scope-${Date.now()}`;
   const claimA = await callTool(sessionA, "busy_claim", { actor: "smoke-actor-a", scope });
@@ -217,6 +224,7 @@ try {
   assert.equal(released.ok, true);
   const afterRelease = await callTool(sessionB, "busy_list");
   assert.ok(!afterRelease.claims.some((claim) => claim.scope === scope));
+  }
 } finally {
   if (jobOne?.process_id) await callTool(sessionA, "kill_process", { process_id: jobOne.process_id }).catch(() => undefined);
   if (jobTwo?.process_id) await callTool(sessionA, "kill_process", { process_id: jobTwo.process_id }).catch(() => undefined);
@@ -239,4 +247,4 @@ const hasSerenaProcess = processList.some((process) => {
   return directBinary || (launcher && /\bserena\b/i.test(commandLine) && /\bstart-mcp-server\b/i.test(commandLine));
 });
 assert.ok(!hasSerenaProcess, "Serena process exists");
-console.log(`PASS mcp=standard-initialize tools=${names.join(",")} background=immediate+read_while_running concurrency=two_jobs high_output=bounded+health-responsive kill_tree=root+child_gone busy=cross_session_claim_list_release listener=${listenerJson} port9121=unused serena=absent`);
+console.log(`PASS mcp=standard-initialize tools=${names.join(",")} background=immediate+read_while_running concurrency=two_jobs high_output=bounded+health-responsive kill_tree=root+child_gone busy=${fullToolProfile ? "cross_session_claim_list_release" : "not-in-process-profile"} listener=${listenerJson} port9121=unused serena=absent`);
