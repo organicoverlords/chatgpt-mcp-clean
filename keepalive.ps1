@@ -56,11 +56,6 @@ $Origin = EnvValue 'MCP_PUBLIC_ORIGIN'
 $ServerName = 'shell-mcp'
 $ExpectedRole = if ($Role -eq 'FrontDoor') { 'front-door' } elseif ($Role -eq 'Legacy') { 'direct' } else { 'backend' }
 $Tailscale = 'C:\Program Files\Tailscale\tailscale.exe'
-$FunnelBridgePort = 3443
-$FunnelBridgeState = Join-Path $Root '.state\tls-bridge'
-$FunnelBridgeScript = Join-Path $Root 'scripts\tls-bridge.mjs'
-$FunnelBridgeCert = Join-Path $FunnelBridgeState 'kone.crt'
-$FunnelBridgeKey = Join-Path $FunnelBridgeState 'kone.key'
 if (-not $BackendConfigPath) { $BackendConfigPath = Join-Path $Root '.state\front-door\active-backend.json' }
 if (-not $ProcessRoutePath) { $ProcessRoutePath = Join-Path $Root '.state\front-door\process-routes.json' }
 $RoleKey = if ($Role -eq 'FrontDoor') { if ($TestMode) { "front-door-test-$Port" } else { 'front-door' } } elseif ($Role -eq 'Legacy') { 'legacy-3000' } else { "backend-$Port" }
@@ -116,54 +111,27 @@ function PublicHealthy {
         return ($response.status -eq 'ok' -and $response.name -eq $ServerName -and [int]$response.port -eq $Port)
     } catch { return $false }
 }
-function FunnelBridgeOwner {
-    $listener = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $FunnelBridgePort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($listener) { return [int]$listener.OwningProcess }
-    return 0
-}
-function EnsureFunnelBridge {
-    if ($TestMode -or $Role -ne 'FrontDoor' -or -not $Origin) { return $false }
-    if ((FunnelBridgeOwner) -gt 0) { return $true }
-    try {
-        New-Item -ItemType Directory -Force $FunnelBridgeState | Out-Null
-        if (-not (Test-Path $FunnelBridgeCert) -or -not (Test-Path $FunnelBridgeKey)) {
-            & $Tailscale cert --cert-file $FunnelBridgeCert --key-file $FunnelBridgeKey ([uri]$Origin).Host | Out-Null
-            if ($LASTEXITCODE -ne 0) { Log 'TLS bridge certificate provisioning failed'; return $false }
-        }
-        if (-not (Test-Path $FunnelBridgeScript)) { Log 'TLS bridge script missing'; return $false }
-        $node = (Get-Command node.exe -ErrorAction Stop).Source
-        Start-Process -FilePath $node -ArgumentList @($FunnelBridgeScript,'--cert',$FunnelBridgeCert,'--key',$FunnelBridgeKey,'--listen-port',[string]$FunnelBridgePort,'--target-port',[string]$Port) -WorkingDirectory $Root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $FunnelBridgeState 'bridge.stdout.log') -RedirectStandardError (Join-Path $FunnelBridgeState 'bridge.stderr.log') | Out-Null
-        $deadline = [DateTime]::UtcNow.AddSeconds(5)
-        do { Start-Sleep -Milliseconds 100 } while ((FunnelBridgeOwner) -le 0 -and [DateTime]::UtcNow -lt $deadline)
-        if ((FunnelBridgeOwner) -le 0) { Log 'TLS bridge failed to start'; return $false }
-        Log "restored TLS bridge on 127.0.0.1:$FunnelBridgePort -> 127.0.0.1:$Port"
-        return $true
-    } catch { Log ('TLS bridge recovery failed: '+$_.Exception.Message); return $false }
-}
 function FunnelConfigured {
     if ($TestMode -or $Role -ne 'FrontDoor' -or -not $Origin -or -not (Test-Path $Tailscale)) { return $false }
     try {
         $status = (& $Tailscale funnel status --json | ConvertFrom-Json)
         $hostKey = ([uri]$Origin).Host + ':443'
         $allowed = ($status.AllowFunnel.$hostKey -eq $true)
+        $directHttps = ($status.TCP.'443'.HTTPS -eq $true -and $status.Web.$hostKey.Handlers.'/'.Proxy -eq "http://127.0.0.1:$Port")
+        # This validates only the root handler. Direct /clone-* and clone OAuth/OpenID handlers are independent production routes and must be preserved.
         $tcpForward = [string]$status.TCP.'443'.TCPForward
-        return ($allowed -and $tcpForward -eq "127.0.0.1:$FunnelBridgePort" -and (FunnelBridgeOwner) -gt 0)
+        # A live TCP-forward Funnel may terminate TLS in a local bridge before
+        # reaching the stable front door. It is already configured; do not
+        # rewrite Funnel every poll just because it is not the direct-HTTPS shape.
+        return ($allowed -and ($directHttps -or -not [string]::IsNullOrWhiteSpace($tcpForward)))
     } catch { return $false }
 }
 function EnsureFunnelConfiguration {
-    if ($TestMode -or $Role -ne 'FrontDoor' -or -not $Origin -or -not (Test-Path $Tailscale) -or -not (Healthy)) { return }
-    if (-not (EnsureFunnelBridge)) { return }
-    if (FunnelConfigured) { return }
-    try {
-        $status = (& $Tailscale funnel status --json | ConvertFrom-Json)
-        if ($status.TCP.'443'.HTTPS -eq $true) {
-            Log 'HTTPS Funnel proxy mode detected; refusing automatic rewrite because Windows Funnel MCP drops are unresolved; run scripts/set-direct-clone-funnel.ps1 for explicit raw-TCP promotion'
-            return
-        }
-    } catch {}
-    & $Tailscale funnel --yes --bg --tcp=443 "tcp://127.0.0.1:$FunnelBridgePort" | Out-Null
-    if ($LASTEXITCODE -eq 0 -and (FunnelConfigured)) { Log 'restored raw TCP Funnel to the local TLS bridge' }
-    else { Log 'raw TCP Funnel configuration repair failed' }
+    if ($TestMode -or $Role -ne 'FrontDoor' -or -not $Origin -or -not (Test-Path $Tailscale) -or -not (Healthy) -or (FunnelConfigured)) { return }
+    # Never reset Funnel here: root repair must preserve direct clone and metadata handlers.
+    & $Tailscale funnel --yes --bg --https=443 "http://127.0.0.1:$Port" | Out-Null
+    if ($LASTEXITCODE -eq 0 -and (FunnelConfigured)) { Log 'restored Tailscale Funnel to the stable front door' }
+    else { Log 'Tailscale Funnel configuration repair failed' }
 }
 
 function PortOwner {
