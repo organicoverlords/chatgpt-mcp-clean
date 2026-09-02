@@ -677,12 +677,18 @@ export class ProcessManager {
     callerId = "caller_unknown",
     waitMs = 750,
   ): Promise<Record<string, unknown>> {
-    const started = this.start(command, workingDirectory, callerId);
     const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
+    const budgetStartedAt = Date.now();
+    const started = this.start(command, workingDirectory, callerId);
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
     if (!state || state.exitCode !== null) return this.read(started.process_id);
-    await Promise.race([state.done, delay(boundedWaitMs)]);
+    // The wait budget covers synchronous process creation too. On a loaded Windows
+    // host, spawning PowerShell can itself be delayed; adding a fresh full wait
+    // afterward can push the MCP request past the connector deadline and reset an
+    // otherwise healthy front door while the child continues running.
+    const remainingWaitMs = Math.max(0, boundedWaitMs - (Date.now() - budgetStartedAt));
+    if (remainingWaitMs > 0) await Promise.race([state.done, delay(remainingWaitMs)]);
     return this.read(started.process_id);
   }
 

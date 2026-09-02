@@ -164,6 +164,26 @@ try {
   if (boundedStart) await boundedStartManager.kill(boundedStart.process_id).catch(() => undefined);
 }
 
+const spawnBudgetManager = new ProcessManager();
+const realSpawnBudgetStart = spawnBudgetManager.start.bind(spawnBudgetManager);
+spawnBudgetManager.start = (...args) => {
+  const blockUntil = Date.now() + 450;
+  while (Date.now() < blockUntil) { /* simulate host pressure delaying process creation */ }
+  return realSpawnBudgetStart(...args);
+};
+let spawnBudgetProcess;
+try {
+  const spawnBudgetStartedAt = Date.now();
+  spawnBudgetProcess = await spawnBudgetManager.startWithWait("Start-Sleep -Seconds 5; Write-Output 'TOO_LATE'", undefined, "caller_spawn_budget_test", 200);
+  const spawnBudgetDurationMs = Date.now() - spawnBudgetStartedAt;
+  assert.equal(spawnBudgetProcess.running, true, JSON.stringify(spawnBudgetProcess));
+  assert.equal(spawnBudgetProcess.next_action, "READ_SAME_PROCESS_ID");
+  assert.ok(spawnBudgetDurationMs >= 400, `spawn-delay fixture did not apply (${spawnBudgetDurationMs}ms)`);
+  assert.ok(spawnBudgetDurationMs < 625, `startWithWait added a fresh wait after delayed spawn (${spawnBudgetDurationMs}ms)`);
+} finally {
+  if (spawnBudgetProcess) await spawnBudgetManager.kill(spawnBudgetProcess.process_id).catch(() => undefined);
+}
+
 const waitingManager = new ProcessManager();
 let waitingProcess;
 try {

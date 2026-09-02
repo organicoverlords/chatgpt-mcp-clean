@@ -4,6 +4,7 @@ All notable project changes are recorded here in Keep a Changelog 1.1.0 style.
 
 ## [Unreleased]
 
+- [2026-09-02] Made the default `start_process` wait budget include synchronous Windows process creation so host/editor startup pressure cannot add a second full 750 ms wait and push an otherwise healthy MCP request past the connector deadline.
 - [2026-09-02] Reconciled and pinned the process transport contract: 32,000-character reads, automatic 750 ms `start_process` wait, five live processes per caller, no rolling launch/token bucket, ordered compatible clone fallbacks, and stable OAuth/receipt reuse for replacement clones.
 - [2026-09-02] Defined the MCP/coordinator operating boundary: clean deployment lanes, bounded telemetry/temp state, one standalone ownership authority, queue reconciliation, and no connector-driven task drift.
 - [2026-08-30] Raised the bounded `read_output` stream window and advertised MCP schema from 6,000 to 32,000 characters after the old ~6 KB transport-wall hypothesis was rejected; added regressions proving the schema exposes 32 KB, a 24 KB result is delivered whole, and oversized output remains explicitly truncated. Live ChatGPT connector delivery still requires a separate canary before deployment.
