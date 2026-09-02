@@ -348,7 +348,7 @@ function staticBackendHealthy(port: number): Promise<boolean> {
       settled = true;
       resolveHealthy(healthy);
     };
-    const probe = httpRequest({ host: "127.0.0.1", port, path: "/health", method: "GET", agent: false }, (probeResponse) => {
+    const probe = httpRequest({ host: "127.0.0.1", port, path: "/health", method: "GET", agent: backendAgent }, (probeResponse) => {
       const chunks: Buffer[] = [];
       probeResponse.on("data", (chunk: Buffer) => chunks.push(chunk));
       probeResponse.on("end", () => {
