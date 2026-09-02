@@ -116,7 +116,13 @@ function FunnelConfigured {
     try {
         $status = (& $Tailscale funnel status --json | ConvertFrom-Json)
         $hostKey = ([uri]$Origin).Host + ':443'
-        return ($status.TCP.'443'.HTTPS -eq $true -and $status.Web.$hostKey.Handlers.'/'.Proxy -eq "http://127.0.0.1:$Port" -and $status.AllowFunnel.$hostKey -eq $true)
+        $allowed = ($status.AllowFunnel.$hostKey -eq $true)
+        $directHttps = ($status.TCP.'443'.HTTPS -eq $true -and $status.Web.$hostKey.Handlers.'/'.Proxy -eq "http://127.0.0.1:$Port")
+        $tcpForward = [string]$status.TCP.'443'.TCPForward
+        # A live TCP-forward Funnel may terminate TLS in a local bridge before
+        # reaching the stable front door. It is already configured; do not
+        # rewrite Funnel every poll just because it is not the direct-HTTPS shape.
+        return ($allowed -and ($directHttps -or -not [string]::IsNullOrWhiteSpace($tcpForward)))
     } catch { return $false }
 }
 function EnsureFunnelConfiguration {
