@@ -75,6 +75,7 @@ try {
   const frontDoorHost = `127.0.0.1:${frontDoorPort}`;
   const commonBackendEnv = {
     MCP_BACKEND_MODE: "1",
+    MCP_TOOL_PROFILE: "full",
     MCP_FRONT_DOOR_HOST: frontDoorHost,
     MCP_PUBLIC_ORIGIN: publicOrigin,
     TAILSCALE_OWNER_LOGIN: owner,

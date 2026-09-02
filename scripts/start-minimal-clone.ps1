@@ -4,11 +4,25 @@ param(
     [Parameter(Mandatory=$true)][string]$PublicOrigin,
     [string]$StateRoot = (Join-Path $env:LOCALAPPDATA 'ChatGPTMcpClean\minimal-connectors'),
     [string]$SharedReceiptDirectory = (Join-Path $env:LOCALAPPDATA 'ChatGPTMcpClean\minimal-connectors\shared-process-receipts'),
+    [string]$OAuthStorePath = '',
+    [switch]$ValidateOnly,
     [switch]$SkipBuild
 )
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $Root
+
+$originUri = [uri]$PublicOrigin
+$publicSlug = $originUri.AbsolutePath.Trim('/')
+$expectedOAuthStore = if ($publicSlug) { Join-Path (Join-Path $StateRoot $publicSlug) 'oauth.json' } else { '' }
+if ($publicSlug -match '^clone-[A-Za-z0-9._-]+$' -and $InstanceId -ne $publicSlug) {
+    if (-not $OAuthStorePath) { throw "replacement instance '$InstanceId' for '$publicSlug' must explicitly reuse the stable OAuth store" }
+    $resolvedOAuthStore = [IO.Path]::GetFullPath($OAuthStorePath)
+    $resolvedExpectedStore = [IO.Path]::GetFullPath($expectedOAuthStore)
+    if (-not $resolvedOAuthStore.Equals($resolvedExpectedStore,[StringComparison]::OrdinalIgnoreCase)) { throw "replacement OAuth store must be the stable '$publicSlug' store" }
+    if (-not (Test-Path -LiteralPath $resolvedExpectedStore -PathType Leaf)) { throw "stable OAuth store does not exist for '$publicSlug'" }
+}
+if ($ValidateOnly) { Write-Output 'IDENTITY_PREFLIGHT_OK'; exit 0 }
 
 if (Test-Path '.env') {
     foreach ($line in Get-Content -LiteralPath '.env') {
@@ -23,12 +37,15 @@ if (Test-Path '.env') {
 
 $instanceState = Join-Path $StateRoot $InstanceId
 New-Item -ItemType Directory -Force -Path $instanceState,$SharedReceiptDirectory | Out-Null
+if (-not $OAuthStorePath) { $OAuthStorePath = Join-Path $instanceState 'oauth.json' }
+$oauthDirectory = Split-Path -Parent $OAuthStorePath
+if ($oauthDirectory) { New-Item -ItemType Directory -Force -Path $oauthDirectory | Out-Null }
 $env:PORT = [string]$Port
 $env:HOST = '127.0.0.1'
 $env:MCP_BACKEND_MODE = '1'
 $env:MCP_TOOL_PROFILE = 'process'
 $env:MCP_PUBLIC_ORIGIN = $PublicOrigin
-$env:MCP_OAUTH_STORE_PATH = Join-Path $instanceState 'oauth.json'
+$env:MCP_OAUTH_STORE_PATH = $OAuthStorePath
 $env:MCP_TRANSPORT_LOG_PATH = Join-Path $instanceState 'transport.jsonl'
 $env:MCP_PROCESS_RECEIPT_DIR = $SharedReceiptDirectory
 
