@@ -4,6 +4,7 @@ param(
     [int]$PollSeconds = 15,
     [string]$BackendConfigPath = '',
     [string]$ProcessRoutePath = '',
+    [string]$StaticRoutePath = '',
     [string]$SupervisorStateRoot = '',
     [switch]$TestMode
 )
@@ -58,6 +59,7 @@ $ExpectedRole = if ($Role -eq 'FrontDoor') { 'front-door' } elseif ($Role -eq 'L
 $Tailscale = 'C:\Program Files\Tailscale\tailscale.exe'
 if (-not $BackendConfigPath) { $BackendConfigPath = Join-Path $Root '.state\front-door\active-backend.json' }
 if (-not $ProcessRoutePath) { $ProcessRoutePath = Join-Path $Root '.state\front-door\process-routes.json' }
+if (-not $StaticRoutePath) { $StaticRoutePath = Join-Path $Root '.state\front-door\static-routes.json' }
 $RoleKey = if ($Role -eq 'FrontDoor') { if ($TestMode) { "front-door-test-$Port" } else { 'front-door' } } elseif ($Role -eq 'Legacy') { 'legacy-3000' } else { "backend-$Port" }
 if (-not $SupervisorStateRoot) { $SupervisorStateRoot = Join-Path $Root '.state\keepalive' }
 $State = Join-Path $SupervisorStateRoot $RoleKey
@@ -189,7 +191,7 @@ function StartChild {
     $stderr = ChildLogPath 'child.stderr'
     if ($Role -eq 'FrontDoor') {
         $startScript = Join-Path $Root 'start-front-door.ps1'
-        $arguments = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$startScript,'-SkipBuild','-Port',[string]$Port,'-BackendConfigPath',$BackendConfigPath,'-ProcessRoutePath',$ProcessRoutePath)
+        $arguments = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$startScript,'-SkipBuild','-Port',[string]$Port,'-BackendConfigPath',$BackendConfigPath,'-ProcessRoutePath',$ProcessRoutePath,'-StaticRoutePath',$StaticRoutePath)
     } else {
         $startScript = Join-Path $Root 'start.ps1'
         $arguments = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$startScript,'-SkipBuild','-Port',[string]$Port)

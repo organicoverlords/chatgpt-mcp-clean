@@ -9,6 +9,7 @@ const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)
 const temporary = mkdtempSync(join(tmpdir(), "shell-mcp-supervisor-proof-"));
 const configPath = join(temporary, "active-backend.json");
 const routesPath = join(temporary, "process-routes.json");
+const staticRoutesPath = join(temporary, "static-routes.json");
 const stateRoot = join(temporary, "supervisors");
 const supervisors = [];
 let frontDoorPid = 0;
@@ -55,10 +56,14 @@ try {
   const originalBackend = await waitHealth(backendOrigin, (body) => body.role === "backend" && body.port === backendPort);
   writeFileSync(configPath, `${JSON.stringify({ version: 1, port: backendPort, generation: originalBackend.backend_generation }, null, 2)}\n`, "utf8");
   backendPid = originalBackend.pid;
-  const frontDoorSupervisor = supervisor(["-Role", "FrontDoor", "-Port", String(frontDoorPort), "-PollSeconds", "5", "-BackendConfigPath", configPath, "-ProcessRoutePath", routesPath, "-TestMode"]);
+  writeFileSync(staticRoutesPath, `${JSON.stringify({ version: 1, routes: { "clone-a": [backendPort] } }, null, 2)}\n`, "utf8");
+  const frontDoorSupervisor = supervisor(["-Role", "FrontDoor", "-Port", String(frontDoorPort), "-PollSeconds", "5", "-BackendConfigPath", configPath, "-ProcessRoutePath", routesPath, "-StaticRoutePath", staticRoutesPath, "-TestMode"]);
   const frontDoorOrigin = `http://127.0.0.1:${frontDoorPort}`;
   const firstFrontDoor = await waitHealth(frontDoorOrigin, (body) => body.name === "shell-mcp" && body.port === frontDoorPort);
   frontDoorPid = firstFrontDoor.pid;
+  const routedHealth = await health(`${frontDoorOrigin}/clone-a`);
+  assert.equal(routedHealth.role, "backend");
+  assert.equal(routedHealth.port, backendPort);
 
   const failures = [];
   let monitoring = true;

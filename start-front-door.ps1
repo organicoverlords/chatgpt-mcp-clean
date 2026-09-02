@@ -2,6 +2,7 @@ param(
     [int]$Port = 3003,
     [string]$BackendConfigPath = '',
     [string]$ProcessRoutePath = '',
+    [string]$StaticRoutePath = '',
     [switch]$SkipBuild
 )
 $ErrorActionPreference = 'Stop'
@@ -19,6 +20,7 @@ if (Test-Path '.env') {
 $env:FRONT_DOOR_PORT = [string]$Port
 if ($BackendConfigPath) { $env:MCP_BACKEND_CONFIG_PATH = $BackendConfigPath }
 if ($ProcessRoutePath) { $env:MCP_PROCESS_ROUTE_PATH = $ProcessRoutePath }
+if ($StaticRoutePath) { $env:FRONT_DOOR_STATIC_ROUTE_PATH = $StaticRoutePath }
 if (-not $SkipBuild) { & npm.cmd run build --silent; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
 & node.exe dist/front-door.js
 exit $LASTEXITCODE

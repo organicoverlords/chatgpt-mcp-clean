@@ -3,11 +3,11 @@
 <!-- PROJECT-TIMELINE:BEGIN -->
 ## Project timeline
 
+- [2026-09-03] Fixed supervisor-launched front doors to receive the explicit static clone-route file instead of resolving it relative to whichever worktree launched port 3003; the supervisor regression now proves `/clone-a/health` reaches the configured backend.
 - [2026-09-02] Restored the proven direct production clone ingress from issue #37: a path-scoped clone MCP handler plus its OAuth/OpenID metadata handlers route directly to the selected compatible clone listener while root `/` remains on 3003. This supersedes the Sep 1 single-front-door clone canonicalization after same-chat 10/10 starts + 10/10 reads and fresh-chat 5/5 starts + 5/5 reads passed with zero drops or retries on direct clone-a.
 - [2026-09-02] Restored the Aug 29 MCP stability combination: clone tool calls no longer run health-preflight routing, and process-profile replacements are pinned to one explicit tools/list contract before launch.
 - [2026-09-02] Bounded backend transport and front-door request JSONL telemetry to 16 MiB per file with 24-hour rotation and three retained backups; added stress/restart regression while preserving the no-secret/no-command telemetry contract.
 - [2026-09-02] Restored clone-path backend TCP session reuse after array fallback health probes regressed to one fresh TCP connection per tool call; the original connection-reuse guard is back and proves 60 sequential clone requests use at most two backend connections.
-- [2026-09-02] Reconciled and pinned the process transport contract: 32,000-character reads, automatic 750 ms `start_process` wait, five live processes per caller, no rolling launch/token bucket, ordered compatible clone fallbacks, and stable OAuth/receipt reuse for replacement clones.
 
 See the canonical [CHANGELOG.md](CHANGELOG.md) for the complete project timeline.
 <!-- PROJECT-TIMELINE:END -->
