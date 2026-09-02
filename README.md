@@ -3,11 +3,11 @@
 <!-- PROJECT-TIMELINE:BEGIN -->
 ## Project timeline
 
+- [2026-09-02] Reconciled the deployed clone runtime with source control: preserved array-aware front-door fallback and backend connection reuse, restored the proven 6,000-character response bound, removed the rolling start-process token bucket, restored the intended five-live-process per-caller ceiling, isolated smoke validation, and restored the 750 ms automatic start_process wait so fast commands return inline without an extra read.
 - [2026-09-02] Defined the MCP/coordinator operating boundary: clean deployment lanes, bounded telemetry/temp state, one standalone ownership authority, queue reconciliation, and no connector-driven task drift.
 - [2026-08-30] Raised the bounded `read_output` stream window and advertised MCP schema from 6,000 to 32,000 characters after the old ~6 KB transport-wall hypothesis was rejected; added regressions proving the schema exposes 32 KB, a 24 KB result is delivered whole, and oversized output remains explicitly truncated. Live ChatGPT connector delivery still requires a separate canary before deployment.
 - [2026-08-27] Added optional static clone routing at the stable front door so `/clone-a` and `/clone-b` can share one Funnel target on port 3003 instead of exposing ports 3011/3012 directly; root generation/process pinning is unchanged and clone OAuth metadata paths remain intact (regression-research #125).
 - [2026-08-27] Added owner-relayed cross-clone live-process control for the minimal connector pool: a backup clone can read or kill a still-running process through the shared local control mailbox while the creating clone remains the only process owner; completed receipts remain the durable handoff path (regression-research #125).
-- [2026-08-27] Proved `read_output(wait_ms=0)` is server-side nonblocking and clarified that response `elapsed_ms` is process age after #125 transport evidence showed a 3.2-second user-visible delay occurred before the follow-up request reached MCP, not inside `read_output`.
 
 See the canonical [CHANGELOG.md](CHANGELOG.md) for the complete project timeline.
 <!-- PROJECT-TIMELINE:END -->

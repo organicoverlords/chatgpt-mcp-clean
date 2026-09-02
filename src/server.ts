@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { z } from "zod";
 import { BusyStore } from "./lib/busy-store.js";
 import { viewImage } from "./lib/image-viewer.js";
-import { ProcessManager } from "./lib/process-manager.js";
+import { MAX_READ_CHARS, ProcessManager } from "./lib/process-manager.js";
 
 const toolProfile = (process.env.MCP_TOOL_PROFILE || "full").trim().toLowerCase();
 if (toolProfile !== "full" && toolProfile !== "process") throw new Error("MCP_TOOL_PROFILE must be full or process");
@@ -37,7 +37,7 @@ export function createServer(callerId: string): McpServer {
   server.registerTool(
       "view_image",
     {
-      description: "Inspect one local PNG, JPEG, GIF, or WebP file for model-only visual analysis. This tool does not attach or display the file in the user's chat. Call at most once per artifact and never retry it as a delivery mechanism.",
+      description: "Inspect image",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: z.object({ path: z.string().min(1) }),
     },
@@ -51,22 +51,23 @@ export function createServer(callerId: string): McpServer {
   server.registerTool(
     "start_process",
     {
-      description: "Start a noninteractive PowerShell process in the background and return immediately with a stable process_id. If a later MCP call disconnects, the process may still be running: reconnect and reuse this process_id with read_output; do not start a replacement without process evidence.",
+      description: "Start process",
       inputSchema: z.object({
         command: z.string().min(1),
         working_directory: z.string().optional(),
+        wait_ms: z.number().int().min(0).max(10_000).optional(),
       }),
     },
-    async ({ command, working_directory }) => textResult(processManager.start(command, working_directory, callerId), callerId),
+    async ({ command, working_directory, wait_ms }) => textResult(await processManager.startWithWait(command, working_directory, callerId, wait_ms ?? 750), callerId),
   );
 
   server.registerTool(
     "read_output",
     {
-      description: "Read a bounded tail of accumulated stdout and stderr. wait_ms=0 is server-side nonblocking; positive wait_ms waits for new output or process exit, up to 10 seconds. The returned elapsed_ms is process age, not read-call latency. A disconnect is not evidence that the process stopped; reconnect and reuse the same process_id. Each stream is limited to 32,000 characters and marks truncation explicitly; page output that exceeds that bound rather than assuming process failure.",
+      description: "Read output",
       inputSchema: z.object({
         process_id: z.string().min(1),
-        max_chars: z.number().int().min(1).max(32_000).optional(),
+        max_chars: z.number().int().min(1).max(MAX_READ_CHARS).optional(),
         wait_ms: z.number().int().min(0).max(10_000).optional(),
       }),
     },
@@ -76,7 +77,7 @@ export function createServer(callerId: string): McpServer {
   server.registerTool(
     "kill_process",
     {
-      description: "Terminate a background process and its entire Windows process tree.",
+      description: "Kill process",
       inputSchema: z.object({ process_id: z.string().min(1) }),
     },
     async ({ process_id }) => textResult(await processManager.kill(process_id), callerId),
@@ -86,7 +87,7 @@ export function createServer(callerId: string): McpServer {
   server.registerTool(
       "busy_list",
     {
-      description: "List current exact-scope BUSY claims.",
+      description: "List claims",
       // Explicit empty shape, not an omitted inputSchema. Omitting it makes the SDK
       // advertise {"type":"object","properties":{}} with no $schema dialect, unlike
       // every other tool here; strict clients reject that tool on first call.
@@ -98,7 +99,7 @@ export function createServer(callerId: string): McpServer {
   server.registerTool(
     "busy_claim",
     {
-      description: "Claim one exact scope for an actor, or report the existing claim without changing it.",
+      description: "Claim scope",
       inputSchema: z.object({ actor: z.string().min(1), scope: z.string().min(1) }),
     },
     async ({ actor, scope }) => textResult(await busyStore!.claim(actor, scope), callerId),
@@ -107,7 +108,7 @@ export function createServer(callerId: string): McpServer {
   server.registerTool(
     "busy_release",
     {
-      description: "Release only the named actor's claim for one exact scope.",
+      description: "Release claim",
       inputSchema: z.object({ actor: z.string().min(1), scope: z.string().min(1) }),
     },
     async ({ actor, scope }) => textResult(await busyStore!.release(actor, scope), callerId),

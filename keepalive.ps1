@@ -166,6 +166,7 @@ function StartChild {
     $owner = PortOwner
     if ($owner) {
         if (-not (IsOwnedListener $owner)) { Log "port $Port is occupied by foreign PID $owner while $Role health is down; not killing it"; return }
+        if ($Role -eq 'FrontDoor') { Log "owned front-door listener PID $owner failed health; preserving the live listener to avoid severing active MCP connector sessions"; return }
         $script:ownedHealthFailures++
         if ($script:ownedHealthFailures -lt $OwnerFailureThreshold) { Log "owned $Role listener PID $owner failed health ($($script:ownedHealthFailures)/$OwnerFailureThreshold); retaining it"; return }
         Start-Sleep -Seconds $HealthRecheckSeconds

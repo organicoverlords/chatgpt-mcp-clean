@@ -9,6 +9,7 @@ const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)
 const temporary = mkdtempSync(join(tmpdir(), "shell-mcp-supervisor-proof-"));
 const configPath = join(temporary, "active-backend.json");
 const routesPath = join(temporary, "process-routes.json");
+const staticRoutePath = join(temporary, "static-routes.json");
 const stateRoot = join(temporary, "supervisors");
 const supervisors = [];
 let frontDoorPid = 0;
@@ -40,7 +41,7 @@ async function waitHealth(origin, predicate) {
   throw new Error(`health timeout: ${origin}`);
 }
 function supervisor(args) {
-  const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", resolve("keepalive.ps1"), ...args, "-SupervisorStateRoot", stateRoot], { cwd: resolve("."), stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", resolve("keepalive.ps1"), ...args, "-SupervisorStateRoot", stateRoot], { cwd: resolve("."), env: { ...process.env, FRONT_DOOR_STATIC_ROUTE_PATH: staticRoutePath }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   child.stderrText = "";
   child.stderr.on("data", (chunk) => { child.stderrText += chunk.toString(); });
   supervisors.push(child);

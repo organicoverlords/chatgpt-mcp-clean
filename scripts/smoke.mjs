@@ -1,11 +1,15 @@
-import "dotenv/config";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 
-const origin = (process.env.MCP_SMOKE_ORIGIN || process.env.MCP_PUBLIC_ORIGIN || "http://127.0.0.1:3000").replace(/\/$/, "");
+const origin = (process.env.MCP_SMOKE_ORIGIN || "http://127.0.0.1:3000").replace(/\/$/, "");
+const parsedOrigin = new URL(origin);
+const loopbackOrigin = parsedOrigin.hostname === "127.0.0.1" || parsedOrigin.hostname === "localhost";
+if (!loopbackOrigin && process.env.MCP_ALLOW_EXTERNAL_SMOKE !== "1") {
+  throw new Error("smoke.mjs requires a loopback MCP_SMOKE_ORIGIN; set MCP_ALLOW_EXTERNAL_SMOKE=1 only for an explicit external smoke run");
+}
 const ownerLogin = (process.env.TAILSCALE_OWNER_LOGIN || "owner@example.com").trim();
 const redirectUri = "https://chatgpt.com/connector/oauth/smoke";
-const resource = `${origin}/mcp`;
+const resource = process.env.MCP_SMOKE_RESOURCE || `${origin}/mcp`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function jsonFetch(url, options = {}) {
@@ -113,13 +117,14 @@ async function waitForOutput(sessionId, processId, pattern, timeoutMs = 20_000) 
 }
 async function waitForExit(sessionId, processId, timeoutMs = 20_000) {
   const deadline = Date.now() + timeoutMs;
-  let output;
+  let result;
   do {
-    output = await callTool(sessionId, "read_output", { process_id: processId });
-    if (!output.running) return output;
+    result = await mcpPost(sessionId, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: "read_output", arguments: { process_id: processId } } });
+    const output = toolResult(result);
+    if (!output.running) return { output, response: result };
     await sleep(100);
   } while (Date.now() < deadline);
-  return output;
+  return { output: toolResult(result), response: result };
 }
 
 const sessionA = await initialize();
@@ -138,10 +143,14 @@ getController.abort();
 const listed = await mcpPost(sessionA, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
 const names = listed.body.result.tools.map((tool) => tool.name).sort();
 assert.deepEqual(names, ["busy_claim", "busy_list", "busy_release", "kill_process", "read_output", "start_process", "view_image"]);
+const startProcessTool = listed.body.result.tools.find((tool) => tool.name === "start_process");
+assert.equal(startProcessTool.inputSchema.properties.wait_ms.maximum, 10_000);
+assert.equal(startProcessTool.inputSchema.properties.wait_ms.minimum, 0);
 const readOutputTool = listed.body.result.tools.find((tool) => tool.name === "read_output");
-assert.equal(readOutputTool.inputSchema.properties.max_chars.maximum, 32_000);
 assert.equal(readOutputTool.inputSchema.properties.wait_ms.maximum, 10_000);
 assert.equal(readOutputTool.inputSchema.properties.wait_ms.minimum, 0);
+assert.equal(readOutputTool.inputSchema.properties.max_chars.maximum, 6_000);
+assert.equal(readOutputTool.inputSchema.properties.max_chars.minimum, 1);
 
 const startedAt = Date.now();
 let jobOne;
@@ -179,25 +188,25 @@ try {
   assert.equal(killed.killed, true);
   execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `if (Get-Process -Id ${childPid} -ErrorAction SilentlyContinue) { exit 1 } else { exit 0 }`], { encoding: "utf8" });
 
-  const windowJob = await callTool(sessionA, "start_process", { command: "Write-Output ('WINDOW_BEGIN_' + ('W' * 24000) + '_WINDOW_END')" });
-  const windowOutput = await waitForExit(sessionA, windowJob.process_id);
-  assert.equal(windowOutput.running, false);
-  assert.equal(windowOutput.stdout_truncated, undefined);
-  assert.match(windowOutput.stdout, /^WINDOW_BEGIN_/);
-  assert.match(windowOutput.stdout, /_WINDOW_END\r?\n?$/);
-  assert.ok(windowOutput.stdout.length > 24_000, `read_output unexpectedly shortened ${windowOutput.stdout.length} characters`);
-
   floodJob = await callTool(sessionA, "start_process", { command: "$payload = 'X' * 200; 1..10000 | ForEach-Object { Write-Output (('FLOOD_{0}_{1}' -f $_,$payload)) }" });
   const healthStarted = Date.now();
   const healthDuringFlood = await jsonFetch(`${origin}/health`, { signal: AbortSignal.timeout(5_000) });
   assert.equal(healthDuringFlood.response.status, 200, healthDuringFlood.text);
   assert.ok(Date.now() - healthStarted < 5_000, "health probe stalled during high-output process");
-  const floodOutput = await waitForExit(sessionA, floodJob.process_id);
+  const floodRead = await waitForExit(sessionA, floodJob.process_id);
+  const floodOutput = floodRead.output;
   assert.equal(floodOutput.running, false);
-  assert.ok(floodOutput.stdout.length <= 32_000, `read_output returned ${floodOutput.stdout.length} characters`);
-  assert.ok(floodOutput.stdout.length > 6_000, `read_output regressed to the old 6k window: ${floodOutput.stdout.length} characters`);
+  assert.ok(floodOutput.stdout.length <= 6_000, `read_output returned ${floodOutput.stdout.length} characters`);
   assert.equal(floodOutput.stdout_truncated, true);
   assert.match(floodOutput.stdout, /FLOOD_10000_/);
+  assert.ok(Buffer.byteLength(floodRead.response.text, "utf8") <= 6_000, `read_output HTTP response was ${Buffer.byteLength(floodRead.response.text, "utf8")} bytes`);
+
+  const longCommandJob = await callTool(sessionA, "start_process", { command: `Write-Output 'LONG_COMMAND'; #${"C".repeat(6_000)}` });
+  const longCommandRead = await waitForExit(sessionA, longCommandJob.process_id);
+  assert.equal(longCommandRead.output.running, false);
+  assert.equal(longCommandRead.output.command_truncated, true);
+  assert.match(longCommandRead.output.stdout, /LONG_COMMAND/);
+  assert.ok(Buffer.byteLength(longCommandRead.response.text, "utf8") <= 6_000, `long-command read_output HTTP response was ${Buffer.byteLength(longCommandRead.response.text, "utf8")} bytes`);
 
   const sessionB = await initialize();
   const scope = `smoke-exact-scope-${Date.now()}`;

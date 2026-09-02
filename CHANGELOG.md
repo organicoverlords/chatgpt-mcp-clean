@@ -4,6 +4,7 @@ All notable project changes are recorded here in Keep a Changelog 1.1.0 style.
 
 ## [Unreleased]
 
+- [2026-09-02] Reconciled the deployed clone runtime with source control: preserved array-aware front-door fallback and backend connection reuse, restored the proven 6,000-character response bound, removed the rolling start-process token bucket, restored the intended five-live-process per-caller ceiling, isolated smoke validation, and restored the 750 ms automatic start_process wait so fast commands return inline without an extra read.
 - [2026-09-02] Defined the MCP/coordinator operating boundary: clean deployment lanes, bounded telemetry/temp state, one standalone ownership authority, queue reconciliation, and no connector-driven task drift.
 - [2026-08-30] Raised the bounded `read_output` stream window and advertised MCP schema from 6,000 to 32,000 characters after the old ~6 KB transport-wall hypothesis was rejected; added regressions proving the schema exposes 32 KB, a 24 KB result is delivered whole, and oversized output remains explicitly truncated. Live ChatGPT connector delivery still requires a separate canary before deployment.
 - [2026-08-27] Added optional static clone routing at the stable front door so `/clone-a` and `/clone-b` can share one Funnel target on port 3003 instead of exposing ports 3011/3012 directly; root generation/process pinning is unchanged and clone OAuth metadata paths remain intact (regression-research #125).

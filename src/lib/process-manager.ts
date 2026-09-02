@@ -6,19 +6,24 @@ import type { Readable } from "node:stream";
 import { currentTelemetryContext, emitTelemetry, withTelemetryContext, type TelemetryContext } from "./transport-telemetry.js";
 
 const MAX_CAPTURE_CHARS = 100_000;
-// Keep one read large enough for the current ChatGPT bootstrap plus its compact recent-memory
-// glance. The old 6,000-character ceiling was a defensive workaround for an Aug 25 transport
-// hypothesis that later evidence rejected as a universal payload wall. 32,000 is deliberately
-// below the 100,000-character capture ceiling; caller-side delivery still requires a live canary.
-const MAX_READ_CHARS = 32_000;
+// 6,000 not 20,000: the platform blocks read_output payloads above roughly 6 KB as a
+// safety error AFTER the process has already run, so a larger cap produces an invisible
+// failure -- the output sits complete in the receipt while the caller sees only a block.
+// Measured 2026-08-25: 6.4 KB delivered, 12.8 KB and 14.4 KB blocked. Truncating below
+// that ceiling turns a silent loss into a marked stdout_truncated read the caller can page.
+export const MAX_READ_CHARS = 6_000;
 const MAX_COMMAND_REPORT_CHARS = 4_000;
+// The MCP response also contains command/cwd/status metadata and JSON escaping. Keep the
+// serialized process payload below the observed transport boundary; the outer JSON-RPC
+// envelope adds its own small amount of overhead. Receipts remain governed by the full
+// capture ceiling and are not passed through this transport-only fitting step.
+const MAX_READ_RESPONSE_BYTES = 4_000;
+const MAX_OVERSIZE_COMMAND_REPORT_CHARS = 1_000;
 const COMPLETED_RETENTION_MS = 30 * 60 * 1000;
 const MAX_COMPLETED_PROCESSES = 64;
 const TASKKILL_TIMEOUT_MS = 2_000;
 const KILL_SETTLE_MS = 1_000;
-const DEFAULT_LAUNCH_BUCKET_CAPACITY = 40;
-const DEFAULT_LAUNCH_REFILL_MS = 5_000;
-const DEFAULT_MAX_LIVE_PER_CALLER = 3;
+const DEFAULT_MAX_LIVE_PER_CALLER = 5;
 const CONTROL_POLL_MS = 100;
 const CONTROL_HANDOFF_OVERHEAD_MS = 1_500;
 const CONTROL_KILL_TIMEOUT_MS = TASKKILL_TIMEOUT_MS + KILL_SETTLE_MS + CONTROL_HANDOFF_OVERHEAD_MS;
@@ -27,17 +32,10 @@ const CONTROL_PRUNE_INTERVAL_MS = 60_000;
 type CapturedChild = ChildProcessByStdio<null, Readable, Readable>;
 
 type ProcessManagerOptions = {
-  maxLaunchesPerWindow?: number;
-  launchRefillMs?: number;
   maxLivePerCaller?: number;
-  now?: () => number;
   receiptDirectory?: string;
 };
 
-type LaunchBucket = {
-  tokens: number;
-  lastRefillAt: number;
-};
 
 type CompletedProcessReceipt = {
   version: 1;
@@ -132,6 +130,67 @@ class BoundedCapture {
     const dropped = Math.max(0, this.length - text.length);
     return { text, truncated: this.truncated || this.length > maxChars, dropped };
   }
+}
+
+function tailText(value: string, length: number): string {
+  return length > 0 ? value.slice(-length) : "";
+}
+
+function serializedBytes(value: Record<string, unknown>): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+// A per-stream 6,000-character limit is not enough to bound the actual MCP response:
+// command text and the second stream can make the serialized result several times larger.
+// Fit only oversized transport results, preserving the ordinary response shape and adding
+// the same explicit truncation metadata used by the normal bounded capture path.
+function fitReadResponse(value: Record<string, unknown>): Record<string, unknown> {
+  if (serializedBytes(value) <= MAX_READ_RESPONSE_BYTES) return value;
+
+  let base = { ...value };
+  if (typeof base.command === "string" && base.command.length > MAX_OVERSIZE_COMMAND_REPORT_CHARS) {
+    base.command = base.command.slice(0, MAX_OVERSIZE_COMMAND_REPORT_CHARS);
+    base.command_truncated = true;
+  }
+  if (serializedBytes(base) <= MAX_READ_RESPONSE_BYTES) return base;
+
+  const stdout = typeof base.stdout === "string" ? base.stdout : "";
+  const stderr = typeof base.stderr === "string" ? base.stderr : "";
+  const totalOutputChars = stdout.length + stderr.length;
+  const candidate = (outputChars: number): Record<string, unknown> => {
+    if (totalOutputChars === 0) return { ...base, stdout: "", stderr: "" };
+    let stdoutChars = Math.min(stdout.length, Math.ceil(outputChars * stdout.length / totalOutputChars));
+    let stderrChars = Math.min(stderr.length, Math.max(0, outputChars - stdoutChars));
+    if (stdoutChars + stderrChars < outputChars) {
+      stdoutChars = Math.min(stdout.length, stdoutChars + outputChars - stdoutChars - stderrChars);
+      stderrChars = Math.min(stderr.length, outputChars - stdoutChars);
+    }
+    const next: Record<string, unknown> = { ...base, stdout: tailText(stdout, stdoutChars), stderr: tailText(stderr, stderrChars) };
+    if (stdoutChars < stdout.length) {
+      next.stdout_truncated = true;
+      next.stdout_dropped_from_start = (typeof next.stdout_dropped_from_start === "number" ? next.stdout_dropped_from_start : 0) + stdout.length - stdoutChars;
+    }
+    if (stderrChars < stderr.length) {
+      next.stderr_truncated = true;
+      next.stderr_dropped_from_start = (typeof next.stderr_dropped_from_start === "number" ? next.stderr_dropped_from_start : 0) + stderr.length - stderrChars;
+    }
+    return next;
+  };
+
+  let low = 0;
+  let high = totalOutputChars;
+  let best = candidate(0);
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const next = candidate(middle);
+    if (serializedBytes(next) <= MAX_READ_RESPONSE_BYTES) {
+      best = next;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return best;
 }
 
 type ProcessState = {
@@ -244,11 +303,7 @@ function processResponseState(startedAt: string, running: boolean, finishedAt?: 
 
 export class ProcessManager {
   private readonly processes = new Map<string, ProcessState>();
-  private readonly launchBucketsByCaller = new Map<string, LaunchBucket>();
-  private readonly launchBucketCapacity: number;
-  private readonly launchRefillMs: number;
   private readonly maxLivePerCaller: number;
-  private readonly now: () => number;
   private readonly receiptDirectory?: string;
   private readonly controlRequestDirectory?: string;
   private readonly controlResponseDirectory?: string;
@@ -256,10 +311,7 @@ export class ProcessManager {
   private lastControlPruneAt = 0;
 
   constructor(options: ProcessManagerOptions = {}) {
-    this.launchBucketCapacity = options.maxLaunchesPerWindow ?? DEFAULT_LAUNCH_BUCKET_CAPACITY;
-    this.launchRefillMs = options.launchRefillMs ?? DEFAULT_LAUNCH_REFILL_MS;
     this.maxLivePerCaller = options.maxLivePerCaller ?? DEFAULT_MAX_LIVE_PER_CALLER;
-    this.now = options.now ?? Date.now;
     this.receiptDirectory = options.receiptDirectory ? resolve(options.receiptDirectory) : undefined;
     if (this.receiptDirectory) {
       mkdirSync(this.receiptDirectory, { recursive: true });
@@ -292,8 +344,6 @@ export class ProcessManager {
     for (const file of files) {
       if (now - file.modifiedAt > COMPLETED_RETENTION_MS) unlinkSync(file.path);
     }
-    const retained = files.filter((file) => now - file.modifiedAt <= COMPLETED_RETENTION_MS);
-    for (const file of retained.slice(0, Math.max(0, retained.length - MAX_COMPLETED_PROCESSES))) unlinkSync(file.path);
   }
 
   private controlPath(directory: string | undefined, requestId: string): string | undefined {
@@ -551,7 +601,7 @@ export class ProcessManager {
       owner_caller_id: receipt.caller_id,
       caller_id: observer.caller_id ?? "caller_unknown",
     }, observer);
-    return {
+    return fitReadResponse({
       ...processResponseState(receipt.started_at, false, receipt.finished_at),
       process_id: receipt.process_id,
       pid: receipt.pid,
@@ -568,28 +618,7 @@ export class ProcessManager {
       ...(receipt.stdout_truncated || receipt.stdout.length > limit ? { stdout_truncated: true } : {}),
       ...(receipt.stderr_truncated || receipt.stderr.length > limit ? { stderr_truncated: true } : {}),
       ...(receipt.error ? { error: receipt.error } : {}),
-    };
-  }
-
-  private reserveLaunch(callerId: string): void {
-    const now = this.now();
-    const bucket = this.launchBucketsByCaller.get(callerId) ?? {
-      tokens: this.launchBucketCapacity,
-      lastRefillAt: now,
-    };
-    const elapsedMs = Math.max(0, now - bucket.lastRefillAt);
-    bucket.tokens = Math.min(
-      this.launchBucketCapacity,
-      bucket.tokens + elapsedMs / this.launchRefillMs,
-    );
-    bucket.lastRefillAt = now;
-    if (bucket.tokens < 1) {
-      const retryAfterMs = Math.max(1, Math.ceil((1 - bucket.tokens) * this.launchRefillMs));
-      this.launchBucketsByCaller.set(callerId, bucket);
-      throw new Error(`start_process_rate_limited: caller launch bucket is empty; capacity=${this.launchBucketCapacity}; refill_ms=${this.launchRefillMs}; retry_after_ms=${retryAfterMs}`);
-    }
-    bucket.tokens -= 1;
-    this.launchBucketsByCaller.set(callerId, bucket);
+    });
   }
 
   private markProcessChanged(state: ProcessState): void {
@@ -631,7 +660,6 @@ export class ProcessManager {
     if (liveForCaller.length >= this.maxLivePerCaller) {
       throw new Error(`start_process_concurrency_limited: caller already has ${liveForCaller.length} live processes; active_process_ids=${liveForCaller.map((state) => state.id).join(",")}`);
     }
-    this.reserveLaunch(callerId);
     const child = powershell(command, cwd);
     if (!child.pid) throw new Error("Background process did not receive a PID");
 
@@ -707,6 +735,21 @@ export class ProcessManager {
     return { ...processResponseState(state.startedAt, true), process_id: state.id, pid: state.pid, cwd: state.cwd, running: true } as const;
   }
 
+  async startWithWait(
+    command: string,
+    workingDirectory?: string,
+    callerId = "caller_unknown",
+    waitMs = 750,
+  ): Promise<Record<string, unknown>> {
+    const started = this.start(command, workingDirectory, callerId);
+    const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
+    if (boundedWaitMs === 0) return started;
+    const state = this.processes.get(started.process_id);
+    if (!state || state.exitCode !== null) return this.read(started.process_id);
+    await Promise.race([state.done, delay(boundedWaitMs)]);
+    return this.read(started.process_id);
+  }
+
   read(processId: string, maxChars = MAX_READ_CHARS): Record<string, unknown> {
     this.pruneCompleted();
     const limit = Math.max(1, Math.min(maxChars, MAX_READ_CHARS));
@@ -731,7 +774,7 @@ export class ProcessManager {
       running: state.exitCode === null,
       reassociated: Boolean(observer.caller_id && observer.caller_id !== state.callerId),
     }, observer);
-    return {
+    return fitReadResponse({
       ...processResponseState(state.startedAt, state.exitCode === null, state.finishedAt),
       process_id: state.id,
       pid: state.pid,
@@ -748,7 +791,7 @@ export class ProcessManager {
       ...(stdout.truncated ? { stdout_truncated: true, stdout_dropped_from_start: stdout.dropped } : {}),
       ...(stderr.truncated ? { stderr_truncated: true, stderr_dropped_from_start: stderr.dropped } : {}),
       ...(state.error ? { error: state.error } : {}),
-    };
+    });
   }
 
   async readWithWait(processId: string, maxChars = MAX_READ_CHARS, waitMs = 0): Promise<Record<string, unknown>> {
@@ -757,7 +800,7 @@ export class ProcessManager {
     if (!state) {
       const receipt = this.readReceipt(processId, maxChars);
       if (receipt) return receipt;
-      return await this.requestRemoteControl(processId, "read", currentTelemetryContext(), maxChars, boundedWaitMs);
+      return fitReadResponse(await this.requestRemoteControl(processId, "read", currentTelemetryContext(), maxChars, boundedWaitMs));
     }
     if (boundedWaitMs === 0 || state.exitCode !== null) return this.read(processId, maxChars);
     const observer = currentTelemetryContext();
