@@ -3,11 +3,11 @@
 <!-- PROJECT-TIMELINE:BEGIN -->
 ## Project timeline
 
+- [2026-09-02] Restored the proven direct production clone ingress from issue #37: a path-scoped clone MCP handler plus its OAuth/OpenID metadata handlers route directly to the selected compatible clone listener while root `/` remains on 3003. This supersedes the Sep 1 single-front-door clone canonicalization after same-chat 10/10 starts + 10/10 reads and fresh-chat 5/5 starts + 5/5 reads passed with zero drops or retries on direct clone-a.
 - [2026-09-02] Restored the Aug 29 MCP stability combination: clone tool calls no longer run health-preflight routing, and process-profile replacements are pinned to one explicit tools/list contract before launch.
 - [2026-09-02] Bounded backend transport and front-door request JSONL telemetry to 16 MiB per file with 24-hour rotation and three retained backups; added stress/restart regression while preserving the no-secret/no-command telemetry contract.
 - [2026-09-02] Restored clone-path backend TCP session reuse after array fallback health probes regressed to one fresh TCP connection per tool call; the original connection-reuse guard is back and proves 60 sequential clone requests use at most two backend connections.
 - [2026-09-02] Reconciled and pinned the process transport contract: 32,000-character reads, automatic 750 ms `start_process` wait, five live processes per caller, no rolling launch/token bucket, ordered compatible clone fallbacks, and stable OAuth/receipt reuse for replacement clones.
-- [2026-09-02] Defined the MCP/coordinator operating boundary: clean deployment lanes, bounded telemetry/temp state, one standalone ownership authority, queue reconciliation, and no connector-driven task drift.
 
 See the canonical [CHANGELOG.md](CHANGELOG.md) for the complete project timeline.
 <!-- PROJECT-TIMELINE:END -->
@@ -33,4 +33,12 @@ For regression-research #125, `MCP_TOOL_PROFILE=process` exposes only `start_pro
 
 Use `scripts/start-minimal-clone.ps1` for one instance or `scripts/start-two-minimal-clones.ps1` with `config/minimal-clones.example.json` for the initial two-instance rollout. The sample config is intentionally only two instances; scale-out remains configuration, not code copies. `MCP_PUBLIC_ORIGIN` may include a path prefix (for example `/clone-a`) so multiple independently registered connectors can share ordinary HTTPS 443 while advertising distinct OAuth/resource identities.
 
-The stable front door can also terminate those clone paths before forwarding them to loopback-only clone listeners. Put a version-1 route map such as `{ "version": 1, "routes": { "clone-a": [3011, 3041], "clone-b": [3022, 3012] } }` at `.state/front-door/static-routes.json`. Requests under `/clone-a/*` and `/clone-b/*` are forwarded with that public prefix stripped, while the path-scoped OAuth/OpenID `.well-known` endpoints are forwarded unchanged. This lets Tailscale Funnel use one local target (`127.0.0.1:3003`) instead of exposing each clone listener as a separate Funnel handler. The normal root backend generation/pinning path is unchanged.
+Production path-scoped clone ingress is **direct**, not front-door fan-in. Promote a compatible clone listener with `scripts/set-direct-clone-funnel.ps1`; it configures exactly four Tailscale handlers for that clone: the public clone prefix plus its OAuth authorization-server, protected-resource, and OpenID metadata paths. The helper never resets Funnel and never rewrites the root `/` handler, so root may remain on `127.0.0.1:3003` while clone traffic bypasses 3003. The stable front door's static clone route map remains available for bounded experiments/fallback only; do not promote clone traffic through 3003 solely because local health or smoke tests pass.
+
+### Direct clone ingress recovery
+
+After a Funnel reset, clone listener promotion, or suspected topology drift, restore/verify the clone route without touching root:
+
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/set-direct-clone-funnel.ps1 -InstanceId clone-a -Port <compatible-port> -PublicOrigin https://<public-host>/clone-a`
+
+Use `-VerifyOnly` for a read-only check. Promotion is not complete until all four public paths resolve correctly **and** a fresh ChatGPT chat passes five `start_process(wait_ms=0)` calls plus reads of the five original process IDs with zero silent retries. For any client-visible failure, correlate its timestamp with local arrival; a no-arrival failure must not trigger backend/receipt/OAuth churn.

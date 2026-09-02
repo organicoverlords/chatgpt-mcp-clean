@@ -118,6 +118,7 @@ function FunnelConfigured {
         $hostKey = ([uri]$Origin).Host + ':443'
         $allowed = ($status.AllowFunnel.$hostKey -eq $true)
         $directHttps = ($status.TCP.'443'.HTTPS -eq $true -and $status.Web.$hostKey.Handlers.'/'.Proxy -eq "http://127.0.0.1:$Port")
+        # This validates only the root handler. Direct /clone-* and clone OAuth/OpenID handlers are independent production routes and must be preserved.
         $tcpForward = [string]$status.TCP.'443'.TCPForward
         # A live TCP-forward Funnel may terminate TLS in a local bridge before
         # reaching the stable front door. It is already configured; do not
@@ -127,6 +128,7 @@ function FunnelConfigured {
 }
 function EnsureFunnelConfiguration {
     if ($TestMode -or $Role -ne 'FrontDoor' -or -not $Origin -or -not (Test-Path $Tailscale) -or -not (Healthy) -or (FunnelConfigured)) { return }
+    # Never reset Funnel here: root repair must preserve direct clone and metadata handlers.
     & $Tailscale funnel --yes --bg --https=443 "http://127.0.0.1:$Port" | Out-Null
     if ($LASTEXITCODE -eq 0 -and (FunnelConfigured)) { Log 'restored Tailscale Funnel to the stable front door' }
     else { Log 'Tailscale Funnel configuration repair failed' }
