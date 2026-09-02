@@ -342,34 +342,15 @@ function staticAttempt(request: IncomingMessage, body: Buffer, match: { route: S
   });
 }
 
-function staticBackendHealthy(port: number): Promise<boolean> {
-  return new Promise((resolveHealthy) => {
-    let settled = false;
-    const finish = (healthy: boolean) => {
-      if (settled) return;
-      settled = true;
-      resolveHealthy(healthy);
-    };
-    const probe = httpRequest({ host: "127.0.0.1", port, path: "/health", method: "GET", agent: backendAgent }, (probeResponse) => {
-      const chunks: Buffer[] = [];
-      probeResponse.on("data", (chunk: Buffer) => chunks.push(chunk));
-      probeResponse.on("end", () => {
-        try {
-          const health = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { status?: unknown; name?: unknown; port?: unknown };
-          finish(probeResponse.statusCode === 200 && health.status === "ok" && health.name === "shell-mcp" && health.port === port);
-        } catch { finish(false); }
-      });
-    });
-    probe.setTimeout(1_000, () => probe.destroy(new Error("static backend health timeout")));
-    probe.on("error", () => finish(false));
-    probe.end();
-  });
-}
-
 function retryableStaticStatus(statusCode: number): boolean {
   // These responses prove the replacement rejected the request before a tool
   // ran. Retrying an ambiguous timeout or 5xx could execute start_process twice.
   return statusCode === 401 || statusCode === 403 || statusCode === 404;
+}
+
+function retryableStaticError(error: unknown): boolean {
+  const code = error instanceof Error && "code" in error ? (error as NodeJS.ErrnoException).code : undefined;
+  return code === "ECONNREFUSED";
 }
 
 async function proxyStaticRequest(request: IncomingMessage, response: ServerResponse, body: Buffer, match: { route: StaticRoute; upstreamPath: string }, requestId?: string): Promise<void> {
@@ -379,12 +360,6 @@ async function proxyStaticRequest(request: IncomingMessage, response: ServerResp
   try {
     for (let index = 0; index < match.route.ports.length; index += 1) {
       const port = match.route.ports[index];
-      if (!await staticBackendHealthy(port)) {
-        if (requestId) frontDoorLog("front_static_unhealthy", { request_id: requestId, route: match.route.slug, backend_port: port, fallback_index: index });
-        if (index === match.route.ports.length - 1) throw new Error("all static backends are unhealthy");
-        if (requestId) frontDoorLog("front_static_retry", { request_id: requestId, route: match.route.slug, failed_backend_port: port, status: null, next_backend_port: match.route.ports[index + 1] });
-        continue;
-      }
       if (requestId) frontDoorLog("front_static_dispatch", { request_id: requestId, route: match.route.slug, backend_port: port, upstream_path: match.upstreamPath.split("?", 1)[0], fallback_index: index });
       try {
         const attempt = await staticAttempt(request, body, match, port);
@@ -394,6 +369,10 @@ async function proxyStaticRequest(request: IncomingMessage, response: ServerResp
         if (requestId) frontDoorLog("front_static_retry", { request_id: requestId, route: match.route.slug, failed_backend_port: port, status: attempt.statusCode, next_backend_port: match.route.ports[index + 1] });
       } catch (error) {
         if (requestId) frontDoorLog("front_static_error", { request_id: requestId, route: match.route.slug, backend_port: port, error: error instanceof Error ? error.message : String(error), fallback_index: index });
+        if (retryableStaticError(error) && index < match.route.ports.length - 1) {
+          if (requestId) frontDoorLog("front_static_retry", { request_id: requestId, route: match.route.slug, failed_backend_port: port, status: null, next_backend_port: match.route.ports[index + 1] });
+          continue;
+        }
         throw error;
       }
     }

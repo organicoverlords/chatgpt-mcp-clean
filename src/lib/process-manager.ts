@@ -278,8 +278,6 @@ export class ProcessManager {
     for (const file of files) {
       if (now - file.modifiedAt > COMPLETED_RETENTION_MS) unlinkSync(file.path);
     }
-    const retained = files.filter((file) => now - file.modifiedAt <= COMPLETED_RETENTION_MS);
-    for (const file of retained.slice(0, Math.max(0, retained.length - MAX_COMPLETED_PROCESSES))) unlinkSync(file.path);
   }
 
   private controlPath(directory: string | undefined, requestId: string): string | undefined {
