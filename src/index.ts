@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
-import { createWriteStream, mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import express, { type Request, type Response } from "express";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { callerId } from "./lib/caller-id.js";
+import { BoundedJsonlWriter } from "./lib/bounded-jsonl.js";
 import { LocalOAuthProvider } from "./lib/local-oauth-provider.js";
 import { observeSocket, sessionFingerprint, setTelemetrySink, withTelemetryContext } from "./lib/transport-telemetry.js";
 import { createResponseByteCounter } from "./lib/response-bytes.js";
@@ -38,21 +38,14 @@ const oauth = new LocalOAuthProvider(resource, OWNER, STORE);
 const bearer = requireBearerAuth({ verifier: oauth, requiredScopes: ["mcp"], resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resource) });
 
 const transportLogPath = resolve(process.env.MCP_TRANSPORT_LOG_PATH || ".state/transport.jsonl");
-mkdirSync(dirname(transportLogPath), { recursive: true });
-const transportLogStream = createWriteStream(transportLogPath, { flags: "a", encoding: "utf8" });
-transportLogStream.on("error", (error) => console.error("transport telemetry stream failed:", error.message));
+const transportLogWriter = new BoundedJsonlWriter(transportLogPath, {
+  onError: (error) => console.error("transport telemetry write failed:", error.message),
+});
 let activeRequests = 0;
 let totalRequests = 0;
 
 function transportLog(event: Record<string, unknown>): void {
-  try {
-    if (!transportLogStream.destroyed) {
-      transportLogStream.write(`${JSON.stringify({ at: new Date().toISOString(), server_pid: process.pid, ...event })}
-`);
-    }
-  } catch (error) {
-    console.error("transport telemetry write failed:", error instanceof Error ? error.message : String(error));
-  }
+  transportLogWriter.writeJson({ at: new Date().toISOString(), server_pid: process.pid, ...event });
 }
 
 function jsonError(res: Response, status: number, message: string): void {
@@ -222,7 +215,7 @@ httpServer.on("error", (error) => transportLog({ event: "http_server_error", err
 
 const stop = (signal: "SIGINT" | "SIGTERM") => {
   transportLog({ event: "process_signal", signal });
-  httpServer.close(() => transportLogStream.end(() => process.exit(0)));
+  httpServer.close(() => { void transportLogWriter.close().finally(() => process.exit(0)); });
   setTimeout(() => process.exit(1), 5_000).unref();
 };
 process.on("SIGINT", () => stop("SIGINT"));
