@@ -4,6 +4,7 @@ All notable project changes are recorded here in Keep a Changelog 1.1.0 style.
 
 ## [Unreleased]
 
+- [2026-09-03] Split completed-process receipt storage into a 30-minute flat hot cache and a seven-day day-sharded durable archive, with upgrade migration before pruning, so debugging and audit evidence no longer disappears after the live handoff window.
 - [2026-09-03] Moved MCPv3 production ingress from Tailscale Funnel to a Caddy VPS edge with a persistent reverse SSH tunnel to loopback clone 3011; the final scheduled-tunnel path passed 100/100 consecutive `initialize -> initialized -> start_process` sequences and live MCPv3 calls reached the backend with `via_funnel=false`.
 - [2026-09-03] Allowed credential-free non-`.ts.net` HTTPS `MCP_PUBLIC_ORIGIN` values so ordinary reverse proxies can preserve the same OAuth/resource contract (PR #45).
 - [2026-08-27] Reduced process-tool round trips: `start_process` now collapses short commands with a 750 ms default completion wait, `read_output` defaults to a 2 s change wait and returns a compact `no_change` heartbeat instead of repeated output, and the rolling launch token bucket was removed while the 5-live-process cap and duplicate reuse remain.
