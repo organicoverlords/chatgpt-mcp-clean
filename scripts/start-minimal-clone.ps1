@@ -15,6 +15,13 @@ Set-Location $Root
 $originUri = [uri]$PublicOrigin
 $publicSlug = $originUri.AbsolutePath.Trim('/')
 $expectedOAuthStore = if ($publicSlug) { Join-Path (Join-Path $StateRoot $publicSlug) 'oauth.json' } else { '' }
+$canonicalStateRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'ChatGPTMcpClean\minimal-connectors'))
+$resolvedStateRoot = [IO.Path]::GetFullPath($StateRoot)
+if ($resolvedStateRoot.Equals($canonicalStateRoot,[StringComparison]::OrdinalIgnoreCase)) {
+    $trackedChanges = @(& git.exe -C $Root status --porcelain=v1 --untracked-files=no)
+    if ($LASTEXITCODE -ne 0) { throw 'cannot verify source cleanliness for canonical clone launch' }
+    if ($trackedChanges.Count -gt 0) { throw 'canonical clone launch requires a clean tracked source tree; preserve dirty work and launch from a clean worktree' }
+}
 if ($publicSlug -match '^clone-[A-Za-z0-9._-]+$') {
     if (-not $OAuthStorePath) { throw "replacement instance '$InstanceId' for '$publicSlug' must explicitly reuse the stable OAuth store" }
     $resolvedOAuthStore = [IO.Path]::GetFullPath($OAuthStorePath)
