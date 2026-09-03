@@ -4,6 +4,7 @@ All notable project changes are recorded here in Keep a Changelog 1.1.0 style.
 
 ## [Unreleased]
 
+- [2026-09-04] Removed the unused two-clone deployment launcher and example config; production remains one VPS-routed minimal clone with the root front door reserved for plugin2 fallback, while cross-instance behavior stays regression-tested.
 - [2026-09-03] Retired front-door static clone routing and direct Tailscale `/clone-*` handlers after MCPv3 moved to the VPS edge; the authorized plugin2 fallback keeps only the public Funnel root on port 3003.
 - [2026-09-03] Restored the accepted MCPv3 process-tool description/schema contract after an unnecessary post-acceptance description mutation, kept PowerShell hardening internal to `start_process`, and added a byte-level contract freeze check so ordinary implementation work cannot silently rewrite the model-facing tool contract.
 - [2026-09-03] Persisted rejected `start_process` PowerShell preflight attempts into the same seven-day day-sharded archive as completed process receipts, including caller, bounded command text, working directory, reason, and rejection id, so prevented command-generation regressions remain auditable after transport-log rotation.
