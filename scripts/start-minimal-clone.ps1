@@ -15,7 +15,7 @@ Set-Location $Root
 $originUri = [uri]$PublicOrigin
 $publicSlug = $originUri.AbsolutePath.Trim('/')
 $expectedOAuthStore = if ($publicSlug) { Join-Path (Join-Path $StateRoot $publicSlug) 'oauth.json' } else { '' }
-if ($publicSlug -match '^clone-[A-Za-z0-9._-]+$' -and $InstanceId -ne $publicSlug) {
+if ($publicSlug -match '^clone-[A-Za-z0-9._-]+$') {
     if (-not $OAuthStorePath) { throw "replacement instance '$InstanceId' for '$publicSlug' must explicitly reuse the stable OAuth store" }
     $resolvedOAuthStore = [IO.Path]::GetFullPath($OAuthStorePath)
     $resolvedExpectedStore = [IO.Path]::GetFullPath($expectedOAuthStore)
