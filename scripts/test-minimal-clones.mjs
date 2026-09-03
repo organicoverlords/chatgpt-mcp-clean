@@ -41,7 +41,7 @@ async function waitHealth(origin, expectedPort, timeoutMs = 15_000) {
 function startClone(id, port, extraEnv = {}) {
   const state = join(temporary, id);
   mkdirSync(state, { recursive: true });
-  const publicOrigin = id === "clone-a" ? `https://${id}.test.ts.net/clone-a` : `https://${id}.test.ts.net`;
+  const publicOrigin = id === "clone-a" ? `https://${id}.test.ts.net/clone-a` : "https://5-61-91-127.sslip.io";
   const child = spawn(process.execPath, [resolve("dist/index.js")], {
     cwd: resolve("."),
     env: {

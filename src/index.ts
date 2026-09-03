@@ -30,7 +30,7 @@ if (PORT !== 3000 && !backendMode) throw new Error("Alternate loopback ports req
 if (!ORIGIN || !OWNER) throw new Error("MCP_PUBLIC_ORIGIN and TAILSCALE_OWNER_LOGIN are required");
 
 const publicOrigin = new URL(ORIGIN);
-if (publicOrigin.protocol !== "https:" || !publicOrigin.hostname.endsWith(".ts.net") || publicOrigin.search || publicOrigin.hash) throw new Error("MCP_PUBLIC_ORIGIN must be an HTTPS .ts.net origin without query or fragment");
+if (publicOrigin.protocol !== "https:" || !publicOrigin.hostname || publicOrigin.username || publicOrigin.password || publicOrigin.search || publicOrigin.hash) throw new Error("MCP_PUBLIC_ORIGIN must be an HTTPS origin without credentials, query, or fragment");
 if (!publicOrigin.pathname.endsWith("/")) publicOrigin.pathname += "/";
 const publicBasePath = publicOrigin.pathname === "/" ? "" : publicOrigin.pathname.replace(/\/$/, "");
 const publicUrl = (path: string): URL => new URL(path.replace(/^\/+/, ""), publicOrigin);
@@ -116,7 +116,7 @@ app.use((req, res, next) => {
   const sessionId = sessionFingerprint(req.header("mcp-session-id") || req.header("x-openai-session"));
   const startedAt = process.hrtime.bigint();
   const host = req.header("host") || "";
-  const viaFunnel = host.toLowerCase() === publicOrigin.host.toLowerCase();
+  const viaFunnel = publicOrigin.hostname.endsWith(".ts.net") && host.toLowerCase() === publicOrigin.host.toLowerCase();
   let finished = false;
   let responseBytes = 0;
   const originalWrite = res.write.bind(res);
