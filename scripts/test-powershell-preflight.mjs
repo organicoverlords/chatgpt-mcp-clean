@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ProcessManager } from "../dist/lib/process-manager.js";
 
 const manager = new ProcessManager();
@@ -38,4 +41,26 @@ const literals = await run("$text='&& $PID = 1'; # || $args = 2\n$here=@'\nforea
 assert.equal(literals.exit_code, 0, JSON.stringify(literals));
 assert.match(literals.stdout, /&& \$PID = 1/);
 
-console.log("PASS powershell_preflight known_ps51_hazards=blocked direct_command_semantics=preserved literals_ignored=true");
+
+const rejectionReceiptDirectory = mkdtempSync(join(tmpdir(), "mcp-preflight-rejection-"));
+try {
+  const durableManager = new ProcessManager({ receiptDirectory: rejectionReceiptDirectory });
+  assert.throws(
+    () => durableManager.start("$PID = 123", "C:\\Users\\Example", "caller_durable_preflight_reject"),
+    /start_process_preflight_failed:/,
+  );
+  const day = new Date().toISOString().slice(0, 10);
+  const dayDirectory = join(rejectionReceiptDirectory, "archive", day);
+  const files = readdirSync(dayDirectory).filter((name) => name.startsWith("rejected-") && name.endsWith(".json"));
+  assert.equal(files.length, 1, JSON.stringify(files));
+  const rejection = JSON.parse(readFileSync(join(dayDirectory, files[0]), "utf8"));
+  assert.equal(rejection.kind, "process_preflight_rejection");
+  assert.equal(rejection.caller_id, "caller_durable_preflight_reject");
+  assert.equal(rejection.command, "$PID = 123");
+  assert.match(rejection.reason, /automatic/);
+  assert.ok(rejection.rejection_id);
+} finally {
+  rmSync(rejectionReceiptDirectory, { recursive: true, force: true });
+}
+
+console.log("PASS powershell_preflight known_ps51_hazards=blocked direct_command_semantics=preserved literals_ignored=true durable_rejections=true");

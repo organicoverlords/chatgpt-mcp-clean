@@ -389,6 +389,41 @@ export class ProcessManager {
     }
   }
 
+  private persistPreflightRejection(command: string, workingDirectory: string | undefined, callerId: string, reason: string): string | undefined {
+    if (!this.receiptArchiveDirectory) return undefined;
+    const rejectionId = randomUUID();
+    const rejectedAt = new Date().toISOString();
+    const dayDirectory = join(this.receiptArchiveDirectory, rejectedAt.slice(0, 10));
+    mkdirSync(dayDirectory, { recursive: true });
+    const path = join(dayDirectory, `rejected-${rejectionId}.json`);
+    const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    const record = {
+      version: 1,
+      kind: "process_preflight_rejection",
+      rejection_id: rejectionId,
+      caller_id: callerId,
+      command: command.slice(0, MAX_COMMAND_REPORT_CHARS),
+      ...(command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}),
+      working_directory: workingDirectory ?? null,
+      reason,
+      rejected_at: rejectedAt,
+    };
+    try {
+      writeFileSync(temporaryPath, JSON.stringify(record), { encoding: "utf8", flag: "wx" });
+      renameSync(temporaryPath, path);
+      this.pruneReceiptArchive();
+      return rejectionId;
+    } catch (error) {
+      try { unlinkSync(temporaryPath); } catch { /* best-effort temporary cleanup */ }
+      emitTelemetry({
+        event: "process_preflight_rejection_archive_error",
+        reason,
+        error_message: error instanceof Error ? error.message : String(error),
+      });
+      return undefined;
+    }
+  }
+
   private pruneReceiptArchive(now = Date.now()): void {
     if (!this.receiptArchiveDirectory) return;
     if (now - this.lastReceiptArchivePruneAt < RECEIPT_ARCHIVE_PRUNE_INTERVAL_MS) return;
@@ -769,7 +804,8 @@ export class ProcessManager {
     this.pruneCompleted();
     const preflightError = powershellPreflightError(command);
     if (preflightError) {
-      emitTelemetry({ event: "process_preflight_rejected", reason: preflightError });
+      const rejectionId = this.persistPreflightRejection(command, workingDirectory, callerId, preflightError);
+      emitTelemetry({ event: "process_preflight_rejected", reason: preflightError, ...(rejectionId ? { rejection_id: rejectionId } : {}) });
       throw new Error(`start_process_preflight_failed: ${preflightError}`);
     }
     const cwd = normalizedCwd(workingDirectory);
