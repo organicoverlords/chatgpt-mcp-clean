@@ -4,6 +4,7 @@ All notable project changes are recorded here in Keep a Changelog 1.1.0 style.
 
 ## [Unreleased]
 
+- [2026-09-03] Restored the accepted MCPv3 process-tool description/schema contract after an unnecessary post-acceptance description mutation, kept PowerShell hardening internal to `start_process`, and added a byte-level contract freeze check so ordinary implementation work cannot silently rewrite the model-facing tool contract.
 - [2026-09-03] Persisted rejected `start_process` PowerShell preflight attempts into the same seven-day day-sharded archive as completed process receipts, including caller, bounded command text, working directory, reason, and rejection id, so prevented command-generation regressions remain auditable after transport-log rotation.
 - [2026-09-03] Added a Windows PowerShell 5.1 command guard at the process boundary: unsupported PS7 operators, direct control-statement piping, unbalanced delimiters, and writes to automatic `$PID`/`$args` are rejected before process start, and the `start_process` contract now states the known PS5.1 incompatibilities explicitly.
 - [2026-09-03] Split completed-process receipt storage into a 30-minute flat hot cache and a seven-day day-sharded durable archive, with upgrade migration before pruning, so debugging and audit evidence no longer disappears after the live handoff window.

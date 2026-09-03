@@ -47,7 +47,7 @@
   },
   {
     "name": "start_process",
-    "description": "Start a noninteractive Windows PowerShell 5.1 process. Commands must be PS5.1-compatible: do not use &&, ||, ??, or ternary syntax; do not assign to automatic $PID or $args; capture foreach statement output before piping it. The backend rejects these known hazards and unbalanced delimiters before starting the command. By default this call waits up to 750 ms so fast commands can finish and return their output in this same tool call; set wait_ms=0 for immediate background launch or raise it up to 10 seconds for a known-short command. If next_action=STOP_READING, do not call read_output. If next_action=READ_SAME_PROCESS_ID, reuse the returned process_id; never start a replacement without process evidence.",
+    "description": "Start a noninteractive PowerShell process. By default this call waits up to 750 ms so fast commands can finish and return their output in this same tool call; set wait_ms=0 for immediate background launch or raise it up to 10 seconds for a known-short command. If next_action=STOP_READING, do not call read_output. If next_action=READ_SAME_PROCESS_ID, reuse the returned process_id; never start a replacement without process evidence.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
