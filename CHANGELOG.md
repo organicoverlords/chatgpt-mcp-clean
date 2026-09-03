@@ -4,6 +4,7 @@ All notable project changes are recorded here in Keep a Changelog 1.1.0 style.
 
 ## [Unreleased]
 
+- [2026-09-03] Added a Windows PowerShell 5.1 command guard at the process boundary: unsupported PS7 operators, direct control-statement piping, unbalanced delimiters, and writes to automatic `$PID`/`$args` are rejected before process start, and the `start_process` contract now states the known PS5.1 incompatibilities explicitly.
 - [2026-09-03] Split completed-process receipt storage into a 30-minute flat hot cache and a seven-day day-sharded durable archive, with upgrade migration before pruning, so debugging and audit evidence no longer disappears after the live handoff window.
 - [2026-09-03] Moved MCPv3 production ingress from Tailscale Funnel to a Caddy VPS edge with a persistent reverse SSH tunnel to loopback clone 3011; the final scheduled-tunnel path passed 100/100 consecutive `initialize -> initialized -> start_process` sequences and live MCPv3 calls reached the backend with `via_funnel=false`.
 - [2026-09-03] Allowed credential-free non-`.ts.net` HTTPS `MCP_PUBLIC_ORIGIN` values so ordinary reverse proxies can preserve the same OAuth/resource contract (PR #45).

@@ -178,6 +178,101 @@ function normalizedCwd(workingDirectory?: string): string {
   return resolved;
 }
 
+function powershellCodeMask(command: string): string {
+  const masked = command.split("");
+  const blank = (from: number, to: number) => { for (let index = from; index < to; index += 1) if (masked[index] !== "\r" && masked[index] !== "\n") masked[index] = " "; };
+  let index = 0;
+  while (index < command.length) {
+    if (command.startsWith("<#", index)) {
+      const end = command.indexOf("#>", index + 2);
+      const stop = end < 0 ? command.length : end + 2;
+      blank(index, stop);
+      index = stop;
+      continue;
+    }
+    const char = command[index]!;
+    if (char === "#") {
+      const end = command.indexOf("\n", index + 1);
+      const stop = end < 0 ? command.length : end;
+      blank(index, stop);
+      index = stop;
+      continue;
+    }
+    if ((char === "@" && (command[index + 1] === "'" || command[index + 1] === '\"')) && (command[index + 2] === "\r" || command[index + 2] === "\n")) {
+      const quote = command[index + 1]!;
+      const terminator = `${quote}@`;
+      let cursor = index + 2;
+      let stop = command.length;
+      while (cursor < command.length) {
+        const lineStart = cursor === 0 || command[cursor - 1] === "\n";
+        if (lineStart && command.startsWith(terminator, cursor)) { stop = cursor + 2; break; }
+        cursor += 1;
+      }
+      blank(index, stop);
+      index = stop;
+      continue;
+    }
+    if (char === "'" || char === '\"') {
+      const quote = char;
+      const begin = index;
+      index += 1;
+      while (index < command.length) {
+        if (quote === "'" && command[index] === "'" && command[index + 1] === "'") { index += 2; continue; }
+        if (quote === '\"' && command[index] === "`") { index += 2; continue; }
+        if (command[index] === quote) { index += 1; break; }
+        index += 1;
+      }
+      blank(begin, index);
+      continue;
+    }
+    if (char === "`" && index + 1 < command.length) {
+      blank(index, index + 2);
+      index += 2;
+      continue;
+    }
+    index += 1;
+  }
+  return masked.join("");
+}
+
+function powershellPreflightError(command: string): string | undefined {
+  const code = powershellCodeMask(command);
+  if (code.includes("&&") || code.includes("||") || code.includes("??")) {
+    return "Windows PowerShell 5.1 does not support &&, ||, or ??; use PS5.1-compatible control flow";
+  }
+  const automaticVariable = String.raw`\$(?:(?:global|script|local|private):)?(?:PID|args)`;
+  const writePattern = new RegExp(`${automaticVariable}\\s*(?:\\+\\+|--|[+*/%?-]?=)|(?:\\+\\+|--)\\s*${automaticVariable}`, "i");
+  if (writePattern.test(code)) {
+    return "do not assign to or increment automatic $PID/$args variables; use a different helper name";
+  }
+
+  const stack: Array<{ char: string; controlBlock: boolean }> = [];
+  const closing: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
+  for (let index = 0; index < code.length; index += 1) {
+    const char = code[index]!;
+    if (char === "(" || char === "[" || char === "{") {
+      let controlBlock = false;
+      if (char === "{") {
+        const before = code.slice(Math.max(0, index - 500), index);
+        controlBlock = /(?:^|[;}\n])\s*(?:foreach|for|while|if|elseif|switch)\s*\([^{}]*\)\s*$/i.test(before)
+          || /(?:^|[;}\n])\s*(?:else|try|catch|finally|do)\s*$/i.test(before);
+      }
+      stack.push({ char, controlBlock });
+      continue;
+    }
+    if (char !== ")" && char !== "]" && char !== "}") continue;
+    const top = stack.pop();
+    if (!top || top.char !== closing[char]) return `unbalanced PowerShell delimiter near '${char}'`;
+    if (char === "}" && top.controlBlock) {
+      let next = index + 1;
+      while (next < code.length && /\s/.test(code[next]!)) next += 1;
+      if (code[next] === "|") return "capture foreach/for/while/if/switch statement output before piping it";
+    }
+  }
+  if (stack.length > 0) return `unbalanced PowerShell delimiter: missing close for '${stack[stack.length - 1]!.char}'`;
+  return undefined;
+}
+
 function powershell(command: string, cwd: string): CapturedChild {
   return spawn(
     POWERSHELL_EXE,
@@ -672,6 +767,11 @@ export class ProcessManager {
 
   start(command: string, workingDirectory?: string, callerId = "caller_unknown"): { mcp_status: "OK"; process_state: "RUNNING" | "COMPLETED"; elapsed_ms: number; next_action: "READ_SAME_PROCESS_ID" | "STOP_READING"; process_id: string; pid: number; cwd: string; running: boolean } {
     this.pruneCompleted();
+    const preflightError = powershellPreflightError(command);
+    if (preflightError) {
+      emitTelemetry({ event: "process_preflight_rejected", reason: preflightError });
+      throw new Error(`start_process_preflight_failed: ${preflightError}`);
+    }
     const cwd = normalizedCwd(workingDirectory);
     const duplicate = [...this.processes.values()].find((state) =>
       state.exitCode === null && state.callerId === callerId && state.cwd === cwd && state.command === command
