@@ -1,3 +1,7 @@
-# Claude project pointer
+# Agent rules pointer
 
-When working on this MCP repository, read and follow `AGENTS.md`. Do not add competing policy here.
+Canonical rules: C:\Users\Lauri\Documents\agent-rules\RULES.md
+Context: C:\Users\Lauri\Documents\agent-rules\contexts\mcp.md
+Remote authority: https://github.com/organicoverlords/agent-rules/tree/rules/live
+
+Read the canonical rules and context directly. This file is pointer-only and contains no local policy.
