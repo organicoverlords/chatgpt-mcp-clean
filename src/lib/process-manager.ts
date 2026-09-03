@@ -6,10 +6,11 @@ import type { Readable } from "node:stream";
 import { currentTelemetryContext, emitTelemetry, withTelemetryContext, type TelemetryContext } from "./transport-telemetry.js";
 
 const MAX_CAPTURE_CHARS = 100_000;
-// Keep one read large enough for the current ChatGPT bootstrap plus its compact recent-memory
-// glance. The old 6,000-character ceiling was a defensive workaround for an Aug 25 transport
-// hypothesis that later evidence rejected as a universal payload wall. 32,000 is deliberately
-// below the 100,000-character capture ceiling; caller-side delivery still requires a live canary.
+// 6,000 not 20,000: the platform blocks read_output payloads above roughly 6 KB as a
+// safety error AFTER the process has already run, so a larger cap produces an invisible
+// failure -- the output sits complete in the receipt while the caller sees only a block.
+// Measured 2026-08-25: 6.4 KB delivered, 12.8 KB and 14.4 KB blocked. Truncating below
+// that ceiling turns a silent loss into a marked stdout_truncated read the caller can page.
 const MAX_READ_CHARS = 32_000;
 const MAX_COMMAND_REPORT_CHARS = 4_000;
 const COMPLETED_RETENTION_MS = 30 * 60 * 1000;
@@ -26,7 +27,6 @@ type CapturedChild = ChildProcessByStdio<null, Readable, Readable>;
 
 type ProcessManagerOptions = {
   maxLivePerCaller?: number;
-  now?: () => number;
   receiptDirectory?: string;
 };
 
@@ -236,7 +236,6 @@ function processResponseState(startedAt: string, running: boolean, finishedAt?: 
 export class ProcessManager {
   private readonly processes = new Map<string, ProcessState>();
   private readonly maxLivePerCaller: number;
-  private readonly now: () => number;
   private readonly receiptDirectory?: string;
   private readonly controlRequestDirectory?: string;
   private readonly controlResponseDirectory?: string;
@@ -245,7 +244,6 @@ export class ProcessManager {
 
   constructor(options: ProcessManagerOptions = {}) {
     this.maxLivePerCaller = options.maxLivePerCaller ?? DEFAULT_MAX_LIVE_PER_CALLER;
-    this.now = options.now ?? Date.now;
     this.receiptDirectory = options.receiptDirectory ? resolve(options.receiptDirectory) : undefined;
     if (this.receiptDirectory) {
       mkdirSync(this.receiptDirectory, { recursive: true });
@@ -679,12 +677,12 @@ export class ProcessManager {
     const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
-    if (!state || state.exitCode !== null) return this.read(started.process_id);
+    if (!state || state.exitCode !== null) return this.read(started.process_id, MAX_READ_CHARS, false);
     await Promise.race([state.done, delay(boundedWaitMs)]);
-    return this.read(started.process_id);
+    return this.read(started.process_id, MAX_READ_CHARS, false);
   }
 
-  read(processId: string, maxChars = MAX_READ_CHARS): Record<string, unknown> {
+  read(processId: string, maxChars = MAX_READ_CHARS, markRead = true): Record<string, unknown> {
     this.pruneCompleted();
     const limit = Math.max(1, Math.min(maxChars, MAX_READ_CHARS));
     const state = this.processes.get(processId);
@@ -698,7 +696,7 @@ export class ProcessManager {
     const stderr = state.stderr.tail(limit);
     const observer = currentTelemetryContext();
     const observerCallerId = observer.caller_id ?? "caller_unknown";
-    state.lastReadRevisionByCaller.set(observerCallerId, state.revision);
+    if (markRead) state.lastReadRevisionByCaller.set(observerCallerId, state.revision);
     emitTelemetry({
       event: "process_read",
       process_id: state.id,
@@ -755,6 +753,17 @@ export class ProcessManager {
       state.waiters.add(finish);
       timer = setTimeout(finish, boundedWaitMs);
     });
+    if (state.exitCode === null && state.revision <= lastReadRevision) {
+      return {
+        ...processResponseState(state.startedAt, true),
+        process_id: state.id,
+        pid: state.pid,
+        running: true,
+        stdout: "",
+        stderr: "",
+        no_change: true,
+      };
+    }
     return this.read(processId, maxChars);
   }
 

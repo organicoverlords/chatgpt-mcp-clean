@@ -84,8 +84,8 @@ try {
     MCP_PROCESS_RECEIPT_DIR: receiptPath,
   };
   const blue = launch("dist/index.js", { ...commonBackendEnv, PORT: String(bluePort), MCP_TRANSPORT_LOG_PATH: join(temporary, "blue-transport.jsonl") });
-  const green = launch("dist/index.js", { ...commonBackendEnv, PORT: String(greenPort), MCP_TRANSPORT_LOG_PATH: join(temporary, "green-transport.jsonl") });
   const blueHealth = await waitHealth(`http://127.0.0.1:${bluePort}`, (body) => body.role === "backend" && body.port === bluePort);
+  const green = launch("dist/index.js", { ...commonBackendEnv, PORT: String(greenPort), MCP_TRANSPORT_LOG_PATH: join(temporary, "green-transport.jsonl") });
   await waitHealth(`http://127.0.0.1:${greenPort}`, (body) => body.role === "backend" && body.port === greenPort);
   writeTarget(bluePort, blueHealth.backend_generation);
   const frontDoor = launch("dist/front-door.js", { FRONT_DOOR_PORT: String(frontDoorPort), MCP_BACKEND_CONFIG_PATH: configPath, MCP_PROCESS_ROUTE_PATH: routesPath });

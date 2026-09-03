@@ -7,6 +7,10 @@ const ownerLogin = (process.env.TAILSCALE_OWNER_LOGIN || "owner@example.com").tr
 const redirectUri = "https://chatgpt.com/connector/oauth/smoke";
 const resource = `${origin}/mcp`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const toolProfile = (process.env.MCP_TOOL_PROFILE || "full").trim().toLowerCase();
+const expectedTools = toolProfile === "process"
+  ? ["kill_process", "read_output", "start_process"]
+  : ["busy_claim", "busy_list", "busy_release", "kill_process", "read_output", "start_process", "view_image"];
 
 async function jsonFetch(url, options = {}) {
   const response = await fetch(url, options);
@@ -137,18 +141,11 @@ assert.equal(standaloneGet.headers.get("allow"), "POST");
 getController.abort();
 const listed = await mcpPost(sessionA, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
 const names = listed.body.result.tools.map((tool) => tool.name).sort();
-const processToolNames = ["kill_process", "read_output", "start_process"];
-const fullToolNames = ["busy_claim", "busy_list", "busy_release", "kill_process", "read_output", "start_process", "view_image"];
-assert.ok(
-  [JSON.stringify(processToolNames), JSON.stringify(fullToolNames)].includes(JSON.stringify(names)),
-  `unexpected MCP tool profile: ${JSON.stringify(names)}`,
-);
-const fullToolProfile = names.includes("busy_claim");
+assert.deepEqual(names, expectedTools);
 const startProcessTool = listed.body.result.tools.find((tool) => tool.name === "start_process");
 assert.equal(startProcessTool.inputSchema.properties.wait_ms.maximum, 10_000);
 assert.equal(startProcessTool.inputSchema.properties.wait_ms.minimum, 0);
 const readOutputTool = listed.body.result.tools.find((tool) => tool.name === "read_output");
-assert.equal(readOutputTool.inputSchema.properties.max_chars.maximum, 32_000);
 assert.equal(readOutputTool.inputSchema.properties.wait_ms.maximum, 10_000);
 assert.equal(readOutputTool.inputSchema.properties.wait_ms.minimum, 0);
 
@@ -188,14 +185,6 @@ try {
   assert.equal(killed.killed, true);
   execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `if (Get-Process -Id ${childPid} -ErrorAction SilentlyContinue) { exit 1 } else { exit 0 }`], { encoding: "utf8" });
 
-  const windowJob = await callTool(sessionA, "start_process", { command: "Write-Output ('WINDOW_BEGIN_' + ('W' * 24000) + '_WINDOW_END')" });
-  const windowOutput = await waitForExit(sessionA, windowJob.process_id);
-  assert.equal(windowOutput.running, false);
-  assert.equal(windowOutput.stdout_truncated, undefined);
-  assert.match(windowOutput.stdout, /^WINDOW_BEGIN_/);
-  assert.match(windowOutput.stdout, /_WINDOW_END\r?\n?$/);
-  assert.ok(windowOutput.stdout.length > 24_000, `read_output unexpectedly shortened ${windowOutput.stdout.length} characters`);
-
   floodJob = await callTool(sessionA, "start_process", { command: "$payload = 'X' * 200; 1..10000 | ForEach-Object { Write-Output (('FLOOD_{0}_{1}' -f $_,$payload)) }" });
   const healthStarted = Date.now();
   const healthDuringFlood = await jsonFetch(`${origin}/health`, { signal: AbortSignal.timeout(5_000) });
@@ -203,12 +192,11 @@ try {
   assert.ok(Date.now() - healthStarted < 5_000, "health probe stalled during high-output process");
   const floodOutput = await waitForExit(sessionA, floodJob.process_id);
   assert.equal(floodOutput.running, false);
-  assert.ok(floodOutput.stdout.length <= 32_000, `read_output returned ${floodOutput.stdout.length} characters`);
-  assert.ok(floodOutput.stdout.length > 6_000, `read_output regressed to the old 6k window: ${floodOutput.stdout.length} characters`);
+  assert.ok(floodOutput.stdout.length <= 6_000, `read_output returned ${floodOutput.stdout.length} characters`);
   assert.equal(floodOutput.stdout_truncated, true);
   assert.match(floodOutput.stdout, /FLOOD_10000_/);
 
-  if (fullToolProfile) {
+  if (toolProfile === "full") {
   const sessionB = await initialize();
   const scope = `smoke-exact-scope-${Date.now()}`;
   const claimA = await callTool(sessionA, "busy_claim", { actor: "smoke-actor-a", scope });
@@ -247,4 +235,5 @@ const hasSerenaProcess = processList.some((process) => {
   return directBinary || (launcher && /\bserena\b/i.test(commandLine) && /\bstart-mcp-server\b/i.test(commandLine));
 });
 assert.ok(!hasSerenaProcess, "Serena process exists");
-console.log(`PASS mcp=standard-initialize tools=${names.join(",")} background=immediate+read_while_running concurrency=two_jobs high_output=bounded+health-responsive kill_tree=root+child_gone busy=${fullToolProfile ? "cross_session_claim_list_release" : "not-in-process-profile"} listener=${listenerJson} port9121=unused serena=absent`);
+const busySmoke = toolProfile === "full" ? "cross_session_claim_list_release" : "outside_process_profile";
+console.log(`PASS mcp=standard-initialize tools=${names.join(",")} background=immediate+read_while_running concurrency=two_jobs high_output=bounded+health-responsive kill_tree=root+child_gone busy=${busySmoke} listener=${listenerJson} port9121=unused serena=absent`);

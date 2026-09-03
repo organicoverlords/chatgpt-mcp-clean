@@ -64,14 +64,14 @@ export function createServer(callerId: string): McpServer {
   server.registerTool(
     "read_output",
     {
-      description: "Read a bounded tail of accumulated stdout and stderr. wait_ms=0 is server-side nonblocking; positive wait_ms waits for new output or process exit, up to 10 seconds. The returned elapsed_ms is process age, not read-call latency. A disconnect is not evidence that the process stopped; reconnect and reuse the same process_id. Each stream is limited to 32,000 characters and marks truncation explicitly; page output that exceeds that bound rather than assuming process failure.",
+      description: "Read a bounded tail of accumulated stdout and stderr. By default this waits up to 2 seconds for new output or process exit so sparse processes do not require rapid polling; set wait_ms=0 for a genuinely nonblocking snapshot. If a positive wait expires with no change, stdout/stderr are empty and no_change=true instead of repeating old output. The returned elapsed_ms is process age, not read-call latency. A disconnect is not evidence that the process stopped; reconnect and reuse the same process_id. Each stream is limited to 32,000 characters.",
       inputSchema: z.object({
         process_id: z.string().min(1),
         max_chars: z.number().int().min(1).max(32_000).optional(),
         wait_ms: z.number().int().min(0).max(10_000).optional(),
       }),
     },
-    async ({ process_id, max_chars, wait_ms }) => textResult(await processManager.readWithWait(process_id, max_chars, wait_ms), callerId),
+    async ({ process_id, max_chars, wait_ms }) => textResult(await processManager.readWithWait(process_id, max_chars, wait_ms ?? 2_000), callerId),
   );
 
   server.registerTool(

@@ -4,7 +4,6 @@ param(
     [int]$PollSeconds = 15,
     [string]$BackendConfigPath = '',
     [string]$ProcessRoutePath = '',
-    [string]$StaticRoutePath = '',
     [string]$SupervisorStateRoot = '',
     [switch]$TestMode
 )
@@ -59,7 +58,6 @@ $ExpectedRole = if ($Role -eq 'FrontDoor') { 'front-door' } elseif ($Role -eq 'L
 $Tailscale = 'C:\Program Files\Tailscale\tailscale.exe'
 if (-not $BackendConfigPath) { $BackendConfigPath = Join-Path $Root '.state\front-door\active-backend.json' }
 if (-not $ProcessRoutePath) { $ProcessRoutePath = Join-Path $Root '.state\front-door\process-routes.json' }
-if (-not $StaticRoutePath) { $StaticRoutePath = Join-Path $Root '.state\front-door\static-routes.json' }
 $RoleKey = if ($Role -eq 'FrontDoor') { if ($TestMode) { "front-door-test-$Port" } else { 'front-door' } } elseif ($Role -eq 'Legacy') { 'legacy-3000' } else { "backend-$Port" }
 if (-not $SupervisorStateRoot) { $SupervisorStateRoot = Join-Path $Root '.state\keepalive' }
 $State = Join-Path $SupervisorStateRoot $RoleKey
@@ -118,19 +116,11 @@ function FunnelConfigured {
     try {
         $status = (& $Tailscale funnel status --json | ConvertFrom-Json)
         $hostKey = ([uri]$Origin).Host + ':443'
-        $allowed = ($status.AllowFunnel.$hostKey -eq $true)
-        $directHttps = ($status.TCP.'443'.HTTPS -eq $true -and $status.Web.$hostKey.Handlers.'/'.Proxy -eq "http://127.0.0.1:$Port")
-        # This validates only the root handler. Direct /clone-* and clone OAuth/OpenID handlers are independent production routes and must be preserved.
-        $tcpForward = [string]$status.TCP.'443'.TCPForward
-        # A live TCP-forward Funnel may terminate TLS in a local bridge before
-        # reaching the stable front door. It is already configured; do not
-        # rewrite Funnel every poll just because it is not the direct-HTTPS shape.
-        return ($allowed -and ($directHttps -or -not [string]::IsNullOrWhiteSpace($tcpForward)))
+        return ($status.TCP.'443'.HTTPS -eq $true -and $status.Web.$hostKey.Handlers.'/'.Proxy -eq "http://127.0.0.1:$Port" -and $status.AllowFunnel.$hostKey -eq $true)
     } catch { return $false }
 }
 function EnsureFunnelConfiguration {
     if ($TestMode -or $Role -ne 'FrontDoor' -or -not $Origin -or -not (Test-Path $Tailscale) -or -not (Healthy) -or (FunnelConfigured)) { return }
-    # Never reset Funnel here: root repair must preserve direct clone and metadata handlers.
     & $Tailscale funnel --yes --bg --https=443 "http://127.0.0.1:$Port" | Out-Null
     if ($LASTEXITCODE -eq 0 -and (FunnelConfigured)) { Log 'restored Tailscale Funnel to the stable front door' }
     else { Log 'Tailscale Funnel configuration repair failed' }
@@ -191,7 +181,7 @@ function StartChild {
     $stderr = ChildLogPath 'child.stderr'
     if ($Role -eq 'FrontDoor') {
         $startScript = Join-Path $Root 'start-front-door.ps1'
-        $arguments = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$startScript,'-SkipBuild','-Port',[string]$Port,'-BackendConfigPath',$BackendConfigPath,'-ProcessRoutePath',$ProcessRoutePath,'-StaticRoutePath',$StaticRoutePath)
+        $arguments = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$startScript,'-SkipBuild','-Port',[string]$Port,'-BackendConfigPath',$BackendConfigPath,'-ProcessRoutePath',$ProcessRoutePath)
     } else {
         $startScript = Join-Path $Root 'start.ps1'
         $arguments = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$startScript,'-SkipBuild','-Port',[string]$Port)

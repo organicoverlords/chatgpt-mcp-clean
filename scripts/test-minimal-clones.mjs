@@ -38,7 +38,7 @@ async function waitHealth(origin, expectedPort, timeoutMs = 15_000) {
   throw new Error(`health timeout: ${origin}`);
 }
 
-function startClone(id, port) {
+function startClone(id, port, extraEnv = {}) {
   const state = join(temporary, id);
   mkdirSync(state, { recursive: true });
   const publicOrigin = id === "clone-a" ? `https://${id}.test.ts.net/clone-a` : `https://${id}.test.ts.net`;
@@ -55,6 +55,7 @@ function startClone(id, port) {
       MCP_OAUTH_STORE_PATH: join(state, "oauth.json"),
       MCP_TRANSPORT_LOG_PATH: join(state, "transport.jsonl"),
       MCP_PROCESS_RECEIPT_DIR: sharedReceipts,
+      ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
@@ -141,9 +142,12 @@ let cloneB;
 try {
   const portA = await unusedPort();
   const portB = await unusedPort();
-  cloneA = startClone("clone-a", portA);
+  cloneA = startClone("clone-a", portA, { MCP_FORCE_CONNECTION_CLOSE: "1" });
   cloneB = startClone("clone-b", portB);
   await Promise.all([waitHealth(cloneA.origin, portA), waitHealth(cloneB.origin, portB)]);
+  const aHealth = await jsonFetch(`${cloneA.origin}/health`);
+  assert.equal(aHealth.response.headers.get("connection"), "close", "opt-in clone must close each HTTP response connection");
+  assert.equal(aHealth.body.force_connection_close, true);
 
   const aMetadata = await jsonFetch(`${cloneA.origin}/.well-known/oauth-authorization-server/clone-a`);
   assert.equal(aMetadata.response.status, 200, aMetadata.text);

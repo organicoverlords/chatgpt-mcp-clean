@@ -26,11 +26,11 @@ async function requestBody(request) {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function backend(name, options = {}) {
+async function backend(name) {
   const server = createServer(async (request, response) => {
     if (request.url === "/health") {
       response.setHeader("content-type", "application/json");
-      response.end(JSON.stringify({ status: "ok", name: "shell-mcp", role: "backend", backend_generation: `${name}-1`, backend: name, port: server.address().port }));
+      response.end(JSON.stringify({ status: "ok", name: "shell-mcp", role: "backend", backend_generation: `${name}-1`, backend: name }));
       return;
     }
     if (request.url === "/slow") {
@@ -44,11 +44,6 @@ async function backend(name, options = {}) {
     }
     if (request.url?.startsWith("/.well-known/")) {
       response.end(request.url);
-      return;
-    }
-    if (request.url === "/mcp" && options.mcpStatus) {
-      response.statusCode = options.mcpStatus;
-      response.end(JSON.stringify({ error: "replacement rejected existing client" }));
       return;
     }
     const raw = await requestBody(request);
@@ -145,7 +140,6 @@ let frontDoor;
 let first;
 let second;
 let clone;
-let rejectingClone;
 try {
   first = await backend("blue");
   second = await backend("green");
@@ -168,19 +162,6 @@ try {
   const cloneTool = await toolCall(origin, "read_output", { process_id: processId }, "/clone-a/mcp");
   assert.equal(cloneTool.status, 200);
   assert.equal(JSON.parse(JSON.parse(await cloneTool.text()).result.content[0].text).stdout, "clone-a", "clone MCP call did not reach the static backend");
-
-  rejectingClone = await backend("clone-a-replacement", { mcpStatus: 401 });
-  writeFileSync(staticRoutePath, `${JSON.stringify({ version: 1, routes: { "clone-a": [rejectingClone.port, clone.port] } }, null, 2)}\n`, "utf8");
-  const authFallback = await toolCall(origin, "read_output", { process_id: processId }, "/clone-a/mcp");
-  assert.equal(authFallback.status, 200);
-  assert.equal(JSON.parse(JSON.parse(await authFallback.text()).result.content[0].text).stdout, "clone-a", "401 from a replacement did not fall back to the existing clone");
-  await new Promise((resolveClose) => rejectingClone.server.close(resolveClose));
-  const transportFallback = await toolCall(origin, "read_output", { process_id: processId }, "/clone-a/mcp");
-  assert.equal(transportFallback.status, 200);
-  assert.equal(JSON.parse(JSON.parse(await transportFallback.text()).result.content[0].text).stdout, "clone-a", "dead replacement did not fall back to the existing clone");
-  const staticFallbackEvidence = await waitForRequestLog((entries) => entries.filter((entry) => entry.event === "front_static_retry").length >= 2);
-  assert.ok(staticFallbackEvidence.some((entry) => entry.event === "front_static_retry" && entry.status === 401));
-  assert.ok(staticFallbackEvidence.some((entry) => entry.event === "front_static_retry" && entry.status === null));
 
   const healthFailures = [];
   let monitor = true;
@@ -230,7 +211,7 @@ try {
   assert.deepEqual(healthFailures, [], `front-door health disappeared: ${healthFailures.join("; ")}`);
   const finalHealth = await (await fetch(`${origin}/health`)).json();
   assert.equal(finalHealth.status, "ok");
-  console.log(`PASS front_door_continuity health_failures=0 active_switch=blue-to-green static_auth_fallback=true static_transport_fallback=true in_flight_drained=true process_id_pinned=true unavailable_route_preserved=true front_door_pid=${finalHealth.pid}`);
+  console.log(`PASS front_door_continuity health_failures=0 active_switch=blue-to-green in_flight_drained=true process_id_pinned=true unavailable_route_preserved=true front_door_pid=${finalHealth.pid}`);
 
   assert.equal(frontDoor.exitCode, null, frontDoorError);
 } finally {
@@ -239,7 +220,6 @@ try {
   if (first?.server.listening) await new Promise((resolveClose) => first.server.close(resolveClose));
   if (second?.server.listening) await new Promise((resolveClose) => second.server.close(resolveClose));
   if (clone?.server.listening) await new Promise((resolveClose) => clone.server.close(resolveClose));
-  if (rejectingClone?.server.listening) await new Promise((resolveClose) => rejectingClone.server.close(resolveClose));
   await sleep(50);
   rmSync(temporary, { recursive: true, force: true });
 }

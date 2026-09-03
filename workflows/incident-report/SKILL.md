@@ -5,27 +5,27 @@ description: Capture and analyze assistant behavior, tool-routing, execution, co
 
 # Incident Report
 
-Read the bundled incident-contract.md before creating or updating reports. Use the bundled verify_incident_capture.py before claiming a raw capture is complete, verified, or archived.
+Use this workflow to preserve an incident without turning capture into a new project. Freeze the inherited objective, live state, valid work, user corrections, constraints, and completion condition, then continue repair/recovery whenever evidence supports it.
 
-Do not turn incident capture into a postmortem wall or a substitute for repair. Freeze the inherited objective, live state, valid work, user corrections, constraints and completion condition, then continue repair/recovery whenever evidence supports it.
+Read the bundled `incident-contract.md`. Use `verify_incident_capture.py` only before claiming a raw transcript/export capture is complete, verified, or archived. Raw capture is evidence enrichment; it is not a prerequisite for PRIMARY, Vault memory persistence, or continuing the user's task.
 
-## Analysis 1 — before hindsight
+## Action path
 
-Before full-source traversal, record the time-local fault direction: apparent objective/state, evidence then visible, assumptions or pressures, selected route, ignored alternatives/contradictions, and the next wrong substantive action. Separate observed facts from inference and uncertainty. Write PRIMARY as soon as this minimum evidence exists; raw capture may still be pending.
+1. **Analysis 1 immediately.** Record the time-local fault direction from evidence already available: apparent objective/state, evidence then visible, assumptions or pressures, selected route, ignored alternatives/contradictions, next wrong substantive action, user-visible impact, and the smallest supported causal model. Separate observed facts from inference and uncertainty.
+2. **Write PRIMARY immediately.** Save the bounded incident report under the canonical Vault `01 Reports/` path as soon as Analysis 1 is sufficient. Do not wait for raw capture, a Chat ID, a priority-queue request, another memory writer, or a full-source traversal.
+3. **Persist through the canonical Vault CLI.** From the current canonical Vault checkout, use `python tools\memory_bank.py append ...` (or `note` only for an explicitly quick note). Do not manually edit `memory/memory-bank.jsonl`. Do not pre-wait merely because another memory task or dirty writer exists; invoke the CLI once and let its own reconciliation/sync path handle concurrent publication. Treat only an actual CLI conflict/error as a blocker, and preserve the already-written report if that occurs.
+4. **Keep the inherited task alive.** Incident capture must not displace repair, supervision, verification, or the user's original objective. If one incident step is waiting, use the time for useful non-conflicting work.
+5. **Raw capture is optional enrichment.** If the exact current Chat ID is already available through a valid current surface, submit one fresh raw-capture request to the currently documented priority queue. If the Chat ID is not already available, record raw capture as pending and continue. Do **not** search browser history, session files, actor bindings, unrelated logs, or other surfaces merely to discover a Chat ID. Missing capture metadata never authorizes archaeology.
+6. **Analysis 2 only when fresh raw source actually arrives.** Verify byte size/SHA-256/completeness with `verify_incident_capture.py`, read the complete source beginning to end, then reconstruct first divergence, next substantive action, available routes, hard exclusions, evidence versus hypothesis, and the correct next action. Keep Analysis 1 and Analysis 2 distinct so hindsight changes are visible.
+7. **Replay fixture when useful.** Score the very next substantive action after the fault/correction, not merely the eventual outcome. A missing raw capture may leave the fixture pending; it does not invalidate PRIMARY or the memory-bank entry.
 
-## Fresh priority capture
+## Stop rules
 
-Immediately after Analysis 1, submit the exact Chat ID to the canonical priority queue at `%LOCALAPPDATA%/GigStackTools/memory-regression/gpt3/incident-priority-queue.jsonl`. Do not substitute an older transcript and do not create another queue. Failed or rate-limited acquisition remains pending.
-
-Preserve a separate unchanged full raw export. Record exact source path/identity, Chat ID, byte size, SHA-256 and completeness state, and verify it before calling it complete.
-
-## Analysis 2 — full context
-
-Only after fresh raw capture is available, or evidenced exhaustion is recorded, read the entire source beginning to end. Reconstruct first divergence, next substantive action, available routes, hard exclusions, evidence versus hypothesis, and the correct next action. Keep Analysis 1 and Analysis 2 distinct and explicitly compare what changed; that difference is regression evidence.
-
-Create a replay-ready fixture whose scoring rule evaluates the very next substantive action after the fault/correction, not merely the eventual final outcome.
-
-Write SECONDARY only after capture is verified or evidenced exhaustion is recorded, using the same immutable incident ID. Store artifacts under the regression-research directory contract described in incident-contract.md.
+- Never make exact Chat-ID acquisition a blocking prerequisite for PRIMARY, Vault persistence, repair, or task continuation.
+- Never create a second memory store, incident queue, telemetry system, or logging daemon because one route is unavailable.
+- Never repeat a known connector failure merely to strengthen the sample. Preserve the receipt, use one bounded recovery/reassociation when appropriate, then continue or switch route.
+- Never wait idly on a shared writer when useful non-conflicting work or the canonical memory CLI remains available.
+- Never claim raw capture is complete without verifier evidence.
 
 ## MCP boundary classification
 

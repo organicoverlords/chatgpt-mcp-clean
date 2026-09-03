@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+﻿import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -36,14 +36,13 @@ async function waitForHealth(origin) {
 
 try {
   backend = createServer((request, response) => {
-    const backendPort = backend.address().port;
     if (request.url === "/identity") {
       response.end("clone-a");
       return;
     }
     if (request.url === "/health") {
       response.setHeader("content-type", "application/json");
-      response.end(JSON.stringify({ status: "ok", name: "shell-mcp", role: "backend", backend_generation: "reuse-proof", port: backendPort }));
+      response.end(JSON.stringify({ status: "ok", name: "shell-mcp", role: "backend", backend_generation: "reuse-proof" }));
       return;
     }
     response.statusCode = 404;
@@ -55,7 +54,7 @@ try {
   const frontDoorPort = await unusedPort();
   writeFileSync(configPath, `${JSON.stringify({ version: 1, port: backendPort, generation: "reuse-proof" }, null, 2)}\n`);
   writeFileSync(routesPath, `${JSON.stringify({ version: 1, routes: {} }, null, 2)}\n`);
-  writeFileSync(staticRoutePath, `${JSON.stringify({ version: 1, routes: { "clone-a": [backendPort] } }, null, 2)}\n`);
+  writeFileSync(staticRoutePath, `${JSON.stringify({ version: 1, routes: { "clone-a": backendPort } }, null, 2)}\n`);
   frontDoor = spawn(process.execPath, [resolve("dist/front-door.js")], {
     env: {
       ...process.env,
@@ -77,7 +76,7 @@ try {
     assert.equal(response.status, 200, frontDoorError);
     assert.equal(await response.text(), "clone-a");
   }
-  assert.ok(connectionCount <= 2, `front door opened ${connectionCount} backend TCP connections for 60 sequential clone requests`);
+  assert.ok(connectionCount <= 2, `front door opened ${connectionCount} backend TCP connections for 60 sequential requests`);
   assert.equal(frontDoor.exitCode, null, frontDoorError);
   console.log(`PASS front_door_connection_reuse requests=60 backend_connections=${connectionCount}`);
 } finally {

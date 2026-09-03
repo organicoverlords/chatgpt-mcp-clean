@@ -19,7 +19,7 @@
   },
   {
     "name": "read_output",
-    "description": "Read a bounded tail of accumulated stdout and stderr. wait_ms=0 is server-side nonblocking; positive wait_ms waits for new output or process exit, up to 10 seconds. The returned elapsed_ms is process age, not read-call latency. A disconnect is not evidence that the process stopped; reconnect and reuse the same process_id. Each stream is limited to 32,000 characters and marks truncation explicitly; page output that exceeds that bound rather than assuming process failure.",
+    "description": "Read a bounded tail of accumulated stdout and stderr. By default this waits up to 2 seconds for new output or process exit so sparse processes do not require rapid polling; set wait_ms=0 for a genuinely nonblocking snapshot. If a positive wait expires with no change, stdout/stderr are empty and no_change=true instead of repeating old output. The returned elapsed_ms is process age, not read-call latency. A disconnect is not evidence that the process stopped; reconnect and reuse the same process_id. Each stream is limited to 32,000 characters.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",

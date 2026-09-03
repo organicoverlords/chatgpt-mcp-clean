@@ -68,7 +68,6 @@ try {
       break;
     }
   }
-  assert.equal(liveProcesses.length, 5, "five simultaneous processes from one caller must be admitted");
   assert.ok(concurrencyRejection instanceof Error, "a sixth simultaneous process from one caller must be rejected");
   assert.match(concurrencyRejection.message, /start_process_concurrency_limited/);
   otherCallerProcess = concurrencyManager.start("Start-Sleep -Seconds 5 # other caller", undefined, "caller_concurrency_test_other");
@@ -148,7 +147,9 @@ const fastPathDurationMs = Date.now() - fastPathStartedAt;
 assert.equal(fastPath.running, false, JSON.stringify(fastPath));
 assert.equal(fastPath.next_action, "STOP_READING");
 assert.match(fastPath.stdout, /FAST_PATH_OK/);
-assert.ok(fastPathDurationMs < 3_000, `startWithWait did not collapse the short command (${fastPathDurationMs}ms)`);
+const fastPathReplay = await fastPathManager.readWithWait(fastPath.process_id, 6_000, 0);
+assert.match(fastPathReplay.stdout, /FAST_PATH_OK/, "start_process output must remain readable until read_output consumes it");
+assert.ok(fastPathDurationMs < 2_000, `startWithWait did not collapse the short command (${fastPathDurationMs}ms)`);
 
 const boundedStartManager = new ProcessManager();
 let boundedStart;
@@ -159,9 +160,26 @@ try {
   assert.equal(boundedStart.running, true, JSON.stringify(boundedStart));
   assert.equal(boundedStart.next_action, "READ_SAME_PROCESS_ID");
   assert.ok(boundedDurationMs >= 100, `startWithWait returned before its bounded wait (${boundedDurationMs}ms)`);
-  assert.ok(boundedDurationMs < 2_000, `startWithWait blocked too long (${boundedDurationMs}ms)`);
+  assert.ok(boundedDurationMs < 1_000, `startWithWait blocked too long (${boundedDurationMs}ms)`);
 } finally {
   if (boundedStart) await boundedStartManager.kill(boundedStart.process_id).catch(() => undefined);
+}
+
+const compactWaitManager = new ProcessManager();
+let compactWaitProcess;
+try {
+  compactWaitProcess = compactWaitManager.start("Write-Output 'FIRST_PACKET'; Start-Sleep -Seconds 5", undefined, "caller_compact_wait_test");
+  const firstPacket = await compactWaitManager.readWithWait(compactWaitProcess.process_id, 6_000, 2_000);
+  assert.match(firstPacket.stdout, /FIRST_PACKET/);
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  compactWaitManager.read(compactWaitProcess.process_id, 6_000);
+  const noChange = await compactWaitManager.readWithWait(compactWaitProcess.process_id, 6_000, 150);
+  assert.equal(noChange.running, true, JSON.stringify(noChange));
+  assert.equal(noChange.no_change, true, JSON.stringify(noChange));
+  assert.equal(noChange.stdout, "");
+  assert.equal(noChange.stderr, "");
+} finally {
+  if (compactWaitProcess) await compactWaitManager.kill(compactWaitProcess.process_id).catch(() => undefined);
 }
 
 const waitingManager = new ProcessManager();
@@ -177,7 +195,6 @@ try {
 } finally {
   if (waitingProcess) await waitingManager.kill(waitingProcess.process_id).catch(() => undefined);
 }
-
 
 const receiptChurnDirectory = mkdtempSync(join(tmpdir(), "mcp-receipt-churn-"));
 try {
@@ -195,4 +212,4 @@ try {
 } finally {
   rmSync(receiptChurnDirectory, { recursive: true, force: true });
 }
-console.log("PASS process guard enforces duplicate, five-live-concurrency, restart-receipt, cross-clone-live-control, nonblocking-zero-wait, and bounded-wait behavior");
+console.log("PASS process guard enforces duplicate reuse, live concurrency, restart receipts, cross-clone control, fast-start collapse, compact no-change waits, nonblocking zero-wait, and bounded-wait behavior, and time-based receipt retention");

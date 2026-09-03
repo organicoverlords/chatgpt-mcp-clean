@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { createWriteStream, mkdirSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import express, { type Request, type Response } from "express";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { callerId } from "./lib/caller-id.js";
-import { BoundedJsonlWriter } from "./lib/bounded-jsonl.js";
 import { LocalOAuthProvider } from "./lib/local-oauth-provider.js";
 import { observeSocket, sessionFingerprint, setTelemetrySink, withTelemetryContext } from "./lib/transport-telemetry.js";
 import { createResponseByteCounter } from "./lib/response-bytes.js";
@@ -21,6 +21,7 @@ const OWNER = (process.env.TAILSCALE_OWNER_LOGIN || "").trim().toLowerCase();
 const STORE = process.env.MCP_OAUTH_STORE_PATH || ".state/oauth.json";
 
 const backendMode = process.env.MCP_BACKEND_MODE === "1";
+const forceConnectionClose = process.env.MCP_FORCE_CONNECTION_CLOSE === "1";
 const frontDoorHost = (process.env.MCP_FRONT_DOOR_HOST || "127.0.0.1:3003").toLowerCase();
 const backendGeneration = backendMode ? (process.env.MCP_BACKEND_GENERATION || `backend-${PORT}-${process.pid}-${Date.now()}`) : undefined;
 if (HOST !== "127.0.0.1") throw new Error("This server is fixed to loopback");
@@ -38,14 +39,21 @@ const oauth = new LocalOAuthProvider(resource, OWNER, STORE);
 const bearer = requireBearerAuth({ verifier: oauth, requiredScopes: ["mcp"], resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resource) });
 
 const transportLogPath = resolve(process.env.MCP_TRANSPORT_LOG_PATH || ".state/transport.jsonl");
-const transportLogWriter = new BoundedJsonlWriter(transportLogPath, {
-  onError: (error) => console.error("transport telemetry write failed:", error.message),
-});
+mkdirSync(dirname(transportLogPath), { recursive: true });
+const transportLogStream = createWriteStream(transportLogPath, { flags: "a", encoding: "utf8" });
+transportLogStream.on("error", (error) => console.error("transport telemetry stream failed:", error.message));
 let activeRequests = 0;
 let totalRequests = 0;
 
 function transportLog(event: Record<string, unknown>): void {
-  transportLogWriter.writeJson({ at: new Date().toISOString(), server_pid: process.pid, ...event });
+  try {
+    if (!transportLogStream.destroyed) {
+      transportLogStream.write(`${JSON.stringify({ at: new Date().toISOString(), server_pid: process.pid, ...event })}
+`);
+    }
+  } catch (error) {
+    console.error("transport telemetry write failed:", error instanceof Error ? error.message : String(error));
+  }
 }
 
 function jsonError(res: Response, status: number, message: string): void {
@@ -95,6 +103,12 @@ async function handleMcp(req: Request, res: Response): Promise<void> {
 
 const app = express();
 app.set("trust proxy", "loopback");
+if (forceConnectionClose) {
+  app.use((_req, res, next) => {
+    res.setHeader("connection", "close");
+    next();
+  });
+}
 app.use((req, res, next) => {
   const requestId = randomUUID();
   const requestCallerId = callerId(req);
@@ -191,7 +205,7 @@ app.use("/mcp", (req, res, next) => {
 app.post("/mcp", bearer, handleMcp);
 app.get("/mcp", bearer, (_req, res) => res.status(405).set("Allow", "POST").send("Method not allowed."));
 app.delete("/mcp", bearer, (_req, res) => res.status(405).set("Allow", "POST").send("Method not allowed."));
-app.get("/health", (_req, res) => res.json({ status: "ok", name: "shell-mcp", role: backendMode ? "backend" : "direct", ...(backendGeneration ? { backend_generation: backendGeneration } : {}), host: HOST, port: PORT, pid: process.pid, active_requests: activeRequests, total_requests: totalRequests }));
+app.get("/health", (_req, res) => res.json({ status: "ok", name: "shell-mcp", role: backendMode ? "backend" : "direct", ...(backendGeneration ? { backend_generation: backendGeneration } : {}), host: HOST, port: PORT, pid: process.pid, active_requests: activeRequests, total_requests: totalRequests, force_connection_close: forceConnectionClose }));
 
 const httpServer = app.listen(PORT, HOST, () => console.error(`shell-mcp listening on http://${HOST}:${PORT}/mcp`));
 httpServer.on("connection", (socket) => { observeSocket(socket); });
@@ -215,7 +229,7 @@ httpServer.on("error", (error) => transportLog({ event: "http_server_error", err
 
 const stop = (signal: "SIGINT" | "SIGTERM") => {
   transportLog({ event: "process_signal", signal });
-  httpServer.close(() => { void transportLogWriter.close().finally(() => process.exit(0)); });
+  httpServer.close(() => transportLogStream.end(() => process.exit(0)));
   setTimeout(() => process.exit(1), 5_000).unref();
 };
 process.on("SIGINT", () => stop("SIGINT"));

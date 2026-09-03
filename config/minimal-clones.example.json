@@ -3,12 +3,12 @@
     {
       "id": "clone-a",
       "port": 3011,
-      "public_origin": "https://mcp.example.ts.net/clone-a"
+      "public_origin": "https://clone-a.example.ts.net"
     },
     {
       "id": "clone-b",
       "port": 3012,
-      "public_origin": "https://mcp.example.ts.net/clone-b"
+      "public_origin": "https://clone-b.example.ts.net"
     }
   ]
 }
