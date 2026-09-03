@@ -1,8 +1,8 @@
 # Local shell MCP infrastructure
 
-This repository serves one native MCP contract through a stable front door at `127.0.0.1:3003/mcp`. Replaceable loopback backends normally occupy ports 3001 and 3002; port 3000 is the legacy direct-listener slot during migration only.
+This repository serves native MCP contracts from loopback-only listeners. The current MCPv3 production path is Caddy on the VPS -> persistent reverse SSH -> minimal clone `127.0.0.1:3011`; the stable local front door at `127.0.0.1:3003/mcp` remains legacy/root fallback infrastructure.
 
-- Do not use, launch, or register Serena, MCP1, Desktop Commander, Docker, or port 9121. The repository-owned transparent front door is the only allowed MCP proxy.
+- Do not use, launch, or register Serena, MCP1, Docker, or port 9121 as part of MCP. The approved public reverse proxy is the Caddy VPS edge; local MCP listeners remain loopback-only and no extra local proxy layer is introduced. Desktop Commander may remain an execution fallback outside this repo-specific MCP topology.
 - The native server owns the MCP Streamable HTTP session and exposes exactly these tools: `view_image`, `start_process`, `read_output`, `kill_process`, `busy_list`, `busy_claim`, and `busy_release`.
 - `view_image` is model-only visual QA: it returns an image block to the calling model and does not attach or display the file in the user's chat. Call it at most once per artifact, never retry it as a delivery mechanism, and treat a successful call as inspection evidence only. User-facing pictures or animations require a separate conversation-file/attachment route, not this tool.
 - There is no foreground command runner. Start long or uncertain work with `start_process`, inspect it with `read_output`, and stop it with `kill_process`; a transport timeout or disconnect is UNKNOWN until output/process evidence is read.
@@ -12,7 +12,7 @@ This repository serves one native MCP contract through a stable front door at `1
 - A `process_id` is pinned internally to the backend generation that created it. `read_output`, `kill_process`, and `process:` BUSY operations must never fall through to a newer backend when that generation is unavailable. Keep the old backend draining until its process routes are gone.
 - `read_output` is capped at 6,000 characters per stream and marks truncated output; do not print base64, raw binary, or oversized stdout.
 - Each live tool result and transport record includes a short pseudonymous `caller_id`; raw authentication values are never logged or returned.
-- Tailscale Funnel forwards the public HTTPS origin to the stable front door at `http://127.0.0.1:3003`. Backend deployment changes only the front door's atomic active-backend file; it never retargets Funnel and never restarts the public front door.
+- Tailscale Funnel is legacy/non-production ingress after the 2026-09-03 VPS cutover. Current MCPv3 public ingress is `https://5-61-91-127.sslip.io/mcp` -> Caddy -> persistent reverse SSH -> clone 3011. An ingress failure must not authorize backend/OAuth/receipt churn without backend evidence.
 - A no-argument `keepalive.ps1` is the durable top-level supervisor used by legacy scheduled-task actions. It keeps independent FrontDoor/Backend supervisors present for ports 3003, 3001, and 3002; backend supervision never owns or recycles the front door.
 - Keep the server bound to loopback only. Do not add files, Git, project activation, workspace scanning, skills, routing, orchestration, or scheduler features.
 - `.env` and `.state` remain untracked. Never print or commit OAuth credentials.
