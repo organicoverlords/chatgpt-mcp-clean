@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('All','FrontDoor','Backend','Legacy')][string]$Role = 'All',
+    [ValidateSet('All','FrontDoor','Backend')][string]$Role = 'All',
     [int]$Port = 0,
     [int]$PollSeconds = 15,
     [string]$BackendConfigPath = '',
@@ -41,9 +41,8 @@ if ($Role -eq 'All') {
     }
     exit 0
 }
-if ($Port -le 0) { $Port = if ($Role -eq 'FrontDoor') { 3003 } elseif ($Role -eq 'Legacy') { 3000 } else { 3001 } }
+if ($Port -le 0) { $Port = if ($Role -eq 'FrontDoor') { 3003 } else { 3001 } }
 if ($Role -eq 'FrontDoor' -and $Port -ne 3003 -and -not $TestMode) { throw 'The public front door must own the stable 127.0.0.1:3003 endpoint outside explicit off-path tests' }
-if ($Role -eq 'Backend' -and $Port -eq 3000) { throw 'A replaceable backend must not own the public front-door port' }
 
 function EnvValue([string]$Name) {
     if (-not (Test-Path '.env')) { return $null }
@@ -54,11 +53,11 @@ function EnvValue([string]$Name) {
 
 $Origin = EnvValue 'MCP_PUBLIC_ORIGIN'
 $ServerName = 'shell-mcp'
-$ExpectedRole = if ($Role -eq 'FrontDoor') { 'front-door' } elseif ($Role -eq 'Legacy') { 'direct' } else { 'backend' }
+$ExpectedRole = if ($Role -eq 'FrontDoor') { 'front-door' } else { 'backend' }
 $Tailscale = 'C:\Program Files\Tailscale\tailscale.exe'
 if (-not $BackendConfigPath) { $BackendConfigPath = Join-Path $Root '.state\front-door\active-backend.json' }
 if (-not $ProcessRoutePath) { $ProcessRoutePath = Join-Path $Root '.state\front-door\process-routes.json' }
-$RoleKey = if ($Role -eq 'FrontDoor') { if ($TestMode) { "front-door-test-$Port" } else { 'front-door' } } elseif ($Role -eq 'Legacy') { 'legacy-3000' } else { "backend-$Port" }
+$RoleKey = if ($Role -eq 'FrontDoor') { if ($TestMode) { "front-door-test-$Port" } else { 'front-door' } } else { "backend-$Port" }
 if (-not $SupervisorStateRoot) { $SupervisorStateRoot = Join-Path $Root '.state\keepalive' }
 $State = Join-Path $SupervisorStateRoot $RoleKey
 New-Item -ItemType Directory -Force $State | Out-Null
@@ -100,7 +99,6 @@ function Healthy {
         $response = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 3
         if ($response.status -ne 'ok' -or $response.name -ne $ServerName -or [int]$response.port -ne $Port) { return $false }
         if ($Role -eq 'Backend') { return ($response.role -eq $ExpectedRole) }
-        if ($Role -eq 'Legacy') { return (-not $response.role -or $response.role -eq 'direct') }
         return ([int]$response.pid -eq (PortOwner) -and (IsOwnedListener ([int]$response.pid)))
     } catch { return $false }
 }
