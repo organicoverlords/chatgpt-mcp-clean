@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import type { Readable } from "node:stream";
 import { currentTelemetryContext, emitTelemetry, withTelemetryContext, type TelemetryContext } from "./transport-telemetry.js";
@@ -14,6 +14,10 @@ const MAX_CAPTURE_CHARS = 100_000;
 const MAX_READ_CHARS = 32_000;
 const MAX_COMMAND_REPORT_CHARS = 4_000;
 const COMPLETED_RETENTION_MS = 30 * 60 * 1000;
+const RECEIPT_ARCHIVE_RETENTION_DAYS = 7;
+const RECEIPT_ARCHIVE_RETENTION_MS = RECEIPT_ARCHIVE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+const RECEIPT_PRUNE_INTERVAL_MS = 60_000;
+const RECEIPT_ARCHIVE_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 const MAX_COMPLETED_PROCESSES = 64;
 const TASKKILL_TIMEOUT_MS = 2_000;
 const KILL_SETTLE_MS = 1_000;
@@ -237,9 +241,12 @@ export class ProcessManager {
   private readonly processes = new Map<string, ProcessState>();
   private readonly maxLivePerCaller: number;
   private readonly receiptDirectory?: string;
+  private readonly receiptArchiveDirectory?: string;
   private readonly controlRequestDirectory?: string;
   private readonly controlResponseDirectory?: string;
   private readonly controlRequestsInFlight = new Set<string>();
+  private lastReceiptPruneAt = 0;
+  private lastReceiptArchivePruneAt = 0;
   private lastControlPruneAt = 0;
 
   constructor(options: ProcessManagerOptions = {}) {
@@ -247,6 +254,8 @@ export class ProcessManager {
     this.receiptDirectory = options.receiptDirectory ? resolve(options.receiptDirectory) : undefined;
     if (this.receiptDirectory) {
       mkdirSync(this.receiptDirectory, { recursive: true });
+      this.receiptArchiveDirectory = join(this.receiptDirectory, "archive");
+      mkdirSync(this.receiptArchiveDirectory, { recursive: true });
       this.controlRequestDirectory = join(this.receiptDirectory, ".control", "requests");
       this.controlResponseDirectory = join(this.receiptDirectory, ".control", "responses");
       mkdirSync(this.controlRequestDirectory, { recursive: true });
@@ -263,19 +272,88 @@ export class ProcessManager {
     return join(this.receiptDirectory, `${processId}.json`);
   }
 
+  private receiptArchivePath(processId: string, finishedAt: string): string | undefined {
+    if (!this.receiptArchiveDirectory || !PROCESS_ID_PATTERN.test(processId)) return undefined;
+    const finishedMs = Date.parse(finishedAt);
+    if (!Number.isFinite(finishedMs)) return undefined;
+    const day = new Date(finishedMs).toISOString().slice(0, 10);
+    const dayDirectory = join(this.receiptArchiveDirectory, day);
+    mkdirSync(dayDirectory, { recursive: true });
+    return join(dayDirectory, `${processId}.json`);
+  }
+
+  private persistArchivedReceipt(receipt: CompletedProcessReceipt): void {
+    const path = this.receiptArchivePath(receipt.process_id, receipt.finished_at);
+    if (!path || existsSync(path)) return;
+    const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(temporaryPath, JSON.stringify(receipt), { encoding: "utf8", flag: "wx" });
+      renameSync(temporaryPath, path);
+    } finally {
+      try { unlinkSync(temporaryPath); } catch { /* already renamed or never created */ }
+    }
+  }
+
+  private pruneReceiptArchive(now = Date.now()): void {
+    if (!this.receiptArchiveDirectory) return;
+    if (now - this.lastReceiptArchivePruneAt < RECEIPT_ARCHIVE_PRUNE_INTERVAL_MS) return;
+    this.lastReceiptArchivePruneAt = now;
+    const cutoff = now - RECEIPT_ARCHIVE_RETENTION_MS;
+    let entries;
+    try {
+      entries = readdirSync(this.receiptArchiveDirectory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !/^\d{4}-\d{2}-\d{2}$/.test(entry.name)) continue;
+      const endOfDay = Date.parse(`${entry.name}T23:59:59.999Z`);
+      if (!Number.isFinite(endOfDay) || endOfDay >= cutoff) continue;
+      try { rmSync(join(this.receiptArchiveDirectory, entry.name), { recursive: true, force: true }); } catch { /* best-effort retention cleanup */ }
+    }
+  }
+
   private pruneReceipts(): void {
     if (!this.receiptDirectory) return;
     const now = Date.now();
-    const files = readdirSync(this.receiptDirectory, { withFileTypes: true })
-      .filter((entry) => entry.isFile() && PROCESS_ID_PATTERN.test(entry.name.slice(0, -5)) && entry.name.endsWith(".json"))
-      .map((entry) => {
-        const path = join(this.receiptDirectory!, entry.name);
-        return { path, modifiedAt: statSync(path).mtimeMs };
-      })
-      .sort((a, b) => a.modifiedAt - b.modifiedAt);
-    for (const file of files) {
-      if (now - file.modifiedAt > COMPLETED_RETENTION_MS) unlinkSync(file.path);
+    if (now - this.lastReceiptPruneAt < RECEIPT_PRUNE_INTERVAL_MS) return;
+    this.lastReceiptPruneAt = now;
+    let entries;
+    try {
+      entries = readdirSync(this.receiptDirectory, { withFileTypes: true });
+    } catch {
+      return;
     }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json") || !PROCESS_ID_PATTERN.test(entry.name.slice(0, -5))) continue;
+      const path = join(this.receiptDirectory, entry.name);
+      let modifiedAt = now;
+      let archived = false;
+      try {
+        modifiedAt = statSync(path).mtimeMs;
+        const receipt = JSON.parse(readFileSync(path, "utf8")) as CompletedProcessReceipt;
+        this.persistArchivedReceipt(receipt);
+        archived = true;
+      } catch {
+        // Preserve unreadable or unarchived evidence instead of deleting it.
+      }
+      if (archived && now - modifiedAt > COMPLETED_RETENTION_MS) {
+        try { unlinkSync(path); } catch { /* another clone may already have pruned it */ }
+      }
+    }
+    this.pruneReceiptArchive(now);
+  }
+
+  private receiptReadPaths(processId: string): string[] {
+    const hotPath = this.receiptPath(processId);
+    if (!hotPath) return [];
+    const paths = [hotPath];
+    if (!this.receiptArchiveDirectory) return paths;
+    for (let dayOffset = 0; dayOffset <= RECEIPT_ARCHIVE_RETENTION_DAYS; dayOffset += 1) {
+      const day = new Date(Date.now() - dayOffset * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      paths.push(join(this.receiptArchiveDirectory, day, `${processId}.json`));
+    }
+    return paths;
   }
 
   private controlPath(directory: string | undefined, requestId: string): string | undefined {
@@ -490,6 +568,23 @@ export class ProcessManager {
     try {
       writeFileSync(temporaryPath, JSON.stringify(receipt), { encoding: "utf8", flag: "wx" });
       renameSync(temporaryPath, path);
+      try {
+        this.persistArchivedReceipt(receipt);
+        emitTelemetry({
+          event: "process_receipt_archived",
+          process_id: state.id,
+          pid: state.pid,
+          owner_caller_id: state.callerId,
+        }, state.ownerContext);
+      } catch (error) {
+        emitTelemetry({
+          event: "process_receipt_archive_error",
+          process_id: state.id,
+          pid: state.pid,
+          owner_caller_id: state.callerId,
+          error_message: error instanceof Error ? error.message : String(error),
+        }, state.ownerContext);
+      }
       this.pruneReceipts();
       emitTelemetry({
         event: "process_receipt_persisted",
@@ -510,15 +605,17 @@ export class ProcessManager {
   }
 
   private readReceipt(processId: string, maxChars: number): Record<string, unknown> | undefined {
-    const path = this.receiptPath(processId);
-    if (!path) return undefined;
     this.pruneReceipts();
-    let receipt: CompletedProcessReceipt;
-    try {
-      receipt = JSON.parse(readFileSync(path, "utf8")) as CompletedProcessReceipt;
-    } catch {
-      return undefined;
+    let receipt: CompletedProcessReceipt | undefined;
+    for (const path of this.receiptReadPaths(processId)) {
+      try {
+        receipt = JSON.parse(readFileSync(path, "utf8")) as CompletedProcessReceipt;
+        break;
+      } catch {
+        // Try the hot receipt first, then the durable day-sharded archive.
+      }
     }
+    if (!receipt) return undefined;
     if (receipt.version !== 1 || receipt.process_id !== processId || typeof receipt.pid !== "number" || typeof receipt.command !== "string" || typeof receipt.cwd !== "string" || typeof receipt.stdout !== "string" || typeof receipt.stderr !== "string" || typeof receipt.started_at !== "string" || typeof receipt.finished_at !== "string") {
       return undefined;
     }
