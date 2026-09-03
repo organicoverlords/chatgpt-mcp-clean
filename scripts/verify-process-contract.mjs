@@ -10,7 +10,12 @@ const server = createServer("contract-verifier");
 const actualTools = Object.entries(server._registeredTools)
   .sort(([a], [b]) => a.localeCompare(b))
   .map(([name, tool]) => ({ name, description: tool.description || "", inputSchema: z.toJSONSchema(tool.inputSchema) }));
-const expectedTools = JSON.parse(readFileSync(resolve("config/process-tool-contract.json"), "utf8"));
+const contractPath = resolve("config/process-tool-contract.json");
+const contractBytes = readFileSync(contractPath);
+const acceptedContractSha256 = "5d56d724d622fe5bc3e946fe4125b19491ac3e0d4c67177792744a446529c9ac";
+const actualContractSha256 = createHash("sha256").update(contractBytes).digest("hex");
+assert.equal(actualContractSha256, acceptedContractSha256, "accepted production process-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
+const expectedTools = JSON.parse(contractBytes.toString("utf8"));
 assert.deepEqual(actualTools, expectedTools, "process tool contract changed; do not replace a stable connector identity without an explicit contract migration");
 const serverBytes = readFileSync(resolve("dist/server.js"));
 const actualHash = createHash("sha256").update(serverBytes).digest("hex");
