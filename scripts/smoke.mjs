@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 
 const origin = (process.env.MCP_SMOKE_ORIGIN || process.env.MCP_PUBLIC_ORIGIN || "http://127.0.0.1:3000").replace(/\/$/, "");
+const publicOrigin = (process.env.MCP_SMOKE_PUBLIC_ORIGIN || origin).replace(/\/$/, "");
 const ownerLogin = (process.env.TAILSCALE_OWNER_LOGIN || "owner@example.com").trim();
 const redirectUri = "https://chatgpt.com/connector/oauth/smoke";
-const resource = `${origin}/mcp`;
+const resource = `${publicOrigin}/mcp`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const toolProfile = (process.env.MCP_TOOL_PROFILE || "full").trim().toLowerCase();
 const expectedTools = toolProfile === "process"
@@ -115,15 +116,31 @@ async function waitForOutput(sessionId, processId, pattern, timeoutMs = 20_000) 
   } while (Date.now() < deadline);
   return output;
 }
-async function waitForExit(sessionId, processId, timeoutMs = 20_000) {
+async function readAllUntilExit(sessionId, first, timeoutMs = 20_000) {
+  const processId = first.process_id;
   const deadline = Date.now() + timeoutMs;
-  let output;
+  const pages = [];
+  let stdout = "";
+  let stderr = "";
+  let output = first;
   do {
-    output = await callTool(sessionId, "read_output", { process_id: processId });
-    if (!output.running) return output;
-    await sleep(100);
+    if (output.output_page) {
+      assert.equal(output.output_page.stdout_start, stdout.length, "stdout pages remain contiguous");
+      assert.equal(output.output_page.stderr_start, stderr.length, "stderr pages remain contiguous");
+      stdout += output.stdout || "";
+      stderr += output.stderr || "";
+      pages.push(output);
+    } else if (!output.running) {
+      stdout = output.stdout || "";
+      stderr = output.stderr || "";
+      pages.push(output);
+    }
+    if (!output.running && output.next_action !== "READ_SAME_PROCESS_ID") {
+      return { pages, stdout, stderr, last: output };
+    }
+    output = await callTool(sessionId, "read_output", { process_id: processId, max_chars: 32_000 });
   } while (Date.now() < deadline);
-  return output;
+  throw new Error(`process ${processId} did not reach a terminal output page within ${timeoutMs}ms`);
 }
 
 const sessionA = await initialize();
@@ -190,10 +207,11 @@ try {
   const healthDuringFlood = await jsonFetch(`${origin}/health`, { signal: AbortSignal.timeout(5_000) });
   assert.equal(healthDuringFlood.response.status, 200, healthDuringFlood.text);
   assert.ok(Date.now() - healthStarted < 5_000, "health probe stalled during high-output process");
-  const floodOutput = await waitForExit(sessionA, floodJob.process_id);
-  assert.equal(floodOutput.running, false);
-  assert.ok(floodOutput.stdout.length <= 6_000, `read_output returned ${floodOutput.stdout.length} characters`);
-  assert.equal(floodOutput.stdout_truncated, true);
+  const floodOutput = await readAllUntilExit(sessionA, floodJob);
+  assert.equal(floodOutput.last.running, false);
+  assert.ok(floodOutput.pages[0].stdout.length > 30_000 && floodOutput.pages[0].stdout.length <= 32_000, `first paged read_output returned ${floodOutput.pages[0].stdout.length} characters`);
+  assert.equal(floodOutput.pages.at(-1).stdout_truncated, true);
+  assert.equal(floodOutput.stdout.length, 100_000, `lossless retained output returned ${floodOutput.stdout.length} characters`);
   assert.match(floodOutput.stdout, /FLOOD_10000_/);
 
   if (toolProfile === "full") {
@@ -220,8 +238,9 @@ try {
   if (floodJob?.process_id) await callTool(sessionA, "kill_process", { process_id: floodJob.process_id }).catch(() => undefined);
 }
 
-const listenerJson = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,OwningProcess | ConvertTo-Json -Compress"], { encoding: "utf8" }).trim();
-assert.ok(listenerJson, "127.0.0.1:3000 has no listener");
+const smokePort = Number(new URL(origin).port || (new URL(origin).protocol === "https:" ? 443 : 80));
+const listenerJson = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `Get-NetTCPConnection -LocalPort ${smokePort} -State Listen -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,OwningProcess | ConvertTo-Json -Compress`], { encoding: "utf8" }).trim();
+assert.ok(listenerJson, `smoke origin port ${smokePort} has no listener`);
 const port9121 = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "if (Get-NetTCPConnection -LocalPort 9121 -State Listen -ErrorAction SilentlyContinue) { exit 1 } else { exit 0 }"], { encoding: "utf8" });
 assert.equal(port9121, "");
 const processJson = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress"], { encoding: "utf8" });

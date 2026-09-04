@@ -6,11 +6,9 @@ import type { Readable } from "node:stream";
 import { currentTelemetryContext, emitTelemetry, withTelemetryContext, type TelemetryContext } from "./transport-telemetry.js";
 
 const MAX_CAPTURE_CHARS = 100_000;
-// 6,000 not 20,000: the platform blocks read_output payloads above roughly 6 KB as a
-// safety error AFTER the process has already run, so a larger cap produces an invisible
-// failure -- the output sits complete in the receipt while the caller sees only a block.
-// Measured 2026-08-25: 6.4 KB delivered, 12.8 KB and 14.4 KB blocked. Truncating below
-// that ceiling turns a silent loss into a marked stdout_truncated read the caller can page.
+// Current live MCPv3 capability was revalidated on 2026-09-04 with a single 31,000+
+// character read_output response. Keep the logical read/page contract at 32k; do not
+// reintroduce the stale August 6k transport assumption.
 const MAX_READ_CHARS = 32_000;
 const MAX_COMMAND_REPORT_CHARS = 4_000;
 const COMPLETED_RETENTION_MS = 30 * 60 * 1000;
@@ -127,7 +125,13 @@ class BoundedCapture {
     const dropped = Math.max(0, this.length - text.length);
     return { text, truncated: this.truncated || this.length > maxChars, dropped };
   }
+
+  full(): { text: string; truncated: boolean } {
+    return { text: this.chunks.join(""), truncated: this.truncated };
+  }
 }
+
+type OutputCursor = { stdout: number; stderr: number };
 
 type ProcessState = {
   id: string;
@@ -334,6 +338,7 @@ function processResponseState(startedAt: string, running: boolean, finishedAt?: 
 
 export class ProcessManager {
   private readonly processes = new Map<string, ProcessState>();
+  private readonly outputCursors = new Map<string, OutputCursor>();
   private readonly maxLivePerCaller: number;
   private readonly receiptDirectory?: string;
   private readonly receiptArchiveDirectory?: string;
@@ -750,17 +755,16 @@ export class ProcessManager {
       return undefined;
     }
     const limit = Math.max(1, Math.min(maxChars, MAX_READ_CHARS));
-    const stdout = receipt.stdout.slice(-limit);
-    const stderr = receipt.stderr.slice(-limit);
     const observer = currentTelemetryContext();
+    const observerCallerId = observer.caller_id ?? "caller_unknown";
     emitTelemetry({
       event: "process_receipt_read",
       process_id: receipt.process_id,
       pid: receipt.pid,
       owner_caller_id: receipt.caller_id,
-      caller_id: observer.caller_id ?? "caller_unknown",
+      caller_id: observerCallerId,
     }, observer);
-    return {
+    const legacy = {
       ...processResponseState(receipt.started_at, false, receipt.finished_at),
       process_id: receipt.process_id,
       pid: receipt.pid,
@@ -768,8 +772,8 @@ export class ProcessManager {
       ...(receipt.command_truncated ? { command_truncated: true } : {}),
       cwd: receipt.cwd,
       running: false,
-      stdout,
-      stderr,
+      stdout: receipt.stdout.slice(-limit),
+      stderr: receipt.stderr.slice(-limit),
       exit_code: receipt.exit_code,
       signal: receipt.signal,
       started_at: receipt.started_at,
@@ -778,6 +782,66 @@ export class ProcessManager {
       ...(receipt.stderr_truncated || receipt.stderr.length > limit ? { stderr_truncated: true } : {}),
       ...(receipt.error ? { error: receipt.error } : {}),
     };
+    const cursorExists = this.outputCursors.has(this.cursorKey(receipt.process_id, observerCallerId));
+    const needsPaging = cursorExists || receipt.stdout.length + receipt.stderr.length > limit;
+    return needsPaging
+      ? this.pageOutput(legacy, receipt.stdout, receipt.stderr, observerCallerId, Boolean(receipt.stdout_truncated), Boolean(receipt.stderr_truncated), limit)
+      : legacy;
+  }
+
+  private cursorKey(processId: string, callerId: string): string {
+    return `${processId}:${callerId}`;
+  }
+
+  private pageOutput(
+    legacy: Record<string, unknown>,
+    fullStdout: string,
+    fullStderr: string,
+    callerId: string,
+    captureStdoutTruncated: boolean,
+    captureStderrTruncated: boolean,
+    requestedChars: number,
+  ): Record<string, unknown> {
+    const processId = String(legacy.process_id);
+    const cursorKey = this.cursorKey(processId, callerId);
+    const cursor = this.outputCursors.get(cursorKey) ?? { stdout: 0, stderr: 0 };
+    const limit = Math.max(1, Math.min(requestedChars, MAX_READ_CHARS));
+    const base: Record<string, unknown> = { ...legacy, stdout: "", stderr: "" };
+    delete base.stdout_dropped_from_start;
+    delete base.stderr_dropped_from_start;
+    if (!captureStdoutTruncated) delete base.stdout_truncated;
+    if (!captureStderrTruncated) delete base.stderr_truncated;
+
+    const remainingStdout = fullStdout.slice(cursor.stdout);
+    const remainingStderr = fullStderr.slice(cursor.stderr);
+    const stdoutCount = Math.min(limit, remainingStdout.length);
+    const stderrCount = Math.min(Math.max(0, limit - stdoutCount), remainingStderr.length);
+    const nextStdout = cursor.stdout + stdoutCount;
+    const nextStderr = cursor.stderr + stderrCount;
+    const moreCaptured = nextStdout < fullStdout.length || nextStderr < fullStderr.length;
+    const running = legacy.running === true;
+
+    const result = {
+      ...base,
+      next_action: moreCaptured || running ? "READ_SAME_PROCESS_ID" : "STOP_READING",
+      stdout: remainingStdout.slice(0, stdoutCount),
+      stderr: remainingStderr.slice(0, stderrCount),
+      output_page: {
+        stdout_start: cursor.stdout,
+        stdout_end: nextStdout,
+        stdout_total: fullStdout.length,
+        stderr_start: cursor.stderr,
+        stderr_end: nextStderr,
+        stderr_total: fullStderr.length,
+        page_chars: stdoutCount + stderrCount,
+        page_limit: limit,
+        more: moreCaptured,
+      },
+    };
+
+    if (moreCaptured || running) this.outputCursors.set(cursorKey, { stdout: nextStdout, stderr: nextStderr });
+    else this.outputCursors.delete(cursorKey);
+    return result;
   }
 
   private markProcessChanged(state: ProcessState): void {
@@ -927,6 +991,8 @@ export class ProcessManager {
     const command = state.command.slice(0, MAX_COMMAND_REPORT_CHARS);
     const stdout = state.stdout.tail(limit);
     const stderr = state.stderr.tail(limit);
+    const fullStdout = state.stdout.full();
+    const fullStderr = state.stderr.full();
     const observer = currentTelemetryContext();
     const observerCallerId = observer.caller_id ?? "caller_unknown";
     if (markRead) state.lastReadRevisionByCaller.set(observerCallerId, state.revision);
@@ -939,7 +1005,7 @@ export class ProcessManager {
       running: state.exitCode === null,
       reassociated: Boolean(observer.caller_id && observer.caller_id !== state.callerId),
     }, observer);
-    return {
+    const legacy = {
       ...processResponseState(state.startedAt, state.exitCode === null, state.finishedAt),
       process_id: state.id,
       pid: state.pid,
@@ -957,6 +1023,15 @@ export class ProcessManager {
       ...(stderr.truncated ? { stderr_truncated: true, stderr_dropped_from_start: stderr.dropped } : {}),
       ...(state.error ? { error: state.error } : {}),
     };
+    // A running process owns a moving bounded capture. Keep live reads as ordinary bounded
+    // tail snapshots; starting a cursor against that moving window can skip the eventual
+    // retained tail as old bytes roll out. Lossless paging begins only after completion,
+    // when the retained 100k snapshot is stable.
+    const cursorExists = this.outputCursors.has(this.cursorKey(state.id, observerCallerId));
+    const needsPaging = state.exitCode !== null && (cursorExists || fullStdout.text.length + fullStderr.text.length > limit);
+    return needsPaging
+      ? this.pageOutput(legacy, fullStdout.text, fullStderr.text, observerCallerId, fullStdout.truncated, fullStderr.truncated, limit)
+      : legacy;
   }
 
   async readWithWait(processId: string, maxChars = MAX_READ_CHARS, waitMs = 0): Promise<Record<string, unknown>> {

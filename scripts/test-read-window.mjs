@@ -1,36 +1,38 @@
 import assert from "node:assert/strict";
 import { ProcessManager } from "../dist/lib/process-manager.js";
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-async function waitForExit(manager, processId) {
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    const state = manager.read(processId);
-    if (!state.running) return state;
-    await sleep(10);
+function readAll(manager, first) {
+  const pages = [first];
+  while (pages.at(-1).next_action === "READ_SAME_PROCESS_ID") {
+    pages.push(manager.read(first.process_id));
+    assert.ok(pages.length < 100, "paging terminates");
   }
-  throw new Error(`process ${processId} did not exit during the test`);
+  return {
+    pages,
+    stdout: pages.map((page) => page.stdout).join(""),
+    stderr: pages.map((page) => page.stderr).join(""),
+  };
 }
 
 const manager = new ProcessManager({ maxLaunchesPerWindow: 8 });
 const started = [];
 try {
-  const windowJob = manager.start("Write-Output ('WINDOW_BEGIN_' + ('W' * 24000) + '_WINDOW_END')");
+  const windowJob = await manager.startWithWait("Write-Output ('WINDOW_BEGIN_' + ('W' * 24000) + '_WINDOW_END')", undefined, "window-test", 10_000);
   started.push(windowJob.process_id);
-  const windowOutput = await waitForExit(manager, windowJob.process_id);
-  assert.equal(windowOutput.stdout_truncated, undefined);
+  const windowOutput = readAll(manager, windowJob);
+  assert.equal(windowOutput.pages.at(-1).stdout_truncated, undefined);
   assert.match(windowOutput.stdout, /^WINDOW_BEGIN_/);
   assert.match(windowOutput.stdout, /_WINDOW_END\r?\n?$/);
   assert.ok(windowOutput.stdout.length > 24_000);
 
-  const floodJob = manager.start("$payload = 'X' * 200; 1..500 | ForEach-Object { Write-Output (('FLOOD_{0}_{1}' -f $_,$payload)) }");
+  const floodJob = await manager.startWithWait("$payload = 'X' * 200; 1..500 | ForEach-Object { Write-Output (('FLOOD_{0}_{1}' -f $_,$payload)) }", undefined, "window-test", 10_000);
   started.push(floodJob.process_id);
-  const floodOutput = await waitForExit(manager, floodJob.process_id);
-  assert.equal(floodOutput.stdout_truncated, true);
-  assert.ok(floodOutput.stdout.length <= 32_000);
-  assert.ok(floodOutput.stdout.length > 6_000);
+  const floodOutput = readAll(manager, floodJob);
+  assert.equal(floodOutput.pages.at(-1).stdout_truncated, true);
+  assert.ok(floodOutput.stdout.length <= 100_000);
+  assert.ok(floodOutput.stdout.length > 32_000);
   assert.match(floodOutput.stdout, /FLOOD_500_/);
-  console.log(`PASS read_window whole=${windowOutput.stdout.length} truncated=${floodOutput.stdout.length}`);
+  console.log(`PASS read_window whole=${windowOutput.stdout.length} retained=${floodOutput.stdout.length} pages=${floodOutput.pages.length}`);
 } finally {
   for (const processId of started) await manager.kill(processId).catch(() => undefined);
 }
