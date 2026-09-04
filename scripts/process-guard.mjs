@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProcessManager } from "../dist/lib/process-manager.js";
@@ -196,11 +196,30 @@ try {
   if (waitingProcess) await waitingManager.kill(waitingProcess.process_id).catch(() => undefined);
 }
 
+
+const inheritedHandleDirectory = mkdtempSync(join(tmpdir(), "mcp-inherited-handle-"));
+try {
+  const helper = join(inheritedHandleDirectory, "hold-stdio.cjs");
+  writeFileSync(helper, `const { spawn } = require("node:child_process");\nconst child = spawn(process.execPath, ["-e", "setTimeout(()=>{},2500)"], { detached: true, stdio: ["ignore", "inherit", "inherit"] });\nchild.unref();\nconsole.log("OWNER_PID_EXITING");\n`);
+  const manager = new ProcessManager();
+  const startedAt = Date.now();
+  const exited = await manager.startWithWait(`& node.exe '${helper}'`, undefined, "caller_inherited_handle_test", 1_000);
+  assert.equal(exited.running, false, JSON.stringify(exited));
+  assert.match(exited.stdout, /OWNER_PID_EXITING/);
+  assert.ok(Date.now() - startedAt < 1_000, "owned PID exit must not wait for descendant-inherited stdio handles");
+  const killAfterExit = await manager.kill(exited.process_id);
+  assert.equal(killAfterExit.already_exited, true, JSON.stringify(killAfterExit));
+} finally {
+  rmSync(inheritedHandleDirectory, { recursive: true, force: true });
+}
+
 const receiptChurnDirectory = mkdtempSync(join(tmpdir(), "mcp-receipt-churn-"));
 try {
-  const receiptChurnManager = new ProcessManager({ receiptDirectory: receiptChurnDirectory });
+  // Use a tiny injected in-memory cap so this proves disk-receipt fallback without
+  // serially launching 80 PowerShell processes on every full-suite run.
+  const receiptChurnManager = new ProcessManager({ receiptDirectory: receiptChurnDirectory, maxCompletedProcesses: 3 });
   let oldestReceiptProcessId;
-  for (let index = 0; index < 80; index += 1) {
+  for (let index = 0; index < 5; index += 1) {
     const completed = await receiptChurnManager.startWithWait(`Write-Output 'RECEIPT_CHURN_${index}'`, undefined, `caller_receipt_churn_${index % 8}`, 2_000);
     assert.equal(completed.running, false, JSON.stringify(completed));
     if (index === 0) oldestReceiptProcessId = completed.process_id;

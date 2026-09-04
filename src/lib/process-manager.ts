@@ -29,6 +29,7 @@ type CapturedChild = ChildProcessByStdio<null, Readable, Readable>;
 
 type ProcessManagerOptions = {
   maxLivePerCaller?: number;
+  maxCompletedProcesses?: number;
   receiptDirectory?: string;
 };
 
@@ -340,6 +341,7 @@ export class ProcessManager {
   private readonly processes = new Map<string, ProcessState>();
   private readonly outputCursors = new Map<string, OutputCursor>();
   private readonly maxLivePerCaller: number;
+  private readonly maxCompletedProcesses: number;
   private readonly receiptDirectory?: string;
   private readonly receiptArchiveDirectory?: string;
   private readonly controlRequestDirectory?: string;
@@ -351,6 +353,7 @@ export class ProcessManager {
 
   constructor(options: ProcessManagerOptions = {}) {
     this.maxLivePerCaller = options.maxLivePerCaller ?? DEFAULT_MAX_LIVE_PER_CALLER;
+    this.maxCompletedProcesses = options.maxCompletedProcesses ?? MAX_COMPLETED_PROCESSES;
     this.receiptDirectory = options.receiptDirectory ? resolve(options.receiptDirectory) : undefined;
     if (this.receiptDirectory) {
       mkdirSync(this.receiptDirectory, { recursive: true });
@@ -861,7 +864,7 @@ export class ProcessManager {
     const remaining = [...this.processes.values()]
       .filter((state) => state.exitCode !== null && state.finishedAt)
       .sort((a, b) => Date.parse(a.finishedAt!) - Date.parse(b.finishedAt!));
-    for (const state of remaining.slice(0, Math.max(0, remaining.length - MAX_COMPLETED_PROCESSES))) this.processes.delete(state.id);
+    for (const state of remaining.slice(0, Math.max(0, remaining.length - this.maxCompletedProcesses))) this.processes.delete(state.id);
   }
 
   start(command: string, workingDirectory?: string, callerId = "caller_unknown"): { mcp_status: "OK"; process_state: "RUNNING" | "COMPLETED"; elapsed_ms: number; next_action: "READ_SAME_PROCESS_ID" | "STOP_READING"; process_id: string; pid: number; cwd: string; running: boolean } {
@@ -921,25 +924,15 @@ export class ProcessManager {
       state.stderr.append(chunk);
       this.markProcessChanged(state);
     });
-    child.once("error", (error) => {
-      state.error = error.message;
-      if (state.exitCode === null) state.exitCode = -1;
-      this.markProcessChanged(state);
-      emitTelemetry({
-        event: "process_error",
-        process_id: state.id,
-        pid: state.pid,
-        owner_caller_id: state.callerId,
-        error_code: "code" in error ? error.code : null,
-        error_message: error.message,
-      }, state.ownerContext);
-    });
-    child.once("close", (code, signal) => {
-      if (state.exitCode === null) state.exitCode = code;
-      state.signal = signal;
-      state.finishedAt = new Date().toISOString();
+    let terminalObserved = false;
+    const observeTerminal = (code: number | null, signal: NodeJS.Signals | null) => {
+      if (state.exitCode === null) state.exitCode = code ?? -1;
+      if (signal) state.signal = signal;
+      if (!state.finishedAt) state.finishedAt = new Date().toISOString();
       this.markProcessChanged(state);
       this.persistReceipt(state);
+      if (terminalObserved) return;
+      terminalObserved = true;
       emitTelemetry({
         event: "process_exit_observed",
         process_id: state.id,
@@ -951,7 +944,25 @@ export class ProcessManager {
         finished_at: state.finishedAt,
       }, state.ownerContext);
       resolveDone();
+    };
+    child.once("error", (error) => {
+      state.error = error.message;
+      emitTelemetry({
+        event: "process_error",
+        process_id: state.id,
+        pid: state.pid,
+        owner_caller_id: state.callerId,
+        error_code: "code" in error ? error.code : null,
+        error_message: error.message,
+      }, state.ownerContext);
+      observeTerminal(-1, null);
     });
+    // `exit` tracks the owned PID. `close` waits for stdio handles too, and on Windows a
+    // descendant can keep an inherited pipe open after the owned PID is already gone.
+    // Treat the PID exit as terminal immediately; let `close` refresh the receipt with any
+    // final buffered stdout/stderr without keeping MCP in a false running state.
+    child.once("exit", (code, signal) => observeTerminal(code, signal));
+    child.once("close", (code, signal) => observeTerminal(code, signal));
     this.processes.set(state.id, state);
     emitTelemetry({
       event: "process_started",
