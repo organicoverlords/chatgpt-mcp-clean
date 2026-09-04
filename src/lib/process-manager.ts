@@ -155,11 +155,10 @@ type ProcessState = {
   waiters: Set<() => void>;
 };
 
-// Absolute path so a mangled PATH in an inherited environment cannot turn into a
-// spawn failure. Falls back to bare resolution only if SystemRoot is unset.
-const POWERSHELL_EXE = process.env.SystemRoot
-  ? `${process.env.SystemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
-  : "powershell.exe";
+// PowerShell 7 is the single supported shell runtime. Keep an absolute deterministic
+// path and fail closed if it disappears; never silently fall back to Windows PowerShell 5.1.
+const POWERSHELL_EXE = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
+if (!existsSync(POWERSHELL_EXE)) throw new Error(`Required PowerShell 7 runtime is missing: ${POWERSHELL_EXE}`);
 
 // spawn() reports ENOENT when the *cwd* does not exist, and node attributes it to the
 // executable -- "spawn powershell.exe ENOENT" for a bad working_directory sends callers
@@ -240,11 +239,43 @@ function powershellCodeMask(command: string): string {
   return masked.join("");
 }
 
+function driveRootRecursiveScanError(command: string, code: string): string | undefined {
+  const boundaries = [...code.matchAll(/[;\r\n]/g)].map((match) => match.index ?? 0);
+  const starts = [0, ...boundaries.map((index) => index + 1)];
+  const ends = [...boundaries, command.length];
+  const rootDrive = /(?:^|[\s,(=])(?:["']?[A-Za-z]:[\\/](?:\*)?["']?)(?=$|[\s,;)|])/i;
+  for (let segmentIndex = 0; segmentIndex < starts.length; segmentIndex += 1) {
+    const start = starts[segmentIndex]!;
+    const end = ends[segmentIndex]!;
+    const rawSegment = command.slice(start, end);
+    const codeSegment = code.slice(start, end);
+    if (!rootDrive.test(rawSegment)) continue;
+    if (/\b(?:Get-ChildItem|gci|dir|ls)\b/i.test(codeSegment) && /-(?:Recurse|r)\b/i.test(codeSegment)) {
+      return "recursive enumeration from a drive root is blocked; use an explicit project or subdirectory root";
+    }
+    if (/\b(?:rg|rg\.exe|ripgrep|fd|fd\.exe)\b/i.test(codeSegment)) {
+      return "recursive native search from a drive root is blocked; use an explicit project or subdirectory root";
+    }
+    if (/\bwhere(?:\.exe)?\b/i.test(codeSegment) && /\/R\b/i.test(codeSegment)) {
+      return "recursive native search from a drive root is blocked; use an explicit project or subdirectory root";
+    }
+    if (/\bfindstr(?:\.exe)?\b/i.test(codeSegment) && /\/S\b/i.test(codeSegment)) {
+      return "recursive native search from a drive root is blocked; use an explicit project or subdirectory root";
+    }
+    if (/\bcmd(?:\.exe)?\b/i.test(codeSegment) && /\bdir\b/i.test(codeSegment) && /\/S\b/i.test(codeSegment)) {
+      return "recursive native enumeration from a drive root is blocked; use an explicit project or subdirectory root";
+    }
+    if (/\btree(?:\.com|\.exe)?\b/i.test(codeSegment)) {
+      return "drive-root tree enumeration is blocked; use an explicit project or subdirectory root";
+    }
+  }
+  return undefined;
+}
+
 function powershellPreflightError(command: string): string | undefined {
   const code = powershellCodeMask(command);
-  if (code.includes("&&") || code.includes("||") || code.includes("??")) {
-    return "Windows PowerShell 5.1 does not support &&, ||, or ??; use PS5.1-compatible control flow";
-  }
+  const rootScanError = driveRootRecursiveScanError(command, code);
+  if (rootScanError) return rootScanError;
   const automaticVariable = String.raw`\$(?:(?:global|script|local|private):)?(?:PID|args)`;
   const writePattern = new RegExp(`${automaticVariable}\\s*(?:\\+\\+|--|[+*/%?-]?=)|(?:\\+\\+|--)\\s*${automaticVariable}`, "i");
   if (writePattern.test(code)) {
