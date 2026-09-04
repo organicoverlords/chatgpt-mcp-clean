@@ -14,30 +14,54 @@ async function run(command, caller) {
 
 function rejects(command, expected) {
   assert.throws(
-    () => manager.start(command, undefined, "caller_ps51_preflight_reject"),
+    () => manager.start(command, undefined, "caller_pwsh_preflight_reject"),
     (error) => error instanceof Error && error.message.startsWith("start_process_preflight_failed:") && expected.test(error.message),
   );
 }
 
-const valid = await run("$values = @(foreach ($x in 1,2) { $x }); $values | Measure-Object | Select-Object -ExpandProperty Count", "caller_ps51_preflight_valid");
+const valid = await run("$values = @(foreach ($x in 1,2) { $x }); $values | Measure-Object | Select-Object -ExpandProperty Count", "caller_pwsh_preflight_valid");
 assert.equal(valid.exit_code, 0, JSON.stringify(valid));
 assert.match(valid.stdout, /2/);
 
-const nativeFailure = await run("cmd.exe /c exit 7", "caller_ps51_preflight_native_failure");
+const nativeFailure = await run("cmd.exe /c exit 7", "caller_pwsh_preflight_native_failure");
 assert.equal(nativeFailure.exit_code, 1, "guard must preserve powershell.exe -Command failure semantics");
-const explicitExit = await run("exit 42", "caller_ps51_preflight_explicit_exit");
+const explicitExit = await run("exit 42", "caller_pwsh_preflight_explicit_exit");
 assert.equal(explicitExit.exit_code, 42, "explicit PowerShell exit codes must pass through");
 
-rejects("Write-Output one && Write-Output two", /does not support/);
-rejects("Write-Output one || Write-Output two", /does not support/);
+const runtime = await run("Write-Output $PSVersionTable.PSEdition; Write-Output $PSVersionTable.PSVersion.ToString(); Write-Output (Get-Process -Id $PID).Path", "caller_pwsh_runtime");
+assert.match(runtime.stdout, /Core/);
+assert.match(runtime.stdout, /7\.6\.5/);
+assert.match(runtime.stdout, /C:\\Program Files\\PowerShell\\7\\pwsh\.exe/i);
+
+const operators = await run("cmd.exe /c exit 0 && Write-Output AND_OK; cmd.exe /c exit 1 || Write-Output OR_OK; $value = $null ?? 'NULL_OK'; Write-Output $value", "caller_pwsh_operators");
+assert.match(operators.stdout, /AND_OK/);
+assert.match(operators.stdout, /OR_OK/);
+assert.match(operators.stdout, /NULL_OK/);
+
 rejects("$PID = 123", /automatic/);
 rejects("$PID++", /automatic/);
 rejects("$args = @('bad')", /automatic/);
 rejects("foreach ($x in 1) { $x } | Out-Null", /capture/);
 rejects("if ($true) { Write-Output 'broken'", /unbalanced/);
+rejects("Get-ChildItem C:\\ -Recurse", /drive[- ]root/);
+rejects("gci -r 'D:\\'", /drive[- ]root/);
+rejects("dir -Path C:/ -Recurse", /drive[- ]root/);
+rejects("rg needle C:\\", /drive[- ]root/);
+rejects("where.exe /R C:\\ *.txt", /drive[- ]root/);
+rejects("findstr.exe /S needle C:\\*", /drive[- ]root/);
+rejects("cmd.exe /c dir C:\\ /s", /drive[- ]root/);
+rejects("tree.exe C:\\ /F", /drive[- ]root/);
+
+const boundedRoot = mkdtempSync(join(tmpdir(), "mcp-bounded-recursion-"));
+try {
+  const bounded = await run(`Get-ChildItem -LiteralPath '${boundedRoot.replaceAll("'", "''")}' -Recurse | Measure-Object | Select-Object -ExpandProperty Count`, "caller_bounded_recursion");
+  assert.equal(bounded.exit_code, 0, JSON.stringify(bounded));
+} finally {
+  rmSync(boundedRoot, { recursive: true, force: true });
+}
 
 // Guard text inside strings/comments/here-strings must not become false positives.
-const literals = await run("$text='&& $PID = 1'; # || $args = 2\n$here=@'\nforeach ($x in 1) { $x } | Out-Null\n'@\nWrite-Output $text; Write-Output $here", "caller_ps51_preflight_literals");
+const literals = await run("$text='&& $PID = 1'; # || $args = 2\n$here=@'\nforeach ($x in 1) { $x } | Out-Null\n'@\nWrite-Output $text; Write-Output $here", "caller_pwsh_preflight_literals");
 assert.equal(literals.exit_code, 0, JSON.stringify(literals));
 assert.match(literals.stdout, /&& \$PID = 1/);
 
@@ -63,4 +87,4 @@ try {
   rmSync(rejectionReceiptDirectory, { recursive: true, force: true });
 }
 
-console.log("PASS powershell_preflight known_ps51_hazards=blocked direct_command_semantics=preserved literals_ignored=true durable_rejections=true");
+console.log("PASS powershell_preflight pwsh=7.6.5 ps7_operators=true drive_root_recursion=blocked bounded_recursion=allowed durable_rejections=true");

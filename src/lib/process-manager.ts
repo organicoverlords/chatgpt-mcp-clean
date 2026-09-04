@@ -6,11 +6,9 @@ import type { Readable } from "node:stream";
 import { currentTelemetryContext, emitTelemetry, withTelemetryContext, type TelemetryContext } from "./transport-telemetry.js";
 
 const MAX_CAPTURE_CHARS = 100_000;
-// 6,000 not 20,000: the platform blocks read_output payloads above roughly 6 KB as a
-// safety error AFTER the process has already run, so a larger cap produces an invisible
-// failure -- the output sits complete in the receipt while the caller sees only a block.
-// Measured 2026-08-25: 6.4 KB delivered, 12.8 KB and 14.4 KB blocked. Truncating below
-// that ceiling turns a silent loss into a marked stdout_truncated read the caller can page.
+// Current live MCPv3 capability was revalidated on 2026-09-04 with a single 31,000+
+// character read_output response. Keep the logical read/page contract at 32k; do not
+// reintroduce the stale August 6k transport assumption.
 const MAX_READ_CHARS = 32_000;
 const MAX_COMMAND_REPORT_CHARS = 4_000;
 const COMPLETED_RETENTION_MS = 30 * 60 * 1000;
@@ -31,6 +29,7 @@ type CapturedChild = ChildProcessByStdio<null, Readable, Readable>;
 
 type ProcessManagerOptions = {
   maxLivePerCaller?: number;
+  maxCompletedProcesses?: number;
   receiptDirectory?: string;
 };
 
@@ -127,7 +126,13 @@ class BoundedCapture {
     const dropped = Math.max(0, this.length - text.length);
     return { text, truncated: this.truncated || this.length > maxChars, dropped };
   }
+
+  full(): { text: string; truncated: boolean } {
+    return { text: this.chunks.join(""), truncated: this.truncated };
+  }
 }
+
+type OutputCursor = { stdout: number; stderr: number };
 
 type ProcessState = {
   id: string;
@@ -150,11 +155,10 @@ type ProcessState = {
   waiters: Set<() => void>;
 };
 
-// Absolute path so a mangled PATH in an inherited environment cannot turn into a
-// spawn failure. Falls back to bare resolution only if SystemRoot is unset.
-const POWERSHELL_EXE = process.env.SystemRoot
-  ? `${process.env.SystemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
-  : "powershell.exe";
+// PowerShell 7 is the single supported shell runtime. Keep an absolute deterministic
+// path and fail closed if it disappears; never silently fall back to Windows PowerShell 5.1.
+const POWERSHELL_EXE = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
+if (!existsSync(POWERSHELL_EXE)) throw new Error(`Required PowerShell 7 runtime is missing: ${POWERSHELL_EXE}`);
 
 // spawn() reports ENOENT when the *cwd* does not exist, and node attributes it to the
 // executable -- "spawn powershell.exe ENOENT" for a bad working_directory sends callers
@@ -235,11 +239,43 @@ function powershellCodeMask(command: string): string {
   return masked.join("");
 }
 
+function driveRootRecursiveScanError(command: string, code: string): string | undefined {
+  const boundaries = [...code.matchAll(/[;\r\n]/g)].map((match) => match.index ?? 0);
+  const starts = [0, ...boundaries.map((index) => index + 1)];
+  const ends = [...boundaries, command.length];
+  const rootDrive = /(?:^|[\s,(=])(?:["']?[A-Za-z]:[\\/](?:\*)?["']?)(?=$|[\s,;)|])/i;
+  for (let segmentIndex = 0; segmentIndex < starts.length; segmentIndex += 1) {
+    const start = starts[segmentIndex]!;
+    const end = ends[segmentIndex]!;
+    const rawSegment = command.slice(start, end);
+    const codeSegment = code.slice(start, end);
+    if (!rootDrive.test(rawSegment)) continue;
+    if (/\b(?:Get-ChildItem|gci|dir|ls)\b/i.test(codeSegment) && /-(?:Recurse|r)\b/i.test(codeSegment)) {
+      return "recursive enumeration from a drive root is blocked; use an explicit project or subdirectory root";
+    }
+    if (/\b(?:rg|rg\.exe|ripgrep|fd|fd\.exe)\b/i.test(codeSegment)) {
+      return "recursive native search from a drive root is blocked; use an explicit project or subdirectory root";
+    }
+    if (/\bwhere(?:\.exe)?\b/i.test(codeSegment) && /\/R\b/i.test(codeSegment)) {
+      return "recursive native search from a drive root is blocked; use an explicit project or subdirectory root";
+    }
+    if (/\bfindstr(?:\.exe)?\b/i.test(codeSegment) && /\/S\b/i.test(codeSegment)) {
+      return "recursive native search from a drive root is blocked; use an explicit project or subdirectory root";
+    }
+    if (/\bcmd(?:\.exe)?\b/i.test(codeSegment) && /\bdir\b/i.test(codeSegment) && /\/S\b/i.test(codeSegment)) {
+      return "recursive native enumeration from a drive root is blocked; use an explicit project or subdirectory root";
+    }
+    if (/\btree(?:\.com|\.exe)?\b/i.test(codeSegment)) {
+      return "drive-root tree enumeration is blocked; use an explicit project or subdirectory root";
+    }
+  }
+  return undefined;
+}
+
 function powershellPreflightError(command: string): string | undefined {
   const code = powershellCodeMask(command);
-  if (code.includes("&&") || code.includes("||") || code.includes("??")) {
-    return "Windows PowerShell 5.1 does not support &&, ||, or ??; use PS5.1-compatible control flow";
-  }
+  const rootScanError = driveRootRecursiveScanError(command, code);
+  if (rootScanError) return rootScanError;
   const automaticVariable = String.raw`\$(?:(?:global|script|local|private):)?(?:PID|args)`;
   const writePattern = new RegExp(`${automaticVariable}\\s*(?:\\+\\+|--|[+*/%?-]?=)|(?:\\+\\+|--)\\s*${automaticVariable}`, "i");
   if (writePattern.test(code)) {
@@ -334,7 +370,9 @@ function processResponseState(startedAt: string, running: boolean, finishedAt?: 
 
 export class ProcessManager {
   private readonly processes = new Map<string, ProcessState>();
+  private readonly outputCursors = new Map<string, OutputCursor>();
   private readonly maxLivePerCaller: number;
+  private readonly maxCompletedProcesses: number;
   private readonly receiptDirectory?: string;
   private readonly receiptArchiveDirectory?: string;
   private readonly controlRequestDirectory?: string;
@@ -346,6 +384,7 @@ export class ProcessManager {
 
   constructor(options: ProcessManagerOptions = {}) {
     this.maxLivePerCaller = options.maxLivePerCaller ?? DEFAULT_MAX_LIVE_PER_CALLER;
+    this.maxCompletedProcesses = options.maxCompletedProcesses ?? MAX_COMPLETED_PROCESSES;
     this.receiptDirectory = options.receiptDirectory ? resolve(options.receiptDirectory) : undefined;
     if (this.receiptDirectory) {
       mkdirSync(this.receiptDirectory, { recursive: true });
@@ -750,17 +789,16 @@ export class ProcessManager {
       return undefined;
     }
     const limit = Math.max(1, Math.min(maxChars, MAX_READ_CHARS));
-    const stdout = receipt.stdout.slice(-limit);
-    const stderr = receipt.stderr.slice(-limit);
     const observer = currentTelemetryContext();
+    const observerCallerId = observer.caller_id ?? "caller_unknown";
     emitTelemetry({
       event: "process_receipt_read",
       process_id: receipt.process_id,
       pid: receipt.pid,
       owner_caller_id: receipt.caller_id,
-      caller_id: observer.caller_id ?? "caller_unknown",
+      caller_id: observerCallerId,
     }, observer);
-    return {
+    const legacy = {
       ...processResponseState(receipt.started_at, false, receipt.finished_at),
       process_id: receipt.process_id,
       pid: receipt.pid,
@@ -768,8 +806,8 @@ export class ProcessManager {
       ...(receipt.command_truncated ? { command_truncated: true } : {}),
       cwd: receipt.cwd,
       running: false,
-      stdout,
-      stderr,
+      stdout: receipt.stdout.slice(-limit),
+      stderr: receipt.stderr.slice(-limit),
       exit_code: receipt.exit_code,
       signal: receipt.signal,
       started_at: receipt.started_at,
@@ -778,6 +816,66 @@ export class ProcessManager {
       ...(receipt.stderr_truncated || receipt.stderr.length > limit ? { stderr_truncated: true } : {}),
       ...(receipt.error ? { error: receipt.error } : {}),
     };
+    const cursorExists = this.outputCursors.has(this.cursorKey(receipt.process_id, observerCallerId));
+    const needsPaging = cursorExists || receipt.stdout.length + receipt.stderr.length > limit;
+    return needsPaging
+      ? this.pageOutput(legacy, receipt.stdout, receipt.stderr, observerCallerId, Boolean(receipt.stdout_truncated), Boolean(receipt.stderr_truncated), limit)
+      : legacy;
+  }
+
+  private cursorKey(processId: string, callerId: string): string {
+    return `${processId}:${callerId}`;
+  }
+
+  private pageOutput(
+    legacy: Record<string, unknown>,
+    fullStdout: string,
+    fullStderr: string,
+    callerId: string,
+    captureStdoutTruncated: boolean,
+    captureStderrTruncated: boolean,
+    requestedChars: number,
+  ): Record<string, unknown> {
+    const processId = String(legacy.process_id);
+    const cursorKey = this.cursorKey(processId, callerId);
+    const cursor = this.outputCursors.get(cursorKey) ?? { stdout: 0, stderr: 0 };
+    const limit = Math.max(1, Math.min(requestedChars, MAX_READ_CHARS));
+    const base: Record<string, unknown> = { ...legacy, stdout: "", stderr: "" };
+    delete base.stdout_dropped_from_start;
+    delete base.stderr_dropped_from_start;
+    if (!captureStdoutTruncated) delete base.stdout_truncated;
+    if (!captureStderrTruncated) delete base.stderr_truncated;
+
+    const remainingStdout = fullStdout.slice(cursor.stdout);
+    const remainingStderr = fullStderr.slice(cursor.stderr);
+    const stdoutCount = Math.min(limit, remainingStdout.length);
+    const stderrCount = Math.min(Math.max(0, limit - stdoutCount), remainingStderr.length);
+    const nextStdout = cursor.stdout + stdoutCount;
+    const nextStderr = cursor.stderr + stderrCount;
+    const moreCaptured = nextStdout < fullStdout.length || nextStderr < fullStderr.length;
+    const running = legacy.running === true;
+
+    const result = {
+      ...base,
+      next_action: moreCaptured || running ? "READ_SAME_PROCESS_ID" : "STOP_READING",
+      stdout: remainingStdout.slice(0, stdoutCount),
+      stderr: remainingStderr.slice(0, stderrCount),
+      output_page: {
+        stdout_start: cursor.stdout,
+        stdout_end: nextStdout,
+        stdout_total: fullStdout.length,
+        stderr_start: cursor.stderr,
+        stderr_end: nextStderr,
+        stderr_total: fullStderr.length,
+        page_chars: stdoutCount + stderrCount,
+        page_limit: limit,
+        more: moreCaptured,
+      },
+    };
+
+    if (moreCaptured || running) this.outputCursors.set(cursorKey, { stdout: nextStdout, stderr: nextStderr });
+    else this.outputCursors.delete(cursorKey);
+    return result;
   }
 
   private markProcessChanged(state: ProcessState): void {
@@ -797,7 +895,7 @@ export class ProcessManager {
     const remaining = [...this.processes.values()]
       .filter((state) => state.exitCode !== null && state.finishedAt)
       .sort((a, b) => Date.parse(a.finishedAt!) - Date.parse(b.finishedAt!));
-    for (const state of remaining.slice(0, Math.max(0, remaining.length - MAX_COMPLETED_PROCESSES))) this.processes.delete(state.id);
+    for (const state of remaining.slice(0, Math.max(0, remaining.length - this.maxCompletedProcesses))) this.processes.delete(state.id);
   }
 
   start(command: string, workingDirectory?: string, callerId = "caller_unknown"): { mcp_status: "OK"; process_state: "RUNNING" | "COMPLETED"; elapsed_ms: number; next_action: "READ_SAME_PROCESS_ID" | "STOP_READING"; process_id: string; pid: number; cwd: string; running: boolean } {
@@ -857,25 +955,15 @@ export class ProcessManager {
       state.stderr.append(chunk);
       this.markProcessChanged(state);
     });
-    child.once("error", (error) => {
-      state.error = error.message;
-      if (state.exitCode === null) state.exitCode = -1;
-      this.markProcessChanged(state);
-      emitTelemetry({
-        event: "process_error",
-        process_id: state.id,
-        pid: state.pid,
-        owner_caller_id: state.callerId,
-        error_code: "code" in error ? error.code : null,
-        error_message: error.message,
-      }, state.ownerContext);
-    });
-    child.once("close", (code, signal) => {
-      if (state.exitCode === null) state.exitCode = code;
-      state.signal = signal;
-      state.finishedAt = new Date().toISOString();
+    let terminalObserved = false;
+    const observeTerminal = (code: number | null, signal: NodeJS.Signals | null) => {
+      if (state.exitCode === null) state.exitCode = code ?? -1;
+      if (signal) state.signal = signal;
+      if (!state.finishedAt) state.finishedAt = new Date().toISOString();
       this.markProcessChanged(state);
       this.persistReceipt(state);
+      if (terminalObserved) return;
+      terminalObserved = true;
       emitTelemetry({
         event: "process_exit_observed",
         process_id: state.id,
@@ -887,7 +975,25 @@ export class ProcessManager {
         finished_at: state.finishedAt,
       }, state.ownerContext);
       resolveDone();
+    };
+    child.once("error", (error) => {
+      state.error = error.message;
+      emitTelemetry({
+        event: "process_error",
+        process_id: state.id,
+        pid: state.pid,
+        owner_caller_id: state.callerId,
+        error_code: "code" in error ? error.code : null,
+        error_message: error.message,
+      }, state.ownerContext);
+      observeTerminal(-1, null);
     });
+    // `exit` tracks the owned PID. `close` waits for stdio handles too, and on Windows a
+    // descendant can keep an inherited pipe open after the owned PID is already gone.
+    // Treat the PID exit as terminal immediately; let `close` refresh the receipt with any
+    // final buffered stdout/stderr without keeping MCP in a false running state.
+    child.once("exit", (code, signal) => observeTerminal(code, signal));
+    child.once("close", (code, signal) => observeTerminal(code, signal));
     this.processes.set(state.id, state);
     emitTelemetry({
       event: "process_started",
@@ -927,6 +1033,8 @@ export class ProcessManager {
     const command = state.command.slice(0, MAX_COMMAND_REPORT_CHARS);
     const stdout = state.stdout.tail(limit);
     const stderr = state.stderr.tail(limit);
+    const fullStdout = state.stdout.full();
+    const fullStderr = state.stderr.full();
     const observer = currentTelemetryContext();
     const observerCallerId = observer.caller_id ?? "caller_unknown";
     if (markRead) state.lastReadRevisionByCaller.set(observerCallerId, state.revision);
@@ -939,7 +1047,7 @@ export class ProcessManager {
       running: state.exitCode === null,
       reassociated: Boolean(observer.caller_id && observer.caller_id !== state.callerId),
     }, observer);
-    return {
+    const legacy = {
       ...processResponseState(state.startedAt, state.exitCode === null, state.finishedAt),
       process_id: state.id,
       pid: state.pid,
@@ -957,6 +1065,15 @@ export class ProcessManager {
       ...(stderr.truncated ? { stderr_truncated: true, stderr_dropped_from_start: stderr.dropped } : {}),
       ...(state.error ? { error: state.error } : {}),
     };
+    // A running process owns a moving bounded capture. Keep live reads as ordinary bounded
+    // tail snapshots; starting a cursor against that moving window can skip the eventual
+    // retained tail as old bytes roll out. Lossless paging begins only after completion,
+    // when the retained 100k snapshot is stable.
+    const cursorExists = this.outputCursors.has(this.cursorKey(state.id, observerCallerId));
+    const needsPaging = state.exitCode !== null && (cursorExists || fullStdout.text.length + fullStderr.text.length > limit);
+    return needsPaging
+      ? this.pageOutput(legacy, fullStdout.text, fullStderr.text, observerCallerId, fullStdout.truncated, fullStderr.truncated, limit)
+      : legacy;
   }
 
   async readWithWait(processId: string, maxChars = MAX_READ_CHARS, waitMs = 0): Promise<Record<string, unknown>> {
