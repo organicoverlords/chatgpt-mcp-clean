@@ -1,8 +1,7 @@
-import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import type { Readable } from "node:stream";
+import { Worker } from "node:worker_threads";
 import { currentTelemetryContext, emitTelemetry, withTelemetryContext, type TelemetryContext } from "./transport-telemetry.js";
 
 const MAX_CAPTURE_CHARS = 100_000;
@@ -17,7 +16,7 @@ const RECEIPT_ARCHIVE_RETENTION_MS = RECEIPT_ARCHIVE_RETENTION_DAYS * 24 * 60 * 
 const RECEIPT_PRUNE_INTERVAL_MS = 60_000;
 const RECEIPT_ARCHIVE_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 const MAX_COMPLETED_PROCESSES = 64;
-const TASKKILL_TIMEOUT_MS = 2_000;
+const TASKKILL_TIMEOUT_MS = 5_000;
 const KILL_SETTLE_MS = 1_000;
 const DEFAULT_MAX_LIVE_PER_CALLER = 5;
 const CONTROL_POLL_MS = 100;
@@ -25,7 +24,6 @@ const CONTROL_HANDOFF_OVERHEAD_MS = 1_500;
 const CONTROL_KILL_TIMEOUT_MS = TASKKILL_TIMEOUT_MS + KILL_SETTLE_MS + CONTROL_HANDOFF_OVERHEAD_MS;
 const CONTROL_RETENTION_MS = COMPLETED_RETENTION_MS;
 const CONTROL_PRUNE_INTERVAL_MS = 60_000;
-type CapturedChild = ChildProcessByStdio<null, Readable, Readable>;
 
 type ProcessManagerOptions = {
   maxLivePerCaller?: number;
@@ -141,7 +139,9 @@ type ProcessState = {
   ownerContext: TelemetryContext;
   command: string;
   cwd: string;
-  child: CapturedChild;
+  worker: Worker;
+  launching: boolean;
+  killRequested: boolean;
   stdout: BoundedCapture;
   stderr: BoundedCapture;
   startedAt: string;
@@ -309,44 +309,8 @@ function powershellPreflightError(command: string): string | undefined {
   return undefined;
 }
 
-function powershell(command: string, cwd: string): CapturedChild {
-  return spawn(
-    POWERSHELL_EXE,
-    ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
-    {
-      cwd,
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
-    },
-  );
-}
-
-async function taskkillTree(pid: number): Promise<{ code: number; timedOut: boolean }> {
-  return await new Promise<{ code: number; timedOut: boolean }>((resolve, reject) => {
-    const killer = spawn("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
-      windowsHide: true,
-      stdio: "ignore",
-    });
-    let settled = false;
-    const finish = (result: { code: number; timedOut: boolean }) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(result);
-    };
-    const timer = setTimeout(() => {
-      killer.kill();
-      finish({ code: 124, timedOut: true });
-    }, TASKKILL_TIMEOUT_MS);
-    killer.once("error", (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(error);
-    });
-    killer.once("close", (code) => finish({ code: code ?? 1, timedOut: false }));
-  });
+function powershellWorker(command: string, cwd: string): Worker {
+  return new Worker(new URL("./process-launch-worker.js", import.meta.url), { workerData: { command, cwd, powershellExe: POWERSHELL_EXE } });
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -898,7 +862,7 @@ export class ProcessManager {
     for (const state of remaining.slice(0, Math.max(0, remaining.length - this.maxCompletedProcesses))) this.processes.delete(state.id);
   }
 
-  start(command: string, workingDirectory?: string, callerId = "caller_unknown"): { mcp_status: "OK"; process_state: "RUNNING" | "COMPLETED"; elapsed_ms: number; next_action: "READ_SAME_PROCESS_ID" | "STOP_READING"; process_id: string; pid: number; cwd: string; running: boolean } {
+  start(command: string, workingDirectory?: string, callerId = "caller_unknown"): { mcp_status: "OK"; process_state: "RUNNING" | "COMPLETED"; elapsed_ms: number; next_action: "READ_SAME_PROCESS_ID" | "STOP_READING"; process_id: string; pid: number; cwd: string; running: boolean; launching?: boolean } {
     this.pruneCompleted();
     const preflightError = powershellPreflightError(command);
     if (preflightError) {
@@ -907,103 +871,59 @@ export class ProcessManager {
       throw new Error(`start_process_preflight_failed: ${preflightError}`);
     }
     const cwd = normalizedCwd(workingDirectory);
-    const duplicate = [...this.processes.values()].find((state) =>
-      state.exitCode === null && state.callerId === callerId && state.cwd === cwd && state.command === command
-    );
+    const duplicate = [...this.processes.values()].find((state) => state.exitCode === null && state.callerId === callerId && state.cwd === cwd && state.command === command);
     if (duplicate) {
-      emitTelemetry({
-        event: "process_reused",
-        process_id: duplicate.id,
-        pid: duplicate.pid,
-        owner_caller_id: duplicate.callerId,
-      });
-      return { ...processResponseState(duplicate.startedAt, true), process_id: duplicate.id, pid: duplicate.pid, cwd: duplicate.cwd, running: true } as const;
+      emitTelemetry({ event: "process_reused", process_id: duplicate.id, pid: duplicate.pid, owner_caller_id: duplicate.callerId });
+      return { ...processResponseState(duplicate.startedAt, true), process_id: duplicate.id, pid: duplicate.pid, cwd: duplicate.cwd, running: true, ...(duplicate.launching ? { launching: true } : {}) } as const;
     }
     const liveForCaller = [...this.processes.values()].filter((state) => state.exitCode === null && state.callerId === callerId);
-    if (liveForCaller.length >= this.maxLivePerCaller) {
-      throw new Error(`start_process_concurrency_limited: caller already has ${liveForCaller.length} live processes; active_process_ids=${liveForCaller.map((state) => state.id).join(",")}`);
-    }
-    const child = powershell(command, cwd);
-    if (!child.pid) throw new Error("Background process did not receive a PID");
-
+    if (liveForCaller.length >= this.maxLivePerCaller) throw new Error(`start_process_concurrency_limited: caller already has ${liveForCaller.length} live processes; active_process_ids=${liveForCaller.map((state) => state.id).join(",")}`);
     let resolveDone!: () => void;
     const done = new Promise<void>((resolve) => { resolveDone = resolve; });
     const ownerContext = currentTelemetryContext();
     const state: ProcessState = {
-      id: randomUUID(),
-      pid: child.pid,
-      callerId,
-      ownerContext,
-      command,
-      cwd,
-      child,
-      stdout: new BoundedCapture(),
-      stderr: new BoundedCapture(),
-      startedAt: new Date().toISOString(),
-      exitCode: null,
-      done,
-      revision: 0,
-      lastReadRevisionByCaller: new Map<string, number>(),
-      waiters: new Set<() => void>(),
+      id: randomUUID(), pid: 0, callerId, ownerContext, command, cwd,
+      worker: powershellWorker(command, cwd), launching: true, killRequested: false,
+      stdout: new BoundedCapture(), stderr: new BoundedCapture(), startedAt: new Date().toISOString(), exitCode: null,
+      done, revision: 0, lastReadRevisionByCaller: new Map<string, number>(), waiters: new Set<() => void>(),
     };
-
-    child.stdout.on("data", (chunk: Buffer | string) => {
-      state.stdout.append(chunk);
-      this.markProcessChanged(state);
-    });
-    child.stderr.on("data", (chunk: Buffer | string) => {
-      state.stderr.append(chunk);
-      this.markProcessChanged(state);
-    });
     let terminalObserved = false;
     const observeTerminal = (code: number | null, signal: NodeJS.Signals | null) => {
       if (state.exitCode === null) state.exitCode = code ?? -1;
       if (signal) state.signal = signal;
       if (!state.finishedAt) state.finishedAt = new Date().toISOString();
+      state.launching = false;
       this.markProcessChanged(state);
       this.persistReceipt(state);
       if (terminalObserved) return;
       terminalObserved = true;
-      emitTelemetry({
-        event: "process_exit_observed",
-        process_id: state.id,
-        pid: state.pid,
-        owner_caller_id: state.callerId,
-        exit_code: state.exitCode,
-        signal: state.signal ?? null,
-        started_at: state.startedAt,
-        finished_at: state.finishedAt,
-      }, state.ownerContext);
+      emitTelemetry({ event: "process_exit_observed", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, exit_code: state.exitCode, signal: state.signal ?? null, started_at: state.startedAt, finished_at: state.finishedAt }, state.ownerContext);
       resolveDone();
     };
-    child.once("error", (error) => {
-      state.error = error.message;
-      emitTelemetry({
-        event: "process_error",
-        process_id: state.id,
-        pid: state.pid,
-        owner_caller_id: state.callerId,
-        error_code: "code" in error ? error.code : null,
-        error_message: error.message,
-      }, state.ownerContext);
-      observeTerminal(-1, null);
+    state.worker.on("message", (message: any) => {
+      if (!message || typeof message !== "object") return;
+      if (message.type === "started" && Number.isInteger(message.pid) && message.pid > 0) {
+        state.pid = message.pid;
+        state.launching = false;
+        emitTelemetry({ event: "process_started", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, cwd: state.cwd, started_at: state.startedAt }, state.ownerContext);
+        if (state.killRequested) state.worker.postMessage({ type: "kill" });
+        return;
+      }
+      if (message.type === "stdout") { state.stdout.append(String(message.data ?? "")); this.markProcessChanged(state); return; }
+      if (message.type === "stderr") { state.stderr.append(String(message.data ?? "")); this.markProcessChanged(state); return; }
+      if (message.type === "error") {
+        state.error = String(message.error ?? "process launcher worker failed");
+        emitTelemetry({ event: "process_error", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, error_message: state.error }, state.ownerContext);
+        observeTerminal(-1, null);
+        return;
+      }
+      if (message.type === "exit") observeTerminal(typeof message.code === "number" ? message.code : -1, message.signal ?? null);
     });
-    // `exit` tracks the owned PID. `close` waits for stdio handles too, and on Windows a
-    // descendant can keep an inherited pipe open after the owned PID is already gone.
-    // Treat the PID exit as terminal immediately; let `close` refresh the receipt with any
-    // final buffered stdout/stderr without keeping MCP in a false running state.
-    child.once("exit", (code, signal) => observeTerminal(code, signal));
-    child.once("close", (code, signal) => observeTerminal(code, signal));
+    state.worker.once("error", (error: Error) => { state.error = error.message; observeTerminal(-1, null); });
+    state.worker.once("exit", (code) => { if (state.exitCode === null) observeTerminal(code === 0 ? -1 : code, null); });
     this.processes.set(state.id, state);
-    emitTelemetry({
-      event: "process_started",
-      process_id: state.id,
-      pid: state.pid,
-      owner_caller_id: state.callerId,
-      cwd: state.cwd,
-      started_at: state.startedAt,
-    }, state.ownerContext);
-    return { ...processResponseState(state.startedAt, true), process_id: state.id, pid: state.pid, cwd: state.cwd, running: true } as const;
+    emitTelemetry({ event: "process_launch_queued", process_id: state.id, owner_caller_id: state.callerId, cwd: state.cwd, started_at: state.startedAt }, state.ownerContext);
+    return { ...processResponseState(state.startedAt, true), process_id: state.id, pid: 0, cwd: state.cwd, running: true, launching: true } as const;
   }
 
   async startWithWait(
@@ -1055,6 +975,7 @@ export class ProcessManager {
       ...((state.command.length > MAX_COMMAND_REPORT_CHARS) ? { command_truncated: true } : {}),
       cwd: state.cwd,
       running: state.exitCode === null,
+      ...(state.launching ? { launching: true } : {}),
       stdout: stdout.text,
       stderr: stderr.text,
       exit_code: state.exitCode,
@@ -1109,6 +1030,7 @@ export class ProcessManager {
         process_id: state.id,
         pid: state.pid,
         running: true,
+        ...(state.launching ? { launching: true } : {}),
         stdout: "",
         stderr: "",
         no_change: true,
@@ -1153,8 +1075,9 @@ export class ProcessManager {
       caller_id: observer.caller_id ?? "caller_unknown",
       reassociated: Boolean(observer.caller_id && observer.caller_id !== state.callerId),
     }, observer);
-    const killResult = await taskkillTree(state.pid);
-    await Promise.race([state.done, delay(KILL_SETTLE_MS)]);
+    state.killRequested = true;
+    state.worker.postMessage({ type: "kill" });
+    await Promise.race([state.done, delay(TASKKILL_TIMEOUT_MS + KILL_SETTLE_MS)]);
     if (state.exitCode === null) {
       emitTelemetry({
         event: "process_kill_incomplete",
@@ -1162,7 +1085,7 @@ export class ProcessManager {
         pid: state.pid,
         owner_caller_id: state.callerId,
         caller_id: observer.caller_id ?? "caller_unknown",
-        kill_timed_out: killResult.timedOut,
+        kill_timed_out: true,
       }, observer);
       return {
         process_id: state.id,
@@ -1170,7 +1093,7 @@ export class ProcessManager {
         killed: false,
         kill_requested: true,
         running: true,
-        kill_timed_out: killResult.timedOut,
+        kill_timed_out: true,
         error: `Process tree for ${processId} did not terminate within the bounded kill window`,
       };
     }
