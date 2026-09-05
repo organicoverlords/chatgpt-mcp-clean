@@ -186,7 +186,8 @@ try {
     $runtimeDirty = @(& git.exe -C $runtimeRoot status --porcelain=v1 --untracked-files=no)
     if ($LASTEXITCODE -ne 0 -or $runtimeDirty.Count -gt 0) { throw 'runtime root became dirty after replacement request acceptance' }
     $oldHead = (& git.exe -C $runtimeRoot rev-parse HEAD).Trim().ToLowerInvariant()
-    $oldBranch = (& git.exe -C $runtimeRoot symbolic-ref --short -q HEAD).Trim()
+    $oldBranchOutput = @(& git.exe -C $runtimeRoot symbolic-ref --short -q HEAD 2>$null)
+    $oldBranch = if ($LASTEXITCODE -eq 0 -and $oldBranchOutput.Count -gt 0) { ([string]$oldBranchOutput[0]).Trim() } else { '' }
     $oldDistHash = (Get-FileHash -LiteralPath (Join-Path $runtimeRoot 'dist\index.js') -Algorithm SHA256).Hash.ToLowerInvariant()
     $backupRoot = Join-Path ([string]$request.state_root) ("rollback-{0}" -f [string]$request.request_id)
     New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
