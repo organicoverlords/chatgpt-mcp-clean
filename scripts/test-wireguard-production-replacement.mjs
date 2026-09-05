@@ -85,6 +85,9 @@ for (const stage of stages) {
 }
 assert.match(guardian, /live_process_count/);
 assert.match(guardian, /Get-DirectChildren/);
+assert.match(guardian, /\$oldBranchOutput = @\(& git\.exe -C \$runtimeRoot symbolic-ref --short -q HEAD 2>\$null\)/);
+assert.match(guardian, /\$oldBranch = if \(\$LASTEXITCODE -eq 0 -and \$oldBranchOutput\.Count -gt 0\).*else \{ '' \}/);
+assert.doesNotMatch(guardian, /symbolic-ref --short -q HEAD\)\.Trim\(\)/, "detached production runtime must not throw while capturing rollback branch");
 assert.match(guardian, /ROLLED_BACK/);
 assert.match(guardian, /DEGRADED_CANDIDATE_SERVING/);
 assert.match(guardian, /McpV3ProductionReplacementCandidate/);
