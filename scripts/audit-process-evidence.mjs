@@ -95,6 +95,10 @@ function newBucket(callerId) {
     outcomes: { success: 0, nonzero_exit: 0, signaled: 0, error: 0, unknown: 0 },
     missing_request_id_count: 0,
     integrity_metadata_present_count: 0,
+    audit_v1_receipt_count: 0,
+    non_audit_v1_receipt_count: 0,
+    audit_v1_missing_request_id_count: 0,
+    audit_v1_missing_integrity_metadata_count: 0,
     hash_verification: { verified: 0, mismatch: 0, unavailable: 0 },
     first_finished_at: null,
     last_finished_at: null,
@@ -110,6 +114,25 @@ function updateTime(bucket, value) {
   if (!value || Number.isNaN(Date.parse(value))) return;
   if (!bucket.first_finished_at || Date.parse(value) < Date.parse(bucket.first_finished_at)) bucket.first_finished_at = value;
   if (!bucket.last_finished_at || Date.parse(value) > Date.parse(bucket.last_finished_at)) bucket.last_finished_at = value;
+}
+
+function coveragePct(present, total) {
+  return total ? Math.round((present / total) * 10_000) / 100 : null;
+}
+
+function finalizeCoverage(target) {
+  target.audit_v1_coverage_pct = coveragePct(target.audit_v1_receipt_count, target.process_count);
+  target.request_id_coverage_pct = coveragePct(target.process_count - target.missing_request_id_count, target.process_count);
+  target.integrity_metadata_coverage_pct = coveragePct(target.integrity_metadata_present_count, target.process_count);
+  target.audit_v1_request_id_coverage_pct = coveragePct(
+    target.audit_v1_receipt_count - target.audit_v1_missing_request_id_count,
+    target.audit_v1_receipt_count,
+  );
+  target.audit_v1_integrity_metadata_coverage_pct = coveragePct(
+    target.audit_v1_receipt_count - target.audit_v1_missing_integrity_metadata_count,
+    target.audit_v1_receipt_count,
+  );
+  return target;
 }
 
 function verifyHashes(receipt) {
@@ -153,7 +176,13 @@ function summarize(receiptDir, since) {
     outcomes: { success: 0, nonzero_exit: 0, signaled: 0, error: 0, unknown: 0 },
     missing_request_id_count: 0,
     integrity_metadata_present_count: 0,
+    audit_v1_receipt_count: 0,
+    non_audit_v1_receipt_count: 0,
+    audit_v1_missing_request_id_count: 0,
+    audit_v1_missing_integrity_metadata_count: 0,
     hash_verification: { verified: 0, mismatch: 0, unavailable: 0 },
+    first_finished_at: null,
+    last_finished_at: null,
   };
   const callers = new Map();
 
@@ -166,23 +195,31 @@ function summarize(receiptDir, since) {
     const outcome = deriveOutcome(receipt);
     const hashState = verifyHashes(receipt);
     const hasIntegrity = typeof receipt.stdout_sha256 === "string" && typeof receipt.stderr_sha256 === "string";
+    const hasAuditV1 = receipt.audit_schema === "process-output-evidence.v1";
 
     for (const target of [totals, bucket]) {
       target.process_count += 1;
       target.total_retained_output_bytes += bytes;
       bumpEnum(target.completeness, completeness);
       bumpEnum(target.outcomes, outcome);
-      if (!receipt.request_id) target.missing_request_id_count += 1;
+      if (hasAuditV1) target.audit_v1_receipt_count += 1;
+      else target.non_audit_v1_receipt_count += 1;
+      if (!receipt.request_id) {
+        target.missing_request_id_count += 1;
+        if (hasAuditV1) target.audit_v1_missing_request_id_count += 1;
+      }
       if (hasIntegrity) target.integrity_metadata_present_count += 1;
+      else if (hasAuditV1) target.audit_v1_missing_integrity_metadata_count += 1;
       target.hash_verification[hashState] += 1;
+      updateTime(target, receiptTime(receipt));
     }
-    updateTime(bucket, receiptTime(receipt));
   }
 
   totals.average_retained_output_bytes = totals.process_count
     ? Math.round(totals.total_retained_output_bytes / totals.process_count)
     : 0;
-  const callerRows = [...callers.values()].map((bucket) => ({
+  finalizeCoverage(totals);
+  const callerRows = [...callers.values()].map((bucket) => finalizeCoverage({
     ...bucket,
     average_retained_output_bytes: bucket.process_count
       ? Math.round(bucket.total_retained_output_bytes / bucket.process_count)
@@ -198,6 +235,7 @@ function summarize(receiptDir, since) {
       semantic_work_quality_scored: false,
       execution_outcome_is_process_status_not_task_quality: true,
       caller_id_is_opaque_not_named_worker_identity: true,
+      non_audit_v1_receipt_is_not_automatically_a_current_evidence_failure: true,
     },
     source: {
       receipt_dir: path.resolve(receiptDir),
