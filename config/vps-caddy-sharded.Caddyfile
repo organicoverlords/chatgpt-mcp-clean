@@ -1,7 +1,8 @@
 {
 	servers {
 		timeouts {
-			idle 15s
+			# Preserve normal HTTP keep-alive reuse; the prior 15s emergency reap forced client churn.
+			idle 5m
 		}
 	}
 }

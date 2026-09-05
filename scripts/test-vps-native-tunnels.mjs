@@ -21,7 +21,7 @@ assert.deepEqual(
   ['10.203.0.2:3011'],
   'public MCP routing must stay pinned to the WireGuard upstream',
 );
-assert.match(caddy, /timeouts\s*\{[\s\S]*idle 15s/, 'public client idle connections must be reaped after 15s');
+assert.match(caddy, /timeouts\s*\{[\s\S]*idle 5m/, 'public keepalive must use the normal five-minute window instead of forcing churn at the prior 15s emergency cutoff');
 assert.match(caddy, /transport\s+http\s*\{[\s\S]*keepalive 30s[\s\S]*keepalive_idle_conns_per_host 4/, 'Caddy upstream idle pool must be time-bounded and capped per host');
 const activeHealthDirective = /\bhealth_(?:uri|interval|timeout)\b/;
 for (const directive of ['health_uri /health', 'health_interval 5s', 'health_timeout 2s']) {
