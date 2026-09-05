@@ -340,6 +340,18 @@ function mcpProductionMutationError(command: string, code: string): string | und
   const invokesObsoleteDatedCutoverHelper = /(?:^|[\\/])minimal-connectors[\\/]cutover-production-\d{8}\.ps1\b/i.test(command);
   if (invokesObsoleteDatedCutoverHelper) return productionIngressError;
 
+  const invokesReplacementInternal = /(?:^|[\\/])scripts[\\/](?:production-replacement-guardian|production-replacement-candidate)\.ps1\b/i.test(command);
+  if (invokesReplacementInternal) return productionIngressError;
+
+  const invokesDirectEdgeMutation = /provision_edge_extras\.py\b/i.test(command)
+    && /--caddy-only\b/i.test(command)
+    && !/--render-caddy\b/i.test(command);
+  if (invokesDirectEdgeMutation) return productionIngressError;
+
+  const startsReplacementInternalTask = /\b(?:Start-ScheduledTask|schtasks(?:\.exe)?\s+\/Run)\b/i.test(code)
+    && /McpV3ProductionReplacement(?:Guardian|Candidate)/i.test(command);
+  if (startsReplacementInternalTask) return productionIngressError;
+
   const mutatesCaddy = /\/etc\/caddy\/Caddyfile\b/i.test(command) && (
     /(?:^|[\s;&|])(?:cp|mv|rm|install|tee)\b/i.test(command)
     || /\bsed\s+-[^\s]*i\b/i.test(command)
@@ -1281,6 +1293,12 @@ export class ProcessManager {
       signal: state.signal ?? null,
     }, observer);
     return { process_id: state.id, pid: state.pid, killed: true, running: false, exit_code: state.exitCode, signal: state.signal ?? null };
+  }
+
+  liveProcessCount(): number {
+    let count = 0;
+    for (const state of this.processes.values()) if (state.exitCode === null) count += 1;
+    return count;
   }
 
   hasLiveScope(scope: string): boolean {

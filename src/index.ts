@@ -12,7 +12,7 @@ import { callerId } from "./lib/caller-id.js";
 import { LocalOAuthProvider } from "./lib/local-oauth-provider.js";
 import { observeSocket, sessionFingerprint, setTelemetrySink, withTelemetryContext } from "./lib/transport-telemetry.js";
 import { createResponseByteCounter } from "./lib/response-bytes.js";
-import { createServer } from "./server.js";
+import { createServer, processRuntimeStatus } from "./server.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "127.0.0.1";
@@ -21,12 +21,18 @@ const OWNER = (process.env.TAILSCALE_OWNER_LOGIN || "").trim().toLowerCase();
 const STORE = process.env.MCP_OAUTH_STORE_PATH || ".state/oauth.json";
 
 const backendMode = process.env.MCP_BACKEND_MODE === "1";
+const wireGuardCandidate = process.env.MCP_WIREGUARD_CANDIDATE === "1";
+const wireGuardHost = "10.203.0.2";
+const wireGuardPeer = "10.203.0.1";
 const forceConnectionClose = process.env.MCP_FORCE_CONNECTION_CLOSE === "1";
 const frontDoorHost = (process.env.MCP_FRONT_DOOR_HOST || "127.0.0.1:3003").toLowerCase();
 const backendGeneration = backendMode ? (process.env.MCP_BACKEND_GENERATION || `backend-${PORT}-${process.pid}-${Date.now()}`) : undefined;
-if (HOST !== "127.0.0.1") throw new Error("This server is fixed to loopback");
+const loopbackBind = HOST === "127.0.0.1";
+const approvedWireGuardCandidateBind = backendMode && wireGuardCandidate && HOST === wireGuardHost && PORT !== 3011;
+if (!loopbackBind && !approvedWireGuardCandidateBind) throw new Error("Server bind must be loopback or an explicit alternate-port WireGuard candidate");
+if (wireGuardCandidate && !approvedWireGuardCandidateBind) throw new Error("MCP_WIREGUARD_CANDIDATE requires backend mode, host 10.203.0.2, and a non-3011 port");
 if (!Number.isInteger(PORT) || PORT < 1024 || PORT > 65535) throw new Error("PORT must be a non-privileged TCP port");
-if (PORT !== 3000 && !backendMode) throw new Error("Alternate loopback ports require MCP_BACKEND_MODE=1");
+if (PORT !== 3000 && !backendMode) throw new Error("Alternate ports require MCP_BACKEND_MODE=1");
 if (!ORIGIN || !OWNER) throw new Error("MCP_PUBLIC_ORIGIN and TAILSCALE_OWNER_LOGIN are required");
 
 const publicOrigin = new URL(ORIGIN);
@@ -107,7 +113,7 @@ async function handleMcp(req: Request, res: Response): Promise<void> {
 }
 
 const app = express();
-app.set("trust proxy", "loopback");
+app.set("trust proxy", wireGuardCandidate ? ["loopback", wireGuardPeer] : "loopback");
 if (forceConnectionClose) {
   app.use((_req, res, next) => {
     res.setHeader("connection", "close");
@@ -210,7 +216,7 @@ app.use("/mcp", (req, res, next) => {
 app.post("/mcp", bearer, handleMcp);
 app.get("/mcp", bearer, (_req, res) => res.status(405).set("Allow", "POST").send("Method not allowed."));
 app.delete("/mcp", bearer, (_req, res) => res.status(405).set("Allow", "POST").send("Method not allowed."));
-app.get("/health", (_req, res) => res.json({ status: "ok", name: "shell-mcp", role: backendMode ? "backend" : "direct", ...(backendGeneration ? { backend_generation: backendGeneration } : {}), host: HOST, port: PORT, pid: process.pid, active_requests: activeRequests, total_requests: totalRequests, force_connection_close: forceConnectionClose }));
+app.get("/health", (_req, res) => res.json({ status: "ok", name: "shell-mcp", role: backendMode ? "backend" : "direct", ...(backendGeneration ? { backend_generation: backendGeneration } : {}), host: HOST, port: PORT, pid: process.pid, active_requests: activeRequests, total_requests: totalRequests, ...processRuntimeStatus(), wireguard_candidate: wireGuardCandidate, force_connection_close: forceConnectionClose }));
 
 const httpServer = app.listen(PORT, HOST, () => console.error(`shell-mcp listening on http://${HOST}:${PORT}/mcp`));
 httpServer.on("connection", (socket) => { observeSocket(socket); });

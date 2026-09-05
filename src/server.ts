@@ -25,6 +25,10 @@ function textResult(value: unknown, id: string) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
 }
 
+export function processRuntimeStatus(): { live_process_count: number } {
+  return { live_process_count: processManager.liveProcessCount() };
+}
+
 export function markSessionLive(sessionId: string, live: boolean): void {
   if (live) liveSessions.add(sessionId);
   else liveSessions.delete(sessionId);

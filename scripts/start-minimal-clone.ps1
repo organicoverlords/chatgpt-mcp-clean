@@ -5,6 +5,7 @@ param(
     [string]$StateRoot = (Join-Path $env:LOCALAPPDATA 'ChatGPTMcpClean\minimal-connectors'),
     [string]$SharedReceiptDirectory = (Join-Path $env:LOCALAPPDATA 'ChatGPTMcpClean\minimal-connectors\shared-process-receipts'),
     [string]$OAuthStorePath = '',
+    [switch]$WireGuardCandidate,
     [switch]$ValidateOnly,
     [switch]$SkipBuild
 )
@@ -17,6 +18,7 @@ $publicSlug = $originUri.AbsolutePath.Trim('/')
 $expectedOAuthStore = if ($publicSlug) { Join-Path (Join-Path $StateRoot $publicSlug) 'oauth.json' } else { '' }
 $canonicalStateRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'ChatGPTMcpClean\minimal-connectors'))
 $resolvedStateRoot = [IO.Path]::GetFullPath($StateRoot)
+if ($WireGuardCandidate -and $Port -eq 3011) { throw 'WireGuard candidate must use an alternate port; canonical 3011 stays owned by the production listener' }
 if ($resolvedStateRoot.Equals($canonicalStateRoot,[StringComparison]::OrdinalIgnoreCase)) {
     $trackedChanges = @(& git.exe -C $Root status --porcelain=v1 --untracked-files=no)
     if ($LASTEXITCODE -ne 0) { throw 'cannot verify source cleanliness for canonical clone launch' }
@@ -48,7 +50,8 @@ if (-not $OAuthStorePath) { $OAuthStorePath = Join-Path $instanceState 'oauth.js
 $oauthDirectory = Split-Path -Parent $OAuthStorePath
 if ($oauthDirectory) { New-Item -ItemType Directory -Force -Path $oauthDirectory | Out-Null }
 $env:PORT = [string]$Port
-$env:HOST = '127.0.0.1'
+$env:HOST = if ($WireGuardCandidate) { '10.203.0.2' } else { '127.0.0.1' }
+$env:MCP_WIREGUARD_CANDIDATE = if ($WireGuardCandidate) { '1' } else { '0' }
 $env:MCP_BACKEND_MODE = '1'
 $env:MCP_TOOL_PROFILE = 'process'
 $env:MCP_PUBLIC_ORIGIN = $PublicOrigin
