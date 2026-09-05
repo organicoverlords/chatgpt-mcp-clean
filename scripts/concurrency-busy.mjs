@@ -9,7 +9,7 @@
 //
 // Usage: node scripts/concurrency-busy.mjs [workers]
 
-import { fork } from "node:child_process";
+import { fork, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -138,6 +138,46 @@ await compatibilityStore.release("compat-worker", "task:compat");
 compatibilityRaw = JSON.parse(readFileSync(STORE, "utf8"));
 check(compatibilityRaw.coordinator?.jobs?.alpha?.state === "blocked", "coordinator metadata survives release", JSON.stringify(compatibilityRaw));
 rmSync(STORE, { force: true });
+
+// Test 7: Windows readers may allow read/write but deny delete sharing. In that
+// state rename/replace fails even though an in-place write is legal.
+if (process.platform === "win32") {
+  console.log(`\ntest 7 - Windows reader without delete sharing does not block claim/release`);
+  resetStore();
+  const ps = [
+    "$p=$env:BUSY_TEST_STORE",
+    "$f=[IO.File]::Open($p,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)",
+    "[Console]::Out.WriteLine('LOCKED')",
+    "try { Start-Sleep -Seconds 20 } finally { $f.Dispose() }",
+  ].join("; ");
+  const holder = spawn("pwsh", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", ps], {
+    env: { ...process.env, BUSY_TEST_STORE: STORE }, stdio: ["ignore", "pipe", "pipe"],
+  });
+  await new Promise((resolveReady, rejectReady) => {
+    const timeout = setTimeout(() => rejectReady(new Error("reader lock setup timed out")), 5_000);
+    let stdout = "";
+    holder.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+      if (stdout.includes("LOCKED")) { clearTimeout(timeout); resolveReady(); }
+    });
+    holder.once("exit", (code) => { clearTimeout(timeout); rejectReady(new Error(`reader exited before lock setup: ${code}`)); });
+  });
+  try {
+    const sharingStore = new BusyStore(() => false, STORE);
+    const claimed = await sharingStore.claim("windows-reader-worker", "task:reader-held");
+    check(claimed.ok, "claim succeeds while reader denies delete sharing", JSON.stringify(claimed));
+    let sharingRaw = JSON.parse(readFileSync(STORE, "utf8"));
+    check(sharingRaw.claims?.some((claim) => claim.actor === "windows-reader-worker" && claim.scope === "task:reader-held"), "claim is persisted on disk", JSON.stringify(sharingRaw));
+    const released = await sharingStore.release("windows-reader-worker", "task:reader-held");
+    check(released.ok, "release succeeds while reader denies delete sharing", JSON.stringify(released));
+    sharingRaw = JSON.parse(readFileSync(STORE, "utf8"));
+    check(sharingRaw.claims?.length === 0, "release is persisted on disk", JSON.stringify(sharingRaw));
+  } finally {
+    holder.kill();
+    await new Promise((resolveExit) => holder.once("exit", resolveExit));
+    rmSync(STORE, { force: true });
+  }
+}
 
 console.log(failures ? `\nCONCURRENCY TEST FAILED (${failures})` : "\nCONCURRENCY TEST PASSED");
 process.exit(failures ? 1 : 0);
