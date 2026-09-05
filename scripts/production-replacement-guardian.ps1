@@ -149,7 +149,16 @@ try {
     if (-not (Test-Path -LiteralPath $RequestPath -PathType Leaf)) { throw "replacement request not found: $RequestPath" }
     $request = Get-Content -LiteralPath $RequestPath -Raw | ConvertFrom-Json
     if ([int]$request.version -ne 1 -or [int]$request.candidate_port -ne 3012) { throw 'invalid replacement request contract' }
-    $requestedAt = [datetime]::Parse([string]$request.requested_at).ToUniversalTime()
+    try {
+        $requestedAt = [DateTimeOffset]::ParseExact(
+            [string]$request.requested_at,
+            'o',
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::None
+        ).UtcDateTime
+    } catch {
+        throw 'replacement request timestamp is not valid invariant ISO-8601 round-trip format'
+    }
     if (((Get-Date).ToUniversalTime() - $requestedAt).TotalMinutes -gt 5) { throw 'replacement request is older than 5 minutes' }
     $gatePath = [IO.Path]::GetFullPath([string]$request.gate_receipt_path)
     if (-not (Test-Path -LiteralPath $gatePath -PathType Leaf)) { throw 'authorized production-change-gate receipt disappeared before guardian start' }
