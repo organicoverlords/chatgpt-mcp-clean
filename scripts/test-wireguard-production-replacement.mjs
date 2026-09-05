@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 const index = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
@@ -24,6 +25,16 @@ assert.match(request, /GateReceiptPath/);
 assert.match(request, /production-change-gate receipt does not PASS/);
 assert.match(request, /mcp_minimal_clone:production-backend-3011/);
 assert.match(guardian, /gate_receipt_sha256/);
+assert.match(guardian, /\[DateTimeOffset\]::ParseExact/);
+assert.match(guardian, /\[Globalization\.CultureInfo\]::InvariantCulture/);
+assert.match(guardian, /replacement request timestamp is not valid invariant ISO-8601 round-trip format/);
+const ambiguousIsoTimestamp = "2026-09-05T20:34:40.4090068Z";
+const parsedIsoTimestamp = execFileSync("pwsh.exe", [
+  "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+  `[System.Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo('fi-FI'); ` +
+    `[DateTimeOffset]::ParseExact('${ambiguousIsoTimestamp}', 'o', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None).UtcDateTime.ToString('o')`,
+], { encoding: "utf8" }).trim();
+assert.equal(parsedIsoTimestamp, ambiguousIsoTimestamp, "ambiguous yyyy-MM-dd request timestamp must stay culture-invariant");
 assert.match(busyGuard, /BusyCoordinator\\busy\.py/);
 assert.match(busyGuard, /inspect \$Scope/);
 assert.match(busyGuard, /claim\.actor/);
