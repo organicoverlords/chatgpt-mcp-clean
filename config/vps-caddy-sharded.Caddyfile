@@ -1,0 +1,33 @@
+5-61-91-127.sslip.io {
+	handle /edge-status {
+		root * /var/lib/mcp-edge
+		rewrite * /status.json
+		header Content-Type application/json
+		header Cache-Control "no-store"
+		file_server
+	}
+
+	handle_path /artifact/* {
+		root * /srv/mcp-artifacts
+		header X-Robots-Tag "noindex, nofollow"
+		header Cache-Control "private, max-age=300"
+		file_server
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:3101 127.0.0.1:3102 127.0.0.1:3103 127.0.0.1:3104 {
+			lb_policy round_robin
+			lb_try_duration 2s
+			lb_try_interval 50ms
+			health_uri /health
+			health_interval 5s
+			health_timeout 2s
+			fail_duration 30s
+			max_fails 1
+		}
+	}
+
+	log {
+		output file /var/log/caddy/mcp-edge-access.log
+	}
+}
