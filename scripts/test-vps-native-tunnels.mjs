@@ -22,6 +22,7 @@ assert.deepEqual(
   'public MCP routing must stay pinned to the WireGuard upstream',
 );
 assert.match(caddy, /timeouts\s*\{[\s\S]*idle 15s/, 'public client idle connections must be reaped after 15s');
+assert.doesNotMatch(caddy, /\\bhealth_(?:uri|interval|timeout)\\b/, 'Caddy must not restore active upstream health polling');
 assert.doesNotMatch(caddy, /reverse_proxy\s+127\.0\.0\.1:3011(?:\s|$)/, 'Caddy must not restore the retired single reverse-SSH ingress');
 
 console.log('vps-wireguard-primary-contract: PASS');
