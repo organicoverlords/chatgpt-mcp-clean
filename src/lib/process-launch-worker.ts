@@ -29,7 +29,7 @@ function launch(requestId: string, command: string, cwd: string): void {
   const testDelay = Math.max(0, Number(process.env.MCP_TEST_LAUNCH_DELAY_MS || 0));
   if (testDelay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, testDelay);
   try {
-    const child = spawn(data.powershellExe, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command], {
+    const child = spawn(data.powershellExe, ["-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command", command], {
       cwd,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
