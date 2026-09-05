@@ -1,7 +1,9 @@
+import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdir as mkdirAsync, readFile as readFileAsync, readdir as readdirAsync, rename as renameAsync, stat as statAsync, unlink as unlinkAsync, writeFile as writeFileAsync } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
+import { promisify } from "node:util";
 import { Worker } from "node:worker_threads";
 import { currentTelemetryContext, emitTelemetry, withTelemetryContext, type TelemetryContext } from "./transport-telemetry.js";
 
@@ -25,11 +27,22 @@ const CONTROL_HANDOFF_OVERHEAD_MS = 1_500;
 const CONTROL_KILL_TIMEOUT_MS = TASKKILL_TIMEOUT_MS + KILL_SETTLE_MS + CONTROL_HANDOFF_OVERHEAD_MS;
 const CONTROL_RETENTION_MS = COMPLETED_RETENTION_MS;
 const CONTROL_PRUNE_INTERVAL_MS = 60_000;
+const DEFAULT_BUSY_QUIESCENCE_GRACE_MS = 60_000;
+const execFileAsync = promisify(execFile);
+
+type BusyClaimReference = {
+  actor: string;
+  scope: string;
+  timestamp: string;
+};
+type BusyRecoveryResult = "recovered" | "stale" | "retry";
 
 type ProcessManagerOptions = {
   maxLivePerCaller?: number;
   maxCompletedProcesses?: number;
   receiptDirectory?: string;
+  busyQuiescenceGraceMs?: number;
+  busyClaimRecoverer?: (claim: BusyClaimReference) => Promise<BusyRecoveryResult>;
 };
 
 type CompletedProcessReceipt = {
@@ -173,6 +186,78 @@ type ProcessState = {
 // path and fail closed if it disappears; never silently fall back to Windows PowerShell 5.1.
 const POWERSHELL_EXE = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
 if (!existsSync(POWERSHELL_EXE)) throw new Error(`Required PowerShell 7 runtime is missing: ${POWERSHELL_EXE}`);
+
+function busyMutationOperation(command: string): "claim" | "heartbeat" | "release" | null {
+  const segments = command.split(/[;\r\n]+/);
+  const variables = new Set<string>();
+  const candidates: Array<"claim" | "heartbeat" | "release"> = [];
+  const ownerPattern = /(?:busy-python\.cmd|busy-rust\.cmd|BusyCoordinator[\\/]busy\.py)/i;
+  const operationFromTail = (tail: string): "claim" | "heartbeat" | "release" | null => {
+    // A noncanonical --store invocation is intentionally not caller-bound here: the
+    // default recoverer targets only the installed canonical BusyCoordinator store.
+    if (/^\s*['"]?\s*--store\b/i.test(tail)) return null;
+    const match = tail.match(/^\s*['"]?\s*(claim|heartbeat|release)\b/i);
+    return match ? match[1]!.toLowerCase() as "claim" | "heartbeat" | "release" : null;
+  };
+
+  for (const segment of segments) {
+    const owner = ownerPattern.exec(segment);
+    if (owner?.index !== undefined) {
+      const assignment = segment.match(/^\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*=.*(?:busy-python\.cmd|busy-rust\.cmd|BusyCoordinator[\\/]busy\.py)/i);
+      if (assignment) variables.add(assignment[1]!.toLowerCase());
+      const operation = operationFromTail(segment.slice(owner.index + owner[0].length));
+      if (operation) candidates.push(operation);
+    }
+    for (const variable of variables) {
+      const invocation = new RegExp(`&\\s*\\$${variable}\\b`, "i").exec(segment);
+      if (invocation?.index === undefined) continue;
+      const operation = operationFromTail(segment.slice(invocation.index + invocation[0].length));
+      if (operation) candidates.push(operation);
+    }
+  }
+  return candidates.length === 1 ? candidates[0]! : null;
+}
+
+function parseBusyClaimResult(command: string, stdout: string): { operation: "claim" | "heartbeat" | "release"; claim: BusyClaimReference } | null {
+  const operation = busyMutationOperation(command);
+  if (!operation) return null;
+  const field = operation === "release" ? "released" : "claim";
+  const parsed: Record<string, unknown>[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) continue;
+    try {
+      const value = JSON.parse(trimmed);
+      if (value && typeof value === "object") parsed.push(value as Record<string, unknown>);
+    } catch { /* unrelated process output */ }
+  }
+  if (parsed.length !== 1 || parsed[0]!.ok !== true) return null;
+  const raw = parsed[0]![field];
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  if (typeof record.actor !== "string" || typeof record.scope !== "string" || typeof record.timestamp !== "string") return null;
+  return { operation, claim: { actor: record.actor, scope: record.scope, timestamp: record.timestamp } };
+}
+
+async function recoverStandaloneBusyClaim(claim: BusyClaimReference): Promise<BusyRecoveryResult> {
+  const localAppData = process.env.LOCALAPPDATA;
+  if (!localAppData) return "retry";
+  const busyScript = join(localAppData, "BusyCoordinator", "busy.py");
+  if (!existsSync(busyScript)) return "retry";
+  try {
+    const { stdout } = await execFileAsync("python", [
+      busyScript, "recover", claim.actor, claim.scope, "--expected-claim-timestamp", claim.timestamp,
+    ], { windowsHide: true, timeout: 5_000, maxBuffer: 64_000 });
+    const lines = String(stdout).trim().split(/\r?\n/).filter(Boolean);
+    if (!lines.length) return "retry";
+    const result = JSON.parse(lines.at(-1)!);
+    if (result?.ok && result?.recovered) return "recovered";
+    if (result?.reason === "claim_changed" || result?.reason === "scope_not_claimed") return "stale";
+    return "retry";
+  } catch {
+    return "retry";
+  }
+}
 
 // spawn() reports ENOENT when the *cwd* does not exist, and node attributes it to the
 // executable -- "spawn powershell.exe ENOENT" for a bad working_directory sends callers
@@ -540,6 +625,11 @@ export class ProcessManager {
   private readonly controlResponseDirectory?: string;
   private readonly controlRequestsInFlight = new Set<string>();
   private readonly launcherWorker: Worker;
+  private readonly busyQuiescenceGraceMs: number;
+  private readonly busyClaimRecoverer: (claim: BusyClaimReference) => Promise<BusyRecoveryResult>;
+  private readonly busyClaimsByCaller = new Map<string, Map<string, BusyClaimReference>>();
+  private readonly callerLastActivityMs = new Map<string, number>();
+  private readonly busyCleanupTimers = new Map<string, NodeJS.Timeout>();
   private lastReceiptPruneAt = 0;
   private lastReceiptArchivePruneAt = 0;
   private lastControlPruneAt = 0;
@@ -547,6 +637,8 @@ export class ProcessManager {
   constructor(options: ProcessManagerOptions = {}) {
     this.maxLivePerCaller = options.maxLivePerCaller ?? DEFAULT_MAX_LIVE_PER_CALLER;
     this.maxCompletedProcesses = options.maxCompletedProcesses ?? MAX_COMPLETED_PROCESSES;
+    this.busyQuiescenceGraceMs = Math.max(1, options.busyQuiescenceGraceMs ?? DEFAULT_BUSY_QUIESCENCE_GRACE_MS);
+    this.busyClaimRecoverer = options.busyClaimRecoverer ?? recoverStandaloneBusyClaim;
     this.launcherWorker = sharedPowerShellWorker();
     this.receiptDirectory = options.receiptDirectory ? resolve(options.receiptDirectory) : undefined;
     if (this.receiptDirectory) {
@@ -564,6 +656,76 @@ export class ProcessManager {
     }
   }
 
+  private busyClaimKey(claim: BusyClaimReference): string {
+    return `${claim.actor}\u0000${claim.scope}`;
+  }
+
+  private hasLiveProcessForCaller(callerId: string): boolean {
+    for (const state of this.processes.values()) if (state.callerId === callerId && state.exitCode === null) return true;
+    return false;
+  }
+
+  private noteCallerActivity(callerId: string): void {
+    if (!callerId || callerId === "caller_unknown") return;
+    this.callerLastActivityMs.set(callerId, Date.now());
+    const timer = this.busyCleanupTimers.get(callerId);
+    if (timer) {
+      clearTimeout(timer);
+      this.busyCleanupTimers.delete(callerId);
+    }
+    this.scheduleBusyCleanup(callerId);
+  }
+
+  private observeBusyMutation(state: ProcessState): void {
+    if (state.exitCode !== null && state.exitCode !== 0) return;
+    const result = parseBusyClaimResult(state.command, state.stdout.full().text);
+    if (!result || state.callerId === "caller_unknown") return;
+    const key = this.busyClaimKey(result.claim);
+    if (result.operation === "release") {
+      const claims = this.busyClaimsByCaller.get(state.callerId);
+      claims?.delete(key);
+      if (claims?.size === 0) this.busyClaimsByCaller.delete(state.callerId);
+      emitTelemetry({ event: "busy_claim_unbound", owner_caller_id: state.callerId, actor: result.claim.actor, scope: result.claim.scope, claim_timestamp: result.claim.timestamp }, state.ownerContext);
+      return;
+    }
+    const claims = this.busyClaimsByCaller.get(state.callerId) ?? new Map<string, BusyClaimReference>();
+    claims.set(key, result.claim);
+    this.busyClaimsByCaller.set(state.callerId, claims);
+    emitTelemetry({ event: "busy_claim_bound", owner_caller_id: state.callerId, actor: result.claim.actor, scope: result.claim.scope, claim_timestamp: result.claim.timestamp }, state.ownerContext);
+  }
+
+  private scheduleBusyCleanup(callerId: string, retryDelayMs = 0): void {
+    const claims = this.busyClaimsByCaller.get(callerId);
+    if (!claims?.size || this.hasLiveProcessForCaller(callerId) || this.busyCleanupTimers.has(callerId)) return;
+    const lastActivity = this.callerLastActivityMs.get(callerId) ?? Date.now();
+    const quiescenceDelayMs = Math.max(1, this.busyQuiescenceGraceMs - (Date.now() - lastActivity));
+    const delayMs = Math.max(quiescenceDelayMs, retryDelayMs);
+    const timer = setTimeout(() => { void this.recoverQuiescentBusyClaims(callerId); }, delayMs);
+    timer.unref();
+    this.busyCleanupTimers.set(callerId, timer);
+  }
+
+  private async recoverQuiescentBusyClaims(callerId: string): Promise<void> {
+    const timer = this.busyCleanupTimers.get(callerId);
+    if (timer) this.busyCleanupTimers.delete(callerId);
+    if (this.hasLiveProcessForCaller(callerId)) return;
+    const lastActivity = this.callerLastActivityMs.get(callerId) ?? Date.now();
+    if (Date.now() - lastActivity < this.busyQuiescenceGraceMs) {
+      this.scheduleBusyCleanup(callerId);
+      return;
+    }
+    const claims = this.busyClaimsByCaller.get(callerId);
+    if (!claims?.size) return;
+    for (const [key, claim] of [...claims.entries()]) {
+      if (this.hasLiveProcessForCaller(callerId) || Date.now() - (this.callerLastActivityMs.get(callerId) ?? Date.now()) < this.busyQuiescenceGraceMs) break;
+      const recovery = await this.busyClaimRecoverer(claim);
+      emitTelemetry({ event: "busy_claim_quiescence_recovery", owner_caller_id: callerId, actor: claim.actor, scope: claim.scope, claim_timestamp: claim.timestamp, recovery });
+      if (recovery !== "retry" && claims.get(key)?.timestamp === claim.timestamp) claims.delete(key);
+    }
+    if (claims.size === 0) this.busyClaimsByCaller.delete(callerId);
+    else this.scheduleBusyCleanup(callerId, this.busyQuiescenceGraceMs);
+  }
+
   private observeTerminal(state: ProcessState, code: number | null, signal: NodeJS.Signals | null): void {
     if (state.terminalObserved) return;
     state.terminalObserved = true;
@@ -575,6 +737,8 @@ export class ProcessManager {
       if (signal) state.signal = signal;
       state.finishedAt = finishedAt;
       state.launching = false;
+      this.observeBusyMutation(state);
+      this.noteCallerActivity(state.callerId);
       this.markProcessChanged(state);
       emitTelemetry({ event: "process_exit_observed", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, exit_code: state.exitCode, signal: state.signal ?? null, started_at: state.startedAt, finished_at: state.finishedAt }, state.ownerContext);
       sharedLauncherHandlers.delete(state.id);
@@ -1123,6 +1287,7 @@ export class ProcessManager {
 
   start(command: string, workingDirectory?: string, callerId = "caller_unknown"): { mcp_status: "OK"; process_state: "RUNNING" | "COMPLETED"; elapsed_ms: number; next_action: "READ_SAME_PROCESS_ID" | "STOP_READING"; process_id: string; pid: number; cwd: string; running: boolean; launching?: boolean } {
     this.pruneCompleted();
+    this.noteCallerActivity(callerId);
     const preflightError = powershellPreflightError(command);
     if (preflightError) {
       const rejectionId = randomUUID();
@@ -1193,6 +1358,7 @@ export class ProcessManager {
     const fullStderr = state.stderr.full();
     const observer = currentTelemetryContext();
     const observerCallerId = observer.caller_id ?? "caller_unknown";
+    this.noteCallerActivity(observerCallerId);
     if (markRead) state.lastReadRevisionByCaller.set(observerCallerId, state.revision);
     emitTelemetry({
       event: "process_read",
@@ -1235,6 +1401,7 @@ export class ProcessManager {
   }
 
   async readWithWait(processId: string, maxChars = MAX_READ_CHARS, waitMs = 0): Promise<Record<string, unknown>> {
+    this.noteCallerActivity(currentTelemetryContext().caller_id ?? "caller_unknown");
     const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
     emitTelemetry({
       event: "process_wait_requested",
@@ -1284,6 +1451,7 @@ export class ProcessManager {
 
   async kill(processId: string): Promise<Record<string, unknown>> {
     const observer = currentTelemetryContext();
+    this.noteCallerActivity(observer.caller_id ?? "caller_unknown");
     const state = this.processes.get(processId);
     if (!state) {
       const receipt = await this.readReceiptAsync(processId, MAX_READ_CHARS);
