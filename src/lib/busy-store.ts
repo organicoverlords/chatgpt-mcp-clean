@@ -1,4 +1,4 @@
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 export type BusyClaim = {
@@ -186,8 +186,31 @@ export class BusyStore {
   private persist(): void {
     mkdirSync(dirname(this.storePath), { recursive: true });
     const tempPath = `${this.storePath}.${process.pid}.tmp`;
-    writeFileSync(tempPath, `${JSON.stringify({ ...this.passthrough, claims: [...this.claims.values()] }, null, 2)}\n`, "utf8");
-    renameSync(tempPath, this.storePath);
+    const payload = `${JSON.stringify({ ...this.passthrough, claims: [...this.claims.values()] }, null, 2)}\n`;
+    writeFileSync(tempPath, payload, "utf8");
+    try {
+      try {
+        renameSync(tempPath, this.storePath);
+        return;
+      } catch (error) {
+        // A Windows reader can keep the JSON open with read/write sharing but without
+        // FILE_SHARE_DELETE. In that state rename/replace is forbidden even though an
+        // in-place write is allowed. The BUSY lock above still serializes every writer.
+        const code = (error as NodeJS.ErrnoException)?.code;
+        if (code !== "EPERM" && code !== "EACCES") throw error;
+      }
+
+      const fd = openSync(this.storePath, "r+");
+      try {
+        writeFileSync(fd, payload, { encoding: "utf8" });
+        ftruncateSync(fd, Buffer.byteLength(payload));
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+    } finally {
+      try { unlinkSync(tempPath); } catch {}
+    }
   }
 
   private prune(): void {
