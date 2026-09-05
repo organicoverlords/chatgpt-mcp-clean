@@ -33,6 +33,8 @@ const publicOrigin = new URL(ORIGIN);
 if (publicOrigin.protocol !== "https:" || !publicOrigin.hostname || publicOrigin.username || publicOrigin.password || publicOrigin.search || publicOrigin.hash) throw new Error("MCP_PUBLIC_ORIGIN must be an HTTPS origin without credentials, query, or fragment");
 if (!publicOrigin.pathname.endsWith("/")) publicOrigin.pathname += "/";
 const publicBasePath = publicOrigin.pathname === "/" ? "" : publicOrigin.pathname.replace(/\/$/, "");
+const publicAllowedHosts = new Set([publicOrigin.host.toLowerCase()]);
+if (!publicOrigin.port) publicAllowedHosts.add(`${publicOrigin.hostname.toLowerCase()}:443`);
 const publicUrl = (path: string): URL => new URL(path.replace(/^\/+/, ""), publicOrigin);
 const resource = publicUrl("mcp");
 const oauth = new LocalOAuthProvider(resource, OWNER, STORE);
@@ -66,7 +68,7 @@ async function handleStateless(req: Request, res: Response, body: unknown): Prom
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
-    allowedHosts: [`127.0.0.1:${PORT}`, `localhost:${PORT}`, frontDoorHost, publicOrigin.host],
+    allowedHosts: [`127.0.0.1:${PORT}`, `localhost:${PORT}`, frontDoorHost, ...publicAllowedHosts],
     enableDnsRebindingProtection: true,
   });
   let cleaned = false;
@@ -193,7 +195,7 @@ if (publicBasePath) {
 app.get("/.well-known/oauth-authorization-server/mcp", (_req, res) => res.json(oauthMetadata));
 app.use(mcpAuthRouter({ provider: oauth, issuerUrl: publicOrigin, resourceServerUrl: resource, scopesSupported: ["mcp", "offline_access"], resourceName: "Shell MCP", clientRegistrationOptions: { rateLimit: { windowMs: 60 * 60 * 1000, max: 300 } } }));
 
-const allowedMcpHosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, frontDoorHost, publicOrigin.host.toLowerCase()]);
+const allowedMcpHosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, frontDoorHost, ...publicAllowedHosts]);
 app.use("/mcp", (req, res, next) => {
   const host = (req.header("host") || "").toLowerCase();
   if (!allowedMcpHosts.has(host)) {
