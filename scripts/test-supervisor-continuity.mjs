@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -16,6 +16,34 @@ const temporary = mkdtempSync(join(tmpdir(), "shell-mcp-supervisor-proof-"));
 const configPath = join(temporary, "active-backend.json");
 const routesPath = join(temporary, "process-routes.json");
 const stateRoot = join(temporary, "supervisors");
+const isolatedTransportPath = join(temporary, "transport.jsonl");
+const isolatedRequestLogPath = join(temporary, "front-door-request.jsonl");
+const isolatedOauthPath = join(temporary, "oauth.json");
+const isolatedReceiptPath = join(temporary, "receipts");
+const inheritedTransportSentinel = join(temporary, "inherited-transport-must-not-be-used.jsonl");
+const inheritedRequestSentinel = join(temporary, "inherited-front-door-must-not-be-used.jsonl");
+const inheritedOauthSentinel = join(temporary, "inherited-oauth-must-not-be-used.json");
+const inheritedReceiptSentinel = join(temporary, "inherited-receipts-must-not-be-used");
+const supervisorEnvironment = {
+  ...process.env,
+  // Simulate a caller launched from a production MCP backend. Test-mode supervisors must
+  // replace these inherited state paths before spawning backend/front-door children.
+  MCP_TRANSPORT_LOG_PATH: inheritedTransportSentinel,
+  FRONT_DOOR_REQUEST_LOG_PATH: inheritedRequestSentinel,
+  MCP_OAUTH_STORE_PATH: inheritedOauthSentinel,
+  MCP_PROCESS_RECEIPT_DIR: inheritedReceiptSentinel,
+  MCP_BACKEND_CONFIG_PATH: configPath,
+  MCP_PROCESS_ROUTE_PATH: routesPath,
+  MCP_BACKEND_GENERATION: "",
+  MCP_WIREGUARD_CANDIDATE: "0",
+  MCP_FORCE_CONNECTION_CLOSE: "0",
+};
+Object.assign(supervisorEnvironment, {
+  MCP_TRANSPORT_LOG_PATH: isolatedTransportPath,
+  FRONT_DOOR_REQUEST_LOG_PATH: isolatedRequestLogPath,
+  MCP_OAUTH_STORE_PATH: isolatedOauthPath,
+  MCP_PROCESS_RECEIPT_DIR: isolatedReceiptPath,
+});
 const supervisors = [];
 let frontDoorPid = 0;
 let backendPid = 0;
@@ -55,7 +83,9 @@ async function waitHealth(origin, predicate, child) {
   throw new Error(`health timeout after ${HEALTH_TIMEOUT_MS}ms: ${origin}${stderr ? `; stderr=${stderr.slice(-2000)}` : ""}${lastError ? `; last_error=${lastError}` : ""}`);
 }
 function supervisor(args) {
-  const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", resolve("keepalive.ps1"), ...args, "-SupervisorStateRoot", stateRoot], { cwd: resolve("."), stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", resolve("keepalive.ps1"), ...args, "-SupervisorStateRoot", stateRoot], {
+    cwd: resolve("."), env: supervisorEnvironment, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+  });
   child.stderrText = "";
   child.stderr.on("data", (chunk) => { child.stderrText += chunk.toString(); });
   supervisors.push(child);
@@ -96,7 +126,13 @@ try {
   assert.deepEqual(failures, [], `front-door health disappeared while backend supervisor replaced its child: ${failures.join("; ")}`);
   assert.equal(backendSupervisor.exitCode, null, backendSupervisor.stderrText);
   assert.equal(frontDoorSupervisor.exitCode, null, frontDoorSupervisor.stderrText);
-  console.log(`PASS supervisor_continuity front_door_pid=${frontDoorPid} backend_old_pid=${originalBackend.pid} backend_new_pid=${replacement.pid} health_failures=0 funnel_untouched=test_mode`);
+  const transportEvidence = readFileSync(isolatedTransportPath, "utf8");
+  assert.match(transportEvidence, new RegExp(`"server_pid":${originalBackend.pid}(?:,|})`), "original test backend must write only to the isolated transport log");
+  assert.match(transportEvidence, new RegExp(`"server_pid":${replacement.pid}(?:,|})`), "replacement test backend must write only to the isolated transport log");
+  for (const forbidden of [inheritedTransportSentinel, inheritedRequestSentinel, inheritedOauthSentinel, inheritedReceiptSentinel]) {
+    assert.equal(existsSync(forbidden), false, `test child touched inherited production-like state path: ${forbidden}`);
+  }
+  console.log(`PASS supervisor_continuity front_door_pid=${frontDoorPid} backend_old_pid=${originalBackend.pid} backend_new_pid=${replacement.pid} health_failures=0 funnel_untouched=test_mode environment_isolated=true`);
 } finally {
   for (const child of supervisors) killTree(child.pid);
   for (const pid of [frontDoorPid, backendPid]) killTree(pid);
