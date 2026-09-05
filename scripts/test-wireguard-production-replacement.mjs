@@ -26,13 +26,15 @@ assert.match(request, /production-change-gate receipt does not PASS/);
 assert.match(request, /mcp_minimal_clone:production-backend-3011/);
 assert.match(guardian, /gate_receipt_sha256/);
 assert.match(guardian, /\[DateTimeOffset\]::ParseExact/);
+assert.match(guardian, /ConvertFrom-Json -DateKind String/);
 assert.match(guardian, /\[Globalization\.CultureInfo\]::InvariantCulture/);
 assert.match(guardian, /replacement request timestamp is not valid invariant ISO-8601 round-trip format/);
 const ambiguousIsoTimestamp = "2026-09-05T20:34:40.4090068Z";
 const parsedIsoTimestamp = execFileSync("pwsh.exe", [
   "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
   `[System.Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo('fi-FI'); ` +
-    `[DateTimeOffset]::ParseExact('${ambiguousIsoTimestamp}', 'o', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None).UtcDateTime.ToString('o')`,
+    `$json = '{"requested_at":"${ambiguousIsoTimestamp}"}'; $request = $json | ConvertFrom-Json -DateKind String; ` +
+    `[DateTimeOffset]::ParseExact([string]$request.requested_at, 'o', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None).UtcDateTime.ToString('o')`,
 ], { encoding: "utf8" }).trim();
 assert.equal(parsedIsoTimestamp, ambiguousIsoTimestamp, "ambiguous yyyy-MM-dd request timestamp must stay culture-invariant");
 assert.match(busyGuard, /BusyCoordinator\\busy\.py/);
