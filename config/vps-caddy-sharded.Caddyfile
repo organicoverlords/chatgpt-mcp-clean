@@ -15,8 +15,8 @@
 	}
 
 	handle {
-		reverse_proxy 127.0.0.1:3101 127.0.0.1:3102 127.0.0.1:3103 127.0.0.1:3104 {
-			lb_policy round_robin
+		reverse_proxy 10.203.0.2:3011 127.0.0.1:3101 127.0.0.1:3102 127.0.0.1:3103 127.0.0.1:3104 {
+			lb_policy first
 			lb_try_duration 2s
 			lb_try_interval 50ms
 			health_uri /health
