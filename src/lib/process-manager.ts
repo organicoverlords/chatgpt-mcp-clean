@@ -272,10 +272,30 @@ function driveRootRecursiveScanError(command: string, code: string): string | un
   return undefined;
 }
 
+function p3BuildSlotWaitError(command: string, code: string): string | undefined {
+  const invokesP3Build = /\bInvoke-P3(?:HotSource)?Build\.ps1\b/i.test(command);
+  const waitProcess = /\bWait-Process\b/i.test(code);
+  const ubtWaitMarker = /\b(?:WAIT_FOREIGN_UBT|FOREIGN_UBT|WAIT_OWNER_PID|UnrealBuildTool|UBT)\b/i.test(command);
+
+  if (waitProcess && (invokesP3Build || ubtWaitMarker)) {
+    return "interactive P3 build-slot waits are blocked; let the P3 build wrapper fail fast and continue other scope";
+  }
+
+  const pollingForeignProcess = /\b(?:while|do)\b/i.test(code)
+    && /\bGet-Process\b/i.test(code)
+    && /\bStart-Sleep\b/i.test(code);
+  if (invokesP3Build && pollingForeignProcess) {
+    return "interactive P3 build-slot polling is blocked; let the P3 build wrapper fail fast and continue other scope";
+  }
+  return undefined;
+}
+
 function powershellPreflightError(command: string): string | undefined {
   const code = powershellCodeMask(command);
   const rootScanError = driveRootRecursiveScanError(command, code);
   if (rootScanError) return rootScanError;
+  const p3BuildWaitError = p3BuildSlotWaitError(command, code);
+  if (p3BuildWaitError) return p3BuildWaitError;
   const automaticVariable = String.raw`\$(?:(?:global|script|local|private):)?(?:PID|args)`;
   const writePattern = new RegExp(`${automaticVariable}\\s*(?:\\+\\+|--|[+*/%?-]?=)|(?:\\+\\+|--)\\s*${automaticVariable}`, "i");
   if (writePattern.test(code)) {
