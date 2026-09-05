@@ -48,7 +48,7 @@ async function waitHealth(origin, port) {
 const temporary = mkdtempSync(join(tmpdir(), "mcp-local-smoke-"));
 const port = await unusedPort();
 const origin = `http://127.0.0.1:${port}`;
-const publicOrigin = "https://branch-smoke.invalid";
+const publicOrigin = "https://branch-smoke.test.ts.net";
 const server = spawn(process.execPath, [resolve("dist/index.js")], {
   cwd: resolve("."),
   env: {
