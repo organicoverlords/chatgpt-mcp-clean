@@ -3,16 +3,16 @@
 <!-- PROJECT-TIMELINE:BEGIN -->
 ## Project timeline
 
+- [2026-09-05] Replaced the single Python/AsyncSSH VPS reverse tunnel with four independent native OpenSSH lanes behind Caddy round-robin health-aware routing; one-lane failure now leaves the other three serving and the existing recovery task recreates only the missing lane.
 - [2026-09-04] Removed the orphaned public-health monitor and uncalled `keepalive.ps1 -Role Legacy` supervisor mode left behind by the retired port-3000 cutover path.
 - [2026-09-04] Removed the obsolete one-time front-door cutover script that could repoint Tailscale Funnel back to dead legacy port 3000; the surviving fallback is the existing root Funnel to port 3003.
 - [2026-09-04] Removed the unused two-clone deployment launcher and example config; production remains one VPS-routed minimal clone with the root front door reserved for plugin2 fallback, while cross-instance behavior stays regression-tested.
 - [2026-09-03] Retired front-door static clone routing and direct Tailscale `/clone-*` handlers after MCPv3 moved to the VPS edge; the authorized plugin2 fallback keeps only the public Funnel root on port 3003.
-- [2026-09-03] Restored the accepted MCPv3 process-tool description/schema contract after an unnecessary post-acceptance description mutation, kept PowerShell hardening internal to `start_process`, and added a byte-level contract freeze check so ordinary implementation work cannot silently rewrite the model-facing tool contract.
 
 See the canonical [CHANGELOG.md](CHANGELOG.md) for the complete project timeline.
 <!-- PROJECT-TIMELINE:END -->
 
-Minimal authenticated Streamable HTTP MCP for the local Windows shell/process control boundary. The current MCPv3 production path is public Caddy HTTPS on the VPS -> persistent reverse SSH -> loopback-only minimal clone on port 3011. The legacy local front door remains available for root/fallback topology but is not the current MCPv3 public ingress.
+Minimal authenticated Streamable HTTP MCP for the local Windows shell/process control boundary. The current MCPv3 production path is public Caddy HTTPS on the VPS -> four independent native OpenSSH reverse tunnels (VPS loopback ports 3101-3104, round-robin with health checks) -> loopback-only minimal clone on port 3011. No single Python/AsyncSSH event loop or single SSH TCP stream is shared by all MCP requests. The legacy local front door remains available for root/fallback topology but is not the current MCPv3 public ingress.
 
 The default full worker-visible contract is exactly `view_image`, `start_process`, `read_output`, `kill_process`, `busy_list`, `busy_claim`, and `busy_release`; the opt-in `process` profile intentionally exposes only the three process tools.
 
