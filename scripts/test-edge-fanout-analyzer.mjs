@@ -90,15 +90,23 @@ try {
   const filtered = JSON.parse(filteredStdout);
   assert.equal(filtered.mcp_posts, 3);
   assert.deepEqual(filtered.status_counts, { 202: 1, 200: 1, 502: 1 });
+  assert.equal(filtered.source_window.timestamped_rows, 6);
+  assert.equal(filtered.source_window.requested_since_covered, true);
+  assert.equal(filtered.source_window.requested_until_covered, true);
 
   const stdinStdout = execFileSync(process.execPath, [analyzer, "-"], { input: `${lines.join("\n")}\n`, encoding: "utf8", windowsHide: true });
   const stdinReport = JSON.parse(stdinStdout);
   assert.deepEqual(stdinReport, report);
+
+  const partialStdout = execFileSync(process.execPath, [analyzer, logPath, "--since", new Date(999 * 1000).toISOString()], { encoding: "utf8", windowsHide: true });
+  const partial = JSON.parse(partialStdout);
+  assert.equal(partial.source_window.requested_since_covered, false);
+  assert.equal(partial.source_window.start, new Date(1000 * 1000).toISOString());
   for (const secret of [sessionA, sessionB, subject, authorization, "1.1.1.1", "2.2.2.2", "3.3.3.3", "4.4.4.4"]) {
     assert.ok(!stdinStdout.includes(secret), `stdin aggregate output leaked raw identifier: ${secret}`);
   }
 
-  console.log("PASS edge_fanout_analyzer aggregate_only=true window_filter=true stdin_stream=true session_socket_metrics=true raw_identifiers_leaked=false");
+  console.log("PASS edge_fanout_analyzer aggregate_only=true window_filter=true source_coverage=true stdin_stream=true session_socket_metrics=true raw_identifiers_leaked=false");
 } finally {
   rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
 }

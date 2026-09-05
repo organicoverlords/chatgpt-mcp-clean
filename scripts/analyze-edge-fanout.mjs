@@ -36,6 +36,9 @@ let http11Posts = 0;
 let keepAlivePosts = 0;
 let tlsResumedRequests = 0;
 let responseBytes = 0;
+let sourceTimestampedRows = 0;
+let sourceStartMs = Number.POSITIVE_INFINITY;
+let sourceEndMs = Number.NEGATIVE_INFINITY;
 let selectedStartMs = Number.POSITIVE_INFINITY;
 let selectedEndMs = Number.NEGATIVE_INFINITY;
 
@@ -83,9 +86,14 @@ for await (const line of readline.createInterface({ input, crlfDelay: Infinity }
     malformedLines++;
     continue;
   }
+  const eventMs = Number(event.ts) * 1000;
+  if (Number.isFinite(eventMs)) {
+    sourceTimestampedRows++;
+    sourceStartMs = Math.min(sourceStartMs, eventMs);
+    sourceEndMs = Math.max(sourceEndMs, eventMs);
+  }
   const request = event.request ?? {};
   if (request.method !== "POST" || request.uri !== "/mcp") continue;
-  const eventMs = Number(event.ts) * 1000;
   if (!Number.isFinite(eventMs) || eventMs < startMs || eventMs > endMs) continue;
 
   posts++;
@@ -154,6 +162,15 @@ for (const entries of sessions.values()) {
 
 const socketValues = [...socketCounts.values()];
 const report = {
+  source_window: {
+    timestamped_rows: sourceTimestampedRows,
+    start: sourceTimestampedRows ? new Date(sourceStartMs).toISOString() : null,
+    end: sourceTimestampedRows ? new Date(sourceEndMs).toISOString() : null,
+    requested_since: Number.isFinite(startMs) ? new Date(startMs).toISOString() : null,
+    requested_until: Number.isFinite(endMs) ? new Date(endMs).toISOString() : null,
+    requested_since_covered: Number.isFinite(startMs) ? (sourceTimestampedRows > 0 && sourceStartMs <= startMs) : null,
+    requested_until_covered: Number.isFinite(endMs) ? (sourceTimestampedRows > 0 && sourceEndMs >= endMs) : null,
+  },
   window: {
     start: posts ? new Date(selectedStartMs).toISOString() : null,
     end: posts ? new Date(selectedEndMs).toISOString() : null,
