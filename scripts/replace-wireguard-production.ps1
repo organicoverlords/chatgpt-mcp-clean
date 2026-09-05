@@ -23,6 +23,9 @@ if ($gate.verdict -ne 'PASS' -or $gate.target.component -ne 'mcp_minimal_clone')
 if (-not $gate.checks.explicit_user_authorization_for_specific_live_change -or -not $gate.checks.independent_rollback_control_route_verified -or -not $gate.checks.offpath_canary_proof_verified) { throw 'production-change-gate receipt is missing required proofs' }
 if ($gate.busy_scope -ne $requiredScope -or $gate.checks.busy_scope.claim.scope -ne $requiredScope -or -not $gate.actor -or $gate.checks.busy_scope.claim.actor -ne $gate.actor) { throw 'production-change-gate receipt does not hold the exact production backend Busy scope' }
 $repo = Join-Path $env:LOCALAPPDATA 'ChatGPTMcpClean'
+$busyGuard = Join-Path $repo 'scripts\assert-live-busy-claim.ps1'
+if (-not (Test-Path -LiteralPath $busyGuard -PathType Leaf)) { throw 'live Busy verification helper is missing' }
+& $busyGuard -Scope $requiredScope -Actor ([string]$gate.actor) | Out-Null
 $runtimeRoot = Join-Path $env:LOCALAPPDATA 'ChatGPTMcpMinimal'
 $edgeOwner = Join-Path $env:LOCALAPPDATA 'McpVpsEdge\provision_edge_extras.py'
 $state = Join-Path $repo '.state\production-replacement'
