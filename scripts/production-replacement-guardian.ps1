@@ -147,7 +147,7 @@ function Restore-RuntimeAndCanonical {
 
 try {
     if (-not (Test-Path -LiteralPath $RequestPath -PathType Leaf)) { throw "replacement request not found: $RequestPath" }
-    $request = Get-Content -LiteralPath $RequestPath -Raw | ConvertFrom-Json
+    $request = Get-Content -LiteralPath $RequestPath -Raw | ConvertFrom-Json -DateKind String
     if ([int]$request.version -ne 1 -or [int]$request.candidate_port -ne 3012) { throw 'invalid replacement request contract' }
     try {
         $requestedAt = [DateTimeOffset]::ParseExact(
