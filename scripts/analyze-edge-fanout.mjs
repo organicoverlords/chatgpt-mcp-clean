@@ -2,7 +2,7 @@ import fs from "node:fs";
 import readline from "node:readline";
 
 function usage() {
-  console.error("usage: node scripts/analyze-edge-fanout.mjs <caddy-access.jsonl> [--since <iso>] [--until <iso>]");
+  console.error("usage: node scripts/analyze-edge-fanout.mjs <caddy-access.jsonl|-> [--since <iso>] [--until <iso>]");
   process.exit(2);
 }
 
@@ -72,7 +72,8 @@ function ratio(numerator, denominator) {
   return Number((numerator / denominator).toFixed(4));
 }
 
-const input = fs.createReadStream(logPath, { encoding: "utf8" });
+const input = logPath === "-" ? process.stdin : fs.createReadStream(logPath, { encoding: "utf8" });
+if (logPath === "-") process.stdin.setEncoding("utf8");
 for await (const line of readline.createInterface({ input, crlfDelay: Infinity })) {
   if (!line.trim()) continue;
   let event;
