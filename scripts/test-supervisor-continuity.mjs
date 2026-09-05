@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+const HEALTH_TIMEOUT_MS = 30_000;
+const HEALTH_POLL_MS = 50;
+function killTree(pid) {
+  if (!pid) return;
+  spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true, timeout: 5_000 });
+}
 const temporary = mkdtempSync(join(tmpdir(), "shell-mcp-supervisor-proof-"));
 const configPath = join(temporary, "active-backend.json");
 const routesPath = join(temporary, "process-routes.json");
@@ -29,15 +35,24 @@ async function health(origin) {
   assert.equal(response.status, 200);
   return response.json();
 }
-async function waitHealth(origin, predicate) {
-  for (let attempt = 0; attempt < 400; attempt++) {
+async function waitHealth(origin, predicate, child) {
+  const deadline = Date.now() + HEALTH_TIMEOUT_MS;
+  let lastError = "";
+  while (Date.now() < deadline) {
+    if (child?.exitCode !== null) {
+      const stderr = child.stderrText?.trim();
+      throw new Error(`health supervisor exited before ready: ${origin}; exit=${child.exitCode}${stderr ? `; stderr=${stderr.slice(-2000)}` : ""}`);
+    }
     try {
       const body = await health(origin);
       if (predicate(body)) return body;
-    } catch {}
-    await sleep(50);
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await sleep(HEALTH_POLL_MS);
   }
-  throw new Error(`health timeout: ${origin}`);
+  const stderr = child?.stderrText?.trim();
+  throw new Error(`health timeout after ${HEALTH_TIMEOUT_MS}ms: ${origin}${stderr ? `; stderr=${stderr.slice(-2000)}` : ""}${lastError ? `; last_error=${lastError}` : ""}`);
 }
 function supervisor(args) {
   const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", resolve("keepalive.ps1"), ...args, "-SupervisorStateRoot", stateRoot], { cwd: resolve("."), stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
@@ -52,12 +67,12 @@ try {
   const frontDoorPort = await unusedPort();
   const backendSupervisor = supervisor(["-Role", "Backend", "-Port", String(backendPort), "-PollSeconds", "5", "-TestMode"]);
   const backendOrigin = `http://127.0.0.1:${backendPort}`;
-  const originalBackend = await waitHealth(backendOrigin, (body) => body.role === "backend" && body.port === backendPort);
+  const originalBackend = await waitHealth(backendOrigin, (body) => body.role === "backend" && body.port === backendPort, backendSupervisor);
   writeFileSync(configPath, `${JSON.stringify({ version: 1, port: backendPort, generation: originalBackend.backend_generation }, null, 2)}\n`, "utf8");
   backendPid = originalBackend.pid;
   const frontDoorSupervisor = supervisor(["-Role", "FrontDoor", "-Port", String(frontDoorPort), "-PollSeconds", "5", "-BackendConfigPath", configPath, "-ProcessRoutePath", routesPath, "-TestMode"]);
   const frontDoorOrigin = `http://127.0.0.1:${frontDoorPort}`;
-  const firstFrontDoor = await waitHealth(frontDoorOrigin, (body) => body.name === "shell-mcp" && body.port === frontDoorPort);
+  const firstFrontDoor = await waitHealth(frontDoorOrigin, (body) => body.name === "shell-mcp" && body.port === frontDoorPort, frontDoorSupervisor);
   frontDoorPid = firstFrontDoor.pid;
 
   const failures = [];
@@ -73,7 +88,7 @@ try {
   })();
 
   process.kill(backendPid);
-  const replacement = await waitHealth(backendOrigin, (body) => body.role === "backend" && body.pid !== backendPid);
+  const replacement = await waitHealth(backendOrigin, (body) => body.role === "backend" && body.pid !== backendPid, backendSupervisor);
   backendPid = replacement.pid;
   await sleep(150);
   monitoring = false;
@@ -83,12 +98,7 @@ try {
   assert.equal(frontDoorSupervisor.exitCode, null, frontDoorSupervisor.stderrText);
   console.log(`PASS supervisor_continuity front_door_pid=${frontDoorPid} backend_old_pid=${originalBackend.pid} backend_new_pid=${replacement.pid} health_failures=0 funnel_untouched=test_mode`);
 } finally {
-  for (const child of supervisors) if (child.exitCode === null) child.kill();
-  await sleep(150);
-  for (const pid of [frontDoorPid, backendPid]) {
-    if (!pid) continue;
-    try { process.kill(pid); } catch {}
-  }
-  await sleep(100);
-  rmSync(temporary, { recursive: true, force: true });
+  for (const child of supervisors) killTree(child.pid);
+  for (const pid of [frontDoorPid, backendPid]) killTree(pid);
+  rmSync(temporary, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 }
