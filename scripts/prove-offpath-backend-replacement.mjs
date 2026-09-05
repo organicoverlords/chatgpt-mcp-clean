@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+const HEALTH_TIMEOUT_MS = 30_000;
+const HEALTH_POLL_MS = 50;
 const temporary = mkdtempSync(join(tmpdir(), "shell-mcp-replacement-proof-"));
 const configPath = join(temporary, "active-backend.json");
 const routesPath = join(temporary, "process-routes.json");
@@ -32,16 +34,25 @@ async function unusedPort() {
     }
   }
 }
-async function waitHealth(origin, predicate) {
-  for (let attempt = 0; attempt < 120; attempt++) {
+async function waitHealth(origin, predicate, child) {
+  const deadline = Date.now() + HEALTH_TIMEOUT_MS;
+  let lastError = "";
+  while (Date.now() < deadline) {
+    if (child?.exitCode !== null) {
+      const stderr = child.stderrText?.trim();
+      throw new Error(`health child exited before ready: ${origin}; exit=${child.exitCode}${stderr ? `; stderr=${stderr.slice(-2000)}` : ""}`);
+    }
     try {
       const response = await fetch(`${origin}/health`);
       const body = await response.json();
       if (response.ok && predicate(body)) return body;
-    } catch {}
-    await sleep(25);
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await sleep(HEALTH_POLL_MS);
   }
-  throw new Error(`health timeout: ${origin}`);
+  const stderr = child?.stderrText?.trim();
+  throw new Error(`health timeout after ${HEALTH_TIMEOUT_MS}ms: ${origin}${stderr ? `; stderr=${stderr.slice(-2000)}` : ""}${lastError ? `; last_error=${lastError}` : ""}`);
 }
 function launch(script, env) {
   const child = spawn(process.execPath, [resolve(script)], { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
@@ -84,13 +95,13 @@ try {
     MCP_PROCESS_RECEIPT_DIR: receiptPath,
   };
   const blue = launch("dist/index.js", { ...commonBackendEnv, PORT: String(bluePort), MCP_TRANSPORT_LOG_PATH: join(temporary, "blue-transport.jsonl") });
-  const blueHealth = await waitHealth(`http://127.0.0.1:${bluePort}`, (body) => body.role === "backend" && body.port === bluePort);
+  const blueHealth = await waitHealth(`http://127.0.0.1:${bluePort}`, (body) => body.role === "backend" && body.port === bluePort, blue);
   const green = launch("dist/index.js", { ...commonBackendEnv, PORT: String(greenPort), MCP_TRANSPORT_LOG_PATH: join(temporary, "green-transport.jsonl") });
-  await waitHealth(`http://127.0.0.1:${greenPort}`, (body) => body.role === "backend" && body.port === greenPort);
+  await waitHealth(`http://127.0.0.1:${greenPort}`, (body) => body.role === "backend" && body.port === greenPort, green);
   writeTarget(bluePort, blueHealth.backend_generation);
   const frontDoor = launch("dist/front-door.js", { FRONT_DOOR_PORT: String(frontDoorPort), MCP_BACKEND_CONFIG_PATH: configPath, MCP_PROCESS_ROUTE_PATH: routesPath });
   const frontDoorOrigin = `http://127.0.0.1:${frontDoorPort}`;
-  const firstHealth = await waitHealth(frontDoorOrigin, (body) => body.name === "shell-mcp" && body.port === frontDoorPort);
+  const firstHealth = await waitHealth(frontDoorOrigin, (body) => body.name === "shell-mcp" && body.port === frontDoorPort, frontDoor);
 
   const registration = await jsonFetch(`${frontDoorOrigin}/register`, {
     method: "POST",
@@ -122,7 +133,7 @@ try {
   assert.equal(before.response.headers.has("x-shell-mcp-front-door"), false, "front door must not inject worker-visible response metadata");
   const claim = await call("busy_claim", { actor: "continuity-proof", scope: "offpath:backend-replacement" });
   assert.equal(claim.ok, true);
-  const started = await call("start_process", { command: "Write-Output 'BLUE_PROCESS'; Start-Sleep -Seconds 20" });
+  const started = await call("start_process", { command: "Write-Output 'BLUE_PROCESS'; Start-Sleep -Seconds 120" });
   assert.ok(started.process_id && started.running);
 
   const healthFailures = [];
