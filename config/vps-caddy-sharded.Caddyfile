@@ -24,6 +24,10 @@
 
 	handle {
 		reverse_proxy 10.203.0.2:3011 {
+			transport http {
+				keepalive 30s
+				keepalive_idle_conns_per_host 4
+			}
 		}
 	}
 
