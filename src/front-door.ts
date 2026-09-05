@@ -2,8 +2,9 @@
 import "dotenv/config";
 import { Agent, createServer, request as httpRequest } from "node:http";
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
-import { createWriteStream, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { BoundedJsonlWriter } from "./lib/bounded-jsonl.js";
 
 type BackendTarget = { version: 1; port: number; generation: string };
 type ProcessRoute = { port: number; generation: string; created_at: string };
@@ -25,11 +26,12 @@ if (HOST !== "127.0.0.1" || !Number.isInteger(PORT) || PORT < 1024 || PORT > 655
   throw new Error("The MCP front door must bind a non-privileged port on 127.0.0.1");
 }
 
-mkdirSync(dirname(REQUEST_LOG_PATH), { recursive: true });
-const requestLogStream = createWriteStream(REQUEST_LOG_PATH, { flags: "a", encoding: "utf8" });
+const requestLogWriter = new BoundedJsonlWriter(REQUEST_LOG_PATH, {
+  onError: (error) => console.error("front-door telemetry write failed:", error.message),
+});
 let requestSequence = 0;
 function frontDoorLog(event: string, fields: Record<string, unknown> = {}): void {
-  requestLogStream.write(`${JSON.stringify({ at: new Date().toISOString(), event, front_pid: process.pid, ...fields })}\n`);
+  requestLogWriter.writeJson({ at: new Date().toISOString(), event, front_pid: process.pid, ...fields });
 }
 
 function validBackend(value: unknown): value is BackendTarget {
@@ -318,7 +320,7 @@ server.timeout = 0;
 const stop = () => {
   server.close(() => {
     backendAgent.destroy();
-    requestLogStream.end(() => process.exit(0));
+    void requestLogWriter.close().finally(() => process.exit(0));
   });
   setTimeout(() => process.exit(1), 5_000).unref();
 };
