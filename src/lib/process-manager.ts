@@ -140,8 +140,9 @@ type ProcessState = {
   ownerContext: TelemetryContext;
   command: string;
   cwd: string;
-  worker: Worker;
   launching: boolean;
+  terminalObserved: boolean;
+  resolveDone: () => void;
   killRequested: boolean;
   stdout: BoundedCapture;
   stderr: BoundedCapture;
@@ -308,9 +309,39 @@ function powershellPreflightError(command: string): string | undefined {
   return undefined;
 }
 
-function powershellWorker(command: string, cwd: string): Worker {
-  const worker = new Worker(new URL("./process-launch-worker.js", import.meta.url), { workerData: { command, cwd, powershellExe: POWERSHELL_EXE } });
+function powershellWorker(): Worker {
+  const testDelay = Math.max(0, Number(process.env.MCP_TEST_WORKER_CONSTRUCTION_DELAY_MS || 0));
+  if (testDelay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, testDelay);
+  const worker = new Worker(new URL("./process-launch-worker.js", import.meta.url), { workerData: { powershellExe: POWERSHELL_EXE } });
   worker.unref();
+  return worker;
+}
+
+let sharedLauncherWorker: Worker | undefined;
+let sharedLauncherFailure: string | undefined;
+const sharedLauncherHandlers = new Map<string, (message: any) => void>();
+
+function failSharedLauncher(message: string): void {
+  if (sharedLauncherFailure) return;
+  sharedLauncherFailure = message;
+  emitTelemetry({ event: "process_launcher_worker_failed", error_message: message });
+  const handlers = [...sharedLauncherHandlers.entries()];
+  sharedLauncherHandlers.clear();
+  for (const [requestId, handler] of handlers) handler({ requestId, type: "error", error: `process launcher unavailable: ${message}` });
+}
+
+function sharedPowerShellWorker(): Worker {
+  if (sharedLauncherFailure) throw new Error(`process_launcher_unavailable: ${sharedLauncherFailure}`);
+  if (sharedLauncherWorker) return sharedLauncherWorker;
+  const worker = powershellWorker();
+  worker.on("message", (message: any) => {
+    if (!message || typeof message.requestId !== "string") return;
+    sharedLauncherHandlers.get(message.requestId)?.(message);
+  });
+  worker.once("error", (error: Error) => failSharedLauncher(error.message));
+  worker.once("exit", (code) => failSharedLauncher(`launcher worker exited with code ${code}`));
+  worker.unref();
+  sharedLauncherWorker = worker;
   return worker;
 }
 
@@ -343,6 +374,7 @@ export class ProcessManager {
   private readonly controlRequestDirectory?: string;
   private readonly controlResponseDirectory?: string;
   private readonly controlRequestsInFlight = new Set<string>();
+  private readonly launcherWorker: Worker;
   private lastReceiptPruneAt = 0;
   private lastReceiptArchivePruneAt = 0;
   private lastControlPruneAt = 0;
@@ -350,6 +382,7 @@ export class ProcessManager {
   constructor(options: ProcessManagerOptions = {}) {
     this.maxLivePerCaller = options.maxLivePerCaller ?? DEFAULT_MAX_LIVE_PER_CALLER;
     this.maxCompletedProcesses = options.maxCompletedProcesses ?? MAX_COMPLETED_PROCESSES;
+    this.launcherWorker = sharedPowerShellWorker();
     this.receiptDirectory = options.receiptDirectory ? resolve(options.receiptDirectory) : undefined;
     if (this.receiptDirectory) {
       mkdirSync(this.receiptDirectory, { recursive: true });
@@ -365,6 +398,47 @@ export class ProcessManager {
       controlTimer.unref();
     }
   }
+
+  private observeTerminal(state: ProcessState, code: number | null, signal: NodeJS.Signals | null): void {
+    if (state.terminalObserved) return;
+    state.terminalObserved = true;
+    const exitCode = code ?? -1;
+    const finishedAt = new Date().toISOString();
+    void (async () => {
+      await this.persistReceiptAsync(state, exitCode, signal, finishedAt);
+      state.exitCode = exitCode;
+      if (signal) state.signal = signal;
+      state.finishedAt = finishedAt;
+      state.launching = false;
+      this.markProcessChanged(state);
+      emitTelemetry({ event: "process_exit_observed", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, exit_code: state.exitCode, signal: state.signal ?? null, started_at: state.startedAt, finished_at: state.finishedAt }, state.ownerContext);
+      sharedLauncherHandlers.delete(state.id);
+      state.resolveDone();
+    })();
+  }
+
+  private handleLauncherMessage(message: any): void {
+    if (!message || typeof message !== "object" || typeof message.requestId !== "string") return;
+    const state = this.processes.get(message.requestId);
+    if (!state || state.exitCode !== null) return;
+    if (message.type === "started" && Number.isInteger(message.pid) && message.pid > 0) {
+      state.pid = message.pid;
+      state.launching = false;
+      emitTelemetry({ event: "process_started", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, cwd: state.cwd, started_at: state.startedAt }, state.ownerContext);
+      if (state.killRequested) this.launcherWorker.postMessage({ type: "kill", requestId: state.id });
+      return;
+    }
+    if (message.type === "stdout") { state.stdout.append(String(message.data ?? "")); this.markProcessChanged(state); return; }
+    if (message.type === "stderr") { state.stderr.append(String(message.data ?? "")); this.markProcessChanged(state); return; }
+    if (message.type === "error") {
+      state.error = String(message.error ?? "process launcher worker failed");
+      emitTelemetry({ event: "process_error", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, error_message: state.error }, state.ownerContext);
+      this.observeTerminal(state, -1, null);
+      return;
+    }
+    if (message.type === "exit") this.observeTerminal(state, typeof message.code === "number" ? message.code : -1, message.signal ?? null);
+  }
+
 
   private receiptPath(processId: string): string | undefined {
     if (!this.receiptDirectory || !PROCESS_ID_PATTERN.test(processId)) return undefined;
@@ -932,51 +1006,16 @@ export class ProcessManager {
     let resolveDone!: () => void;
     const done = new Promise<void>((resolve) => { resolveDone = resolve; });
     const ownerContext = currentTelemetryContext();
+    if (sharedLauncherFailure) throw new Error(`process_launcher_unavailable: ${sharedLauncherFailure}`);
     const state: ProcessState = {
       id: randomUUID(), pid: 0, callerId, ownerContext, command, cwd,
-      worker: powershellWorker(command, cwd), launching: true, killRequested: false,
+      launching: true, terminalObserved: false, resolveDone, killRequested: false,
       stdout: new BoundedCapture(), stderr: new BoundedCapture(), startedAt: new Date().toISOString(), exitCode: null,
       done, revision: 0, lastReadRevisionByCaller: new Map<string, number>(), waiters: new Set<() => void>(),
     };
-    let terminalObserved = false;
-    const observeTerminal = (code: number | null, signal: NodeJS.Signals | null) => {
-      if (terminalObserved) return;
-      terminalObserved = true;
-      const exitCode = code ?? -1;
-      const finishedAt = new Date().toISOString();
-      void (async () => {
-        await this.persistReceiptAsync(state, exitCode, signal, finishedAt);
-        state.exitCode = exitCode;
-        if (signal) state.signal = signal;
-        state.finishedAt = finishedAt;
-        state.launching = false;
-        this.markProcessChanged(state);
-        emitTelemetry({ event: "process_exit_observed", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, exit_code: state.exitCode, signal: state.signal ?? null, started_at: state.startedAt, finished_at: state.finishedAt }, state.ownerContext);
-        resolveDone();
-      })();
-    };
-    state.worker.on("message", (message: any) => {
-      if (!message || typeof message !== "object") return;
-      if (message.type === "started" && Number.isInteger(message.pid) && message.pid > 0) {
-        state.pid = message.pid;
-        state.launching = false;
-        emitTelemetry({ event: "process_started", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, cwd: state.cwd, started_at: state.startedAt }, state.ownerContext);
-        if (state.killRequested) state.worker.postMessage({ type: "kill" });
-        return;
-      }
-      if (message.type === "stdout") { state.stdout.append(String(message.data ?? "")); this.markProcessChanged(state); return; }
-      if (message.type === "stderr") { state.stderr.append(String(message.data ?? "")); this.markProcessChanged(state); return; }
-      if (message.type === "error") {
-        state.error = String(message.error ?? "process launcher worker failed");
-        emitTelemetry({ event: "process_error", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, error_message: state.error }, state.ownerContext);
-        observeTerminal(-1, null);
-        return;
-      }
-      if (message.type === "exit") observeTerminal(typeof message.code === "number" ? message.code : -1, message.signal ?? null);
-    });
-    state.worker.once("error", (error: Error) => { state.error = error.message; observeTerminal(-1, null); });
-    state.worker.once("exit", (code) => { if (state.exitCode === null) observeTerminal(code === 0 ? -1 : code, null); });
     this.processes.set(state.id, state);
+    sharedLauncherHandlers.set(state.id, (message) => this.handleLauncherMessage(message));
+    this.launcherWorker.postMessage({ type: "launch", requestId: state.id, command, cwd });
     emitTelemetry({ event: "process_launch_queued", process_id: state.id, owner_caller_id: state.callerId, cwd: state.cwd, started_at: state.startedAt }, state.ownerContext);
     return { ...processResponseState(state.startedAt, true), process_id: state.id, pid: 0, cwd: state.cwd, running: true, launching: true } as const;
   }
@@ -1132,7 +1171,7 @@ export class ProcessManager {
       reassociated: Boolean(observer.caller_id && observer.caller_id !== state.callerId),
     }, observer);
     state.killRequested = true;
-    state.worker.postMessage({ type: "kill" });
+    this.launcherWorker.postMessage({ type: "kill", requestId: state.id });
     await Promise.race([state.done, delay(TASKKILL_TIMEOUT_MS + KILL_SETTLE_MS)]);
     if (state.exitCode === null) {
       emitTelemetry({
