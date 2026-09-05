@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdir as mkdirAsync, readFile as readFileAsync, readdir as readdirAsync, rename as renameAsync, stat as statAsync, unlink as unlinkAsync, writeFile as writeFileAsync } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
@@ -37,6 +37,18 @@ type CompletedProcessReceipt = {
   process_id: string;
   pid: number;
   caller_id: string;
+  request_id?: string;
+  audit_schema?: "process-output-evidence.v1";
+  retained_stdout_chars?: number;
+  retained_stderr_chars?: number;
+  retained_output_chars?: number;
+  retained_stdout_bytes?: number;
+  retained_stderr_bytes?: number;
+  retained_output_bytes?: number;
+  stdout_sha256?: string;
+  stderr_sha256?: string;
+  evidence_completeness?: "complete" | "bounded";
+  execution_outcome?: "success" | "nonzero_exit" | "signaled" | "error" | "unknown";
   command: string;
   command_truncated?: true;
   cwd: string;
@@ -478,6 +490,45 @@ function processResponseState(startedAt: string, running: boolean, finishedAt?: 
   };
 }
 
+// These fields describe the completeness and integrity of retained MCP execution evidence.
+// They do not score semantic task quality; output volume and exit status are evidence only.
+function processOutputAudit(
+  stdout: string,
+  stderr: string,
+  stdoutTruncated: boolean,
+  stderrTruncated: boolean,
+  exitCode: number | null,
+  signal: NodeJS.Signals | null,
+  error?: string,
+  requestId?: string,
+): Record<string, unknown> {
+  const retainedStdoutBytes = Buffer.byteLength(stdout, "utf8");
+  const retainedStderrBytes = Buffer.byteLength(stderr, "utf8");
+  const executionOutcome = error
+    ? "error"
+    : signal
+      ? "signaled"
+      : exitCode === 0
+        ? "success"
+        : exitCode === null
+          ? "unknown"
+          : "nonzero_exit";
+  return {
+    ...(requestId ? { request_id: requestId } : {}),
+    audit_schema: "process-output-evidence.v1",
+    retained_stdout_chars: stdout.length,
+    retained_stderr_chars: stderr.length,
+    retained_output_chars: stdout.length + stderr.length,
+    retained_stdout_bytes: retainedStdoutBytes,
+    retained_stderr_bytes: retainedStderrBytes,
+    retained_output_bytes: retainedStdoutBytes + retainedStderrBytes,
+    stdout_sha256: createHash("sha256").update(stdout, "utf8").digest("hex"),
+    stderr_sha256: createHash("sha256").update(stderr, "utf8").digest("hex"),
+    evidence_completeness: stdoutTruncated || stderrTruncated ? "bounded" : "complete",
+    execution_outcome: executionOutcome,
+  };
+}
+
 export class ProcessManager {
   private readonly processes = new Map<string, ProcessState>();
   private readonly outputCursors = new Map<string, OutputCursor>();
@@ -888,11 +939,13 @@ export class ProcessManager {
     // transport ceiling and destroy the only proof that a blocked read's process ran.
     const stdout = state.stdout.tail(MAX_CAPTURE_CHARS, MAX_CAPTURE_CHARS);
     const stderr = state.stderr.tail(MAX_CAPTURE_CHARS, MAX_CAPTURE_CHARS);
+    const audit = processOutputAudit(stdout.text, stderr.text, stdout.truncated, stderr.truncated, state.exitCode, state.signal ?? null, state.error, state.ownerContext.request_id);
     const receipt: CompletedProcessReceipt = {
       version: 1,
       process_id: state.id,
       pid: state.pid,
       caller_id: state.callerId,
+      ...audit,
       command,
       ...(state.command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}),
       cwd: state.cwd,
@@ -933,6 +986,7 @@ export class ProcessManager {
         process_id: state.id,
         pid: state.pid,
         owner_caller_id: state.callerId,
+        ...audit,
       }, state.ownerContext);
     } catch (error) {
       try { unlinkSync(temporaryPath); } catch { /* best-effort temporary cleanup */ }
@@ -952,13 +1006,14 @@ export class ProcessManager {
     const command = state.command.slice(0, MAX_COMMAND_REPORT_CHARS);
     const stdout = state.stdout.tail(MAX_CAPTURE_CHARS, MAX_CAPTURE_CHARS);
     const stderr = state.stderr.tail(MAX_CAPTURE_CHARS, MAX_CAPTURE_CHARS);
-    const receipt: CompletedProcessReceipt = { version: 1, process_id: state.id, pid: state.pid, caller_id: state.callerId, command, ...(state.command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}), cwd: state.cwd, stdout: stdout.text, stderr: stderr.text, ...(stdout.truncated ? { stdout_truncated: true as const } : {}), ...(stderr.truncated ? { stderr_truncated: true as const } : {}), exit_code: exitCode, signal, started_at: state.startedAt, finished_at: finishedAt, ...(state.error ? { error: state.error } : {}) };
+    const audit = processOutputAudit(stdout.text, stderr.text, stdout.truncated, stderr.truncated, exitCode, signal, state.error, state.ownerContext.request_id);
+    const receipt: CompletedProcessReceipt = { version: 1, process_id: state.id, pid: state.pid, caller_id: state.callerId, ...audit, command, ...(state.command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}), cwd: state.cwd, stdout: stdout.text, stderr: stderr.text, ...(stdout.truncated ? { stdout_truncated: true as const } : {}), ...(stderr.truncated ? { stderr_truncated: true as const } : {}), exit_code: exitCode, signal, started_at: state.startedAt, finished_at: finishedAt, ...(state.error ? { error: state.error } : {}) };
     const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
     try {
       await writeFileAsync(temporaryPath, JSON.stringify(receipt), { encoding: "utf8", flag: "wx" });
       await renameAsync(temporaryPath, path);
       await this.persistArchivedReceiptAsync(receipt);
-      emitTelemetry({ event: "process_receipt_persisted", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId }, state.ownerContext);
+      emitTelemetry({ event: "process_receipt_persisted", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, ...audit }, state.ownerContext);
     } catch (error) { emitTelemetry({ event: "process_receipt_error", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, error_message: error instanceof Error ? error.message : String(error) }, state.ownerContext); }
     finally { try { await unlinkAsync(temporaryPath); } catch {} }
   }
@@ -969,7 +1024,8 @@ export class ProcessManager {
     const observer = currentTelemetryContext();
     const observerCallerId = observer.caller_id ?? "caller_unknown";
     emitTelemetry({ event: "process_receipt_read", process_id: receipt.process_id, pid: receipt.pid, owner_caller_id: receipt.caller_id, caller_id: observerCallerId }, observer);
-    const legacy = { ...processResponseState(receipt.started_at, false, receipt.finished_at), process_id: receipt.process_id, pid: receipt.pid, command: receipt.command, ...(receipt.command_truncated ? { command_truncated: true } : {}), cwd: receipt.cwd, running: false, stdout: receipt.stdout.slice(-limit), stderr: receipt.stderr.slice(-limit), exit_code: receipt.exit_code, signal: receipt.signal, started_at: receipt.started_at, finished_at: receipt.finished_at, ...(receipt.stdout_truncated || receipt.stdout.length > limit ? { stdout_truncated: true } : {}), ...(receipt.stderr_truncated || receipt.stderr.length > limit ? { stderr_truncated: true } : {}), ...(receipt.error ? { error: receipt.error } : {}) };
+    const audit = processOutputAudit(receipt.stdout, receipt.stderr, Boolean(receipt.stdout_truncated), Boolean(receipt.stderr_truncated), receipt.exit_code, receipt.signal, receipt.error, receipt.request_id);
+    const legacy = { ...processResponseState(receipt.started_at, false, receipt.finished_at), process_id: receipt.process_id, pid: receipt.pid, ...audit, command: receipt.command, ...(receipt.command_truncated ? { command_truncated: true } : {}), cwd: receipt.cwd, running: false, stdout: receipt.stdout.slice(-limit), stderr: receipt.stderr.slice(-limit), exit_code: receipt.exit_code, signal: receipt.signal, started_at: receipt.started_at, finished_at: receipt.finished_at, ...(receipt.stdout_truncated || receipt.stdout.length > limit ? { stdout_truncated: true } : {}), ...(receipt.stderr_truncated || receipt.stderr.length > limit ? { stderr_truncated: true } : {}), ...(receipt.error ? { error: receipt.error } : {}) };
     const cursorExists = this.outputCursors.has(this.cursorKey(receipt.process_id, observerCallerId));
     const needsPaging = cursorExists || receipt.stdout.length + receipt.stderr.length > limit;
     return needsPaging ? this.pageOutput(legacy, receipt.stdout, receipt.stderr, observerCallerId, Boolean(receipt.stdout_truncated), Boolean(receipt.stderr_truncated), limit) : legacy;
@@ -1158,6 +1214,7 @@ export class ProcessManager {
       ...(state.launching ? { launching: true } : {}),
       stdout: stdout.text,
       stderr: stderr.text,
+      ...(state.exitCode !== null ? processOutputAudit(fullStdout.text, fullStderr.text, fullStdout.truncated, fullStderr.truncated, state.exitCode, state.signal ?? null, state.error, state.ownerContext.request_id) : {}),
       exit_code: state.exitCode,
       signal: state.signal ?? null,
       started_at: state.startedAt,
