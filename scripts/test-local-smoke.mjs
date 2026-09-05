@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -15,6 +16,18 @@ async function unusedPort() {
       const port = typeof address === "object" && address ? address.port : 0;
       server.close((error) => error ? reject(error) : resolvePort(port));
     });
+  });
+}
+async function requestWithHost(origin, host) {
+  return await new Promise((resolveRequest, reject) => {
+    const request = httpRequest(new URL("/mcp", origin), { method: "GET", headers: { Host: host } }, (response) => {
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => { body += chunk; });
+      response.on("end", () => resolveRequest({ status: response.statusCode ?? 0, body }));
+    });
+    request.once("error", reject);
+    request.end();
   });
 }
 async function waitHealth(origin, port) {
@@ -57,6 +70,13 @@ let serverStderr = "";
 server.stderr.on("data", (chunk) => { serverStderr += chunk.toString(); });
 try {
   await waitHealth(origin, port);
+  const publicHost = new URL(publicOrigin).hostname;
+  const bareHost = await requestWithHost(origin, publicHost);
+  assert.equal(bareHost.status, 401, `configured public host should reach auth, got ${bareHost.status}: ${bareHost.body}`);
+  const defaultPortHost = await requestWithHost(origin, `${publicHost}:443`);
+  assert.equal(defaultPortHost.status, 401, `configured public HTTPS host with explicit :443 should reach auth, got ${defaultPortHost.status}: ${defaultPortHost.body}`);
+  const nonDefaultPortHost = await requestWithHost(origin, `${publicHost}:444`);
+  assert.equal(nonDefaultPortHost.status, 403, `non-default public host port must remain rejected, got ${nonDefaultPortHost.status}: ${nonDefaultPortHost.body}`);
   const smoke = spawn(process.execPath, [resolve("scripts/smoke.mjs")], {
     cwd: resolve("."),
     env: {
