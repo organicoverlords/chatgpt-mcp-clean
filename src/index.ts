@@ -36,10 +36,7 @@ if (PORT !== 3000 && !backendMode) throw new Error("Alternate ports require MCP_
 if (!ORIGIN || !OWNER) throw new Error("MCP_PUBLIC_ORIGIN and TAILSCALE_OWNER_LOGIN are required");
 
 const publicOrigin = new URL(ORIGIN);
-const publicHostname = publicOrigin.hostname.toLowerCase();
-const canonicalSslipHostname = "5-61-91-127.sslip.io";
-const publicHostnameAllowed = publicHostname.endsWith(".ts.net") || publicHostname === canonicalSslipHostname;
-if (publicOrigin.protocol !== "https:" || !publicHostnameAllowed || publicOrigin.username || publicOrigin.password || publicOrigin.search || publicOrigin.hash) throw new Error("MCP_PUBLIC_ORIGIN must be an approved HTTPS .ts.net or canonical sslip production origin without credentials, query, or fragment");
+if (publicOrigin.protocol !== "https:" || !publicOrigin.hostname || publicOrigin.username || publicOrigin.password || publicOrigin.search || publicOrigin.hash) throw new Error("MCP_PUBLIC_ORIGIN must be an HTTPS origin without credentials, query, or fragment");
 if (!publicOrigin.pathname.endsWith("/")) publicOrigin.pathname += "/";
 const publicBasePath = publicOrigin.pathname === "/" ? "" : publicOrigin.pathname.replace(/\/$/, "");
 const publicAllowedHosts = new Set([publicOrigin.host.toLowerCase()]);
