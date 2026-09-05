@@ -310,42 +310,6 @@ function p3BuildSlotWaitError(command: string, code: string): string | undefined
   return undefined;
 }
 
-function residentPollingWaitError(command: string, code: string): string | undefined {
-  const hasSleep = /\bStart-Sleep\b/i.test(code);
-  if (!hasSleep) return undefined;
-
-  // A single interactive start_process must not become a resident scheduler. Keep short
-  // settling sleeps and owned child observation available, but reject the recurring shapes
-  // that park PowerShell for minutes while repeatedly reading external state.
-  const ownsChild = /\bStart-Process\b/i.test(code)
-    && /\.(?:WaitForExit|HasExited)\b/i.test(code);
-  if (ownsChild) return undefined;
-
-  const timeOrCountLoop = /\bwhile\s*\(|\bdo\s*\{|\bfor\s*\([^)]*(?:-lt|-le|\+\+|--)/i.test(code);
-  const readOnlyObserver = /\bGet-(?:Process|CimInstance|Counter|ScheduledTask|Job)\b/i.test(code)
-    || /\bGet-P3BuildPressureSnapshot\b/i.test(code)
-    || /\bTest-P3BuildPressureRetryAdmission\b/i.test(code)
-    || /\bgh(?:\.exe)?\s+(?:run|pr|issue|workflow)\s+(?:view|list|status|watch)\b/i.test(code)
-    || /\bInvoke-(?:WebRequest|RestMethod)\b/i.test(code)
-    || /\b(?:curl|curl\.exe)\b[^\r\n]*(?:status|health|ready|api\.github\.com)/i.test(code);
-  if (timeOrCountLoop && readOnlyObserver) {
-    return "resident polling loops are blocked; use a one-shot probe and yield to the normal worker cadence, or the existing remote observer for network-only continuous monitoring";
-  }
-
-  // Do not use a sleeping PowerShell process as a delayed scheduler. Ten-second settling
-  // waits remain valid; only an explicit >=30s initial delay is rejected here.
-  const initialSleep = code.match(/^\s*Start-Sleep\s+(?:(?:-Seconds|-S)\s+)?(\d+(?:\.\d+)?)/i);
-  if (initialSleep && Number(initialSleep[1]) >= 30) {
-    return "resident delayed execution is blocked; run a one-shot probe on the next worker cadence instead of keeping PowerShell asleep";
-  }
-  const initialMsSleep = code.match(/^\s*Start-Sleep\s+(?:-Milliseconds|-Ms)\s+(\d+)/i);
-  if (initialMsSleep && Number(initialMsSleep[1]) >= 30_000) {
-    return "resident delayed execution is blocked; run a one-shot probe on the next worker cadence instead of keeping PowerShell asleep";
-  }
-
-  return undefined;
-}
-
 function mcpProductionMutationError(command: string, code: string): string | undefined {
   const productionIngressError = "direct MCP production ingress mutation is blocked; use the documented redundant replacement/recovery scripts and prove the replacement off-path before changing serving production";
 
@@ -398,8 +362,6 @@ function powershellPreflightError(command: string): string | undefined {
   if (rootScanError) return rootScanError;
   const p3BuildWaitError = p3BuildSlotWaitError(command, code);
   if (p3BuildWaitError) return p3BuildWaitError;
-  const residentWaitError = residentPollingWaitError(command, code);
-  if (residentWaitError) return residentWaitError;
   const productionMutationError = mcpProductionMutationError(command, code);
   if (productionMutationError) return productionMutationError;
   const automaticVariable = String.raw`\$(?:(?:global|script|local|private):)?(?:PID|args)`;
@@ -644,6 +606,41 @@ export class ProcessManager {
       await writeFileAsync(temporaryPath, JSON.stringify(receipt), { encoding: "utf8", flag: "wx" });
       try { await renameAsync(temporaryPath, path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
     } finally { try { await unlinkAsync(temporaryPath); } catch {} }
+  }
+
+  private persistPreflightRejection(command: string, workingDirectory: string | undefined, callerId: string, reason: string): string | undefined {
+    if (!this.receiptArchiveDirectory) return undefined;
+    const rejectionId = randomUUID();
+    const rejectedAt = new Date().toISOString();
+    const dayDirectory = join(this.receiptArchiveDirectory, rejectedAt.slice(0, 10));
+    mkdirSync(dayDirectory, { recursive: true });
+    const path = join(dayDirectory, `rejected-${rejectionId}.json`);
+    const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    const record = {
+      version: 1,
+      kind: "process_preflight_rejection",
+      rejection_id: rejectionId,
+      caller_id: callerId,
+      command: command.slice(0, MAX_COMMAND_REPORT_CHARS),
+      ...(command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}),
+      working_directory: workingDirectory ?? null,
+      reason,
+      rejected_at: rejectedAt,
+    };
+    try {
+      writeFileSync(temporaryPath, JSON.stringify(record), { encoding: "utf8", flag: "wx" });
+      renameSync(temporaryPath, path);
+      this.pruneReceiptArchive();
+      return rejectionId;
+    } catch (error) {
+      try { unlinkSync(temporaryPath); } catch { /* best-effort temporary cleanup */ }
+      emitTelemetry({
+        event: "process_preflight_rejection_archive_error",
+        reason,
+        error_message: error instanceof Error ? error.message : String(error),
+      });
+      return undefined;
+    }
   }
 
   private async persistPreflightRejectionAsync(rejectionId: string, command: string, workingDirectory: string | undefined, callerId: string, reason: string): Promise<void> {

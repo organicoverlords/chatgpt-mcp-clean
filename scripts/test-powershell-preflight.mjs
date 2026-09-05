@@ -55,19 +55,11 @@ rejects("$pidToWait=20052; if(Get-Process -Id $pidToWait -ErrorAction SilentlyCo
 rejects("$lane='C:\\work'; $ownerPid=20052; while((Get-Date)-lt (Get-Date).AddMinutes(15)){if(-not (Get-Process -Id $ownerPid -ErrorAction SilentlyContinue)){break}; Start-Sleep -Milliseconds 200}; & (Join-Path $lane 'scripts\\Invoke-P3Build.ps1') -ProjectRoot $lane -Target Editor", /P3 build-slot polling/);
 rejects("Wait-Process -Id 20052; & 'C:\\work\\scripts\\Invoke-P3HotSourceBuild.ps1' -Module P3Gameplay", /P3 build-slot waits/);
 rejects("$lane='C:\\work'; $ubt='C:\\UE\\UnrealBuildTool.dll'; $slot=[Threading.Mutex]::new($false,'Global\\P3BuildGraphSlot_v3_1'); $held=$slot.WaitOne(120000); & $dot $ubt p3Editor Win64 Development '-Project=C:\\work\\p3.uproject' -Module=p3", /P3 build-slot mutex waits/);
-rejects("$deadline=(Get-Date).AddMinutes(20); while((Get-Date)-lt $deadline){$m=Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory; Write-Output $m.PageReadsPerSec; Start-Sleep -Seconds 5}", /resident polling loops/);
-rejects("for($i=1;$i -le 24;$i++){gh run view 123 --repo owner/private --json status; Start-Sleep -Seconds 15}", /resident polling loops/);
-rejects("Start-Sleep -Seconds 60; gh run view 123 --repo owner/private --json status", /resident delayed execution/);
-rejects("Start-Sleep -Milliseconds 30000; Write-Output 'later'", /resident delayed execution/);
 
 const ordinaryWait = await run("Wait-Process -Id 2147483647 -ErrorAction SilentlyContinue; Write-Output 'ORDINARY_WAIT_ALLOWED'", "caller_ordinary_wait_allowed");
 assert.match(ordinaryWait.stdout, /ORDINARY_WAIT_ALLOWED/);
 const ordinaryMutex = await run("$m=[Threading.Mutex]::new($false,'Local\\McpOrdinaryMutex'); try { [void]$m.WaitOne(1); Write-Output 'ORDINARY_MUTEX_ALLOWED' } finally { try { $m.ReleaseMutex() } catch {}; $m.Dispose() }", "caller_ordinary_mutex_allowed");
 assert.match(ordinaryMutex.stdout, /ORDINARY_MUTEX_ALLOWED/);
-const shortWorkLoop = await run("for($i=0;$i -lt 2;$i++){Write-Output ('WORK='+$i); Start-Sleep -Milliseconds 1}", "caller_short_work_loop_allowed");
-assert.match(shortWorkLoop.stdout, /WORK=1/);
-const shortSettlingSleep = await run("Start-Sleep -Milliseconds 5; Write-Output 'SHORT_SLEEP_ALLOWED'", "caller_short_sleep_allowed");
-assert.match(shortSettlingSleep.stdout, /SHORT_SLEEP_ALLOWED/);
 
 const boundedRoot = mkdtempSync(join(tmpdir(), "mcp-bounded-recursion-"));
 try {
