@@ -301,6 +301,9 @@ function p3BuildSlotWaitError(command: string, code: string): string | undefined
 function mcpProductionMutationError(command: string, code: string): string | undefined {
   const productionIngressError = "direct MCP production ingress mutation is blocked; use the documented redundant replacement/recovery scripts and prove the replacement off-path before changing serving production";
 
+  const invokesObsoleteDatedCutoverHelper = /(?:^|[\\/])minimal-connectors[\\/]cutover-production-\d{8}\.ps1\b/i.test(command);
+  if (invokesObsoleteDatedCutoverHelper) return productionIngressError;
+
   const mutatesCaddy = /\/etc\/caddy\/Caddyfile\b/i.test(command) && (
     /(?:^|[\s;&|])(?:cp|mv|rm|install|tee)\b/i.test(command)
     || /\bsed\s+-[^\s]*i\b/i.test(command)

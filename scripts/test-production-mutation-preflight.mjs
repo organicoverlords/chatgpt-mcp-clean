@@ -28,6 +28,11 @@ rejects("$h=Invoke-RestMethod http://127.0.0.1:3011/health; Stop-Process -Id $h.
 rejects("$h=Invoke-RestMethod http://127.0.0.1:3003/health; taskkill.exe /PID $h.pid /T /F");
 rejects("Stop-Service 'WireGuardTunnel$mcp-wireguard'");
 rejects("Stop-ScheduledTask -TaskName 'McpV3Production3011'");
+rejects("& 'C:\\Users\\Example\\ChatGPTMcpClean\\minimal-connectors\\cutover-production-20260905.ps1'");
+
+const supportedLauncher = await run("if ($false) { & 'C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\launch-production.ps1' }; Write-Output 'SUPPORTED_PRODUCTION_LAUNCHER_ALLOWED'");
+assert.equal(supportedLauncher.exit_code, 0);
+assert.match(supportedLauncher.stdout, /SUPPORTED_PRODUCTION_LAUNCHER_ALLOWED/);
 
 const benign = await run("Write-Output '/etc/caddy/Caddyfile'; Write-Output 'http://127.0.0.1:3012/health'");
 assert.equal(benign.exit_code, 0);
