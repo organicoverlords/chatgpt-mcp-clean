@@ -298,12 +298,45 @@ function p3BuildSlotWaitError(command: string, code: string): string | undefined
   return undefined;
 }
 
+function mcpProductionMutationError(command: string, code: string): string | undefined {
+  const productionIngressError = "direct MCP production ingress mutation is blocked; use the documented redundant replacement/recovery scripts and prove the replacement off-path before changing serving production";
+
+  const mutatesCaddy = /\/etc\/caddy\/Caddyfile\b/i.test(command) && (
+    /(?:^|[\s;&|])(?:cp|mv|rm|install|tee)\b/i.test(command)
+    || /\bsed\s+-[^\s]*i\b/i.test(command)
+    || /(?:>|>>)\s*\/?etc\/caddy\/Caddyfile\b/i.test(command)
+    || /\b(?:Set-Content|Add-Content|Out-File)\b/i.test(code)
+  );
+  const reloadsCaddy = /\b(?:systemctl\s+(?:reload|restart)\s+caddy|caddy\s+(?:reload|stop))\b/i.test(command);
+  if (mutatesCaddy || reloadsCaddy) return productionIngressError;
+
+  const mutatesProductionPortProxy = /\bnetsh(?:\.exe)?\s+interface\s+portproxy\s+(?:add|set|delete|reset)\b/i.test(command)
+    && /(?:10\.203\.0\.2|(?:listen|connect)port\s*=\s*3011|\b3011\b)/i.test(command);
+  if (mutatesProductionPortProxy) return productionIngressError;
+
+  const mutatesWireGuardService = /\b(?:Stop-Service|Restart-Service|Set-Service|sc(?:\.exe)?\s+(?:stop|delete|config))\b/i.test(code)
+    && /WireGuardTunnel\$mcp-wireguard/i.test(command);
+  if (mutatesWireGuardService) return productionIngressError;
+
+  const mutatesProductionTask = /(?:McpV3Production3011|McpVpsEdgeTunnel)/i.test(command)
+    && /\b(?:Stop-ScheduledTask|Disable-ScheduledTask|Unregister-ScheduledTask|schtasks(?:\.exe)?\s+\/(?:End|Delete|Change))\b/i.test(code);
+  if (mutatesProductionTask) return productionIngressError;
+
+  const terminatesProcess = /\b(?:Stop-Process|taskkill(?:\.exe)?|kill-process)\b/i.test(code);
+  const identifiesServingMcp = /(?:127\.0\.0\.1:(?:3011|3003)\/health|10\.203\.0\.2:3011|McpV3Production3011|ChatGPTMcpMinimal|dist[\\/]front-door\.js|dist[\\/]index\.js)/i.test(command);
+  if (terminatesProcess && identifiesServingMcp) return productionIngressError;
+
+  return undefined;
+}
+
 function powershellPreflightError(command: string): string | undefined {
   const code = powershellCodeMask(command);
   const rootScanError = driveRootRecursiveScanError(command, code);
   if (rootScanError) return rootScanError;
   const p3BuildWaitError = p3BuildSlotWaitError(command, code);
   if (p3BuildWaitError) return p3BuildWaitError;
+  const productionMutationError = mcpProductionMutationError(command, code);
+  if (productionMutationError) return productionMutationError;
   const automaticVariable = String.raw`\$(?:(?:global|script|local|private):)?(?:PID|args)`;
   const writePattern = new RegExp(`${automaticVariable}\\s*(?:\\+\\+|--|[+*/%?-]?=)|(?:\\+\\+|--)\\s*${automaticVariable}`, "i");
   if (writePattern.test(code)) {
