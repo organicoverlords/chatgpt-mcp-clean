@@ -276,9 +276,17 @@ function p3BuildSlotWaitError(command: string, code: string): string | undefined
   const invokesP3Build = /\bInvoke-P3(?:HotSource)?Build\.ps1\b/i.test(command);
   const waitProcess = /\bWait-Process\b/i.test(code);
   const ubtWaitMarker = /\b(?:WAIT_FOREIGN_UBT|FOREIGN_UBT|WAIT_OWNER_PID|UnrealBuildTool|UBT)\b/i.test(command);
+  const directP3Ubt = /\bUnrealBuildTool\.dll\b/i.test(command)
+    && /\bp3Editor\b/i.test(command)
+    && /(?:-Project=|\bp3\.uproject\b)/i.test(command);
+  const waitsOnP3BuildMutex = /\bP3BuildGraphSlot_v3_[0-9]+\b/i.test(command)
+    && /\.WaitOne\s*\(/i.test(code);
 
   if (waitProcess && (invokesP3Build || ubtWaitMarker)) {
     return "interactive P3 build-slot waits are blocked; let the P3 build wrapper fail fast and continue other scope";
+  }
+  if (waitsOnP3BuildMutex && directP3Ubt) {
+    return "interactive P3 build-slot mutex waits are blocked; use the P3 build wrapper so contention fails fast";
   }
 
   const pollingForeignProcess = /\b(?:while|do)\b/i.test(code)
