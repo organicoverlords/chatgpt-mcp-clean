@@ -3,7 +3,7 @@
 <!-- PROJECT-TIMELINE:BEGIN -->
 ## Project timeline
 
-- [2026-09-05] Promoted an OS-level WireGuard link (VPS `10.203.0.1/30` to Windows `10.203.0.2/30`) to Caddy's primary MCP upstream while retaining the four independent native OpenSSH lanes as ordered health-checked failover; the Windows tunnel service auto-starts and the persistent portproxy/firewall boundary exposes only `10.203.0.2:3011` from `10.203.0.1`.
+- [2026-09-05] Promoted an OS-level WireGuard link (VPS `10.203.0.1/30` to Windows `10.203.0.2/30`) to Caddy's primary MCP upstream while retaining the four independent native OpenSSH lanes as ordered health-checked failover; the Windows tunnel service auto-starts and a persistent portproxy bound to `10.203.0.2:3011` forwards to the loopback backend; no separate `MCP WireGuard 3011` Windows firewall rule was created.
 - [2026-09-05] Replaced the single Python/AsyncSSH VPS reverse tunnel with four independent native OpenSSH lanes behind Caddy round-robin health-aware routing; one-lane failure now leaves the other three serving and the existing recovery task recreates only the missing lane.
 - [2026-09-04] Removed the orphaned public-health monitor and uncalled `keepalive.ps1 -Role Legacy` supervisor mode left behind by the retired port-3000 cutover path.
 - [2026-09-04] Removed the obsolete one-time front-door cutover script that could repoint Tailscale Funnel back to dead legacy port 3000; the surviving fallback is the existing root Funnel to port 3003.
