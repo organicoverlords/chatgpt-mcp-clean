@@ -28,16 +28,23 @@ function backend(at, requestId, durationMs, status) {
   return JSON.stringify({ event: "response_finish", at, request_id: requestId, duration_ms: durationMs, status });
 }
 
+function edgeOther(tsSeconds) {
+  return JSON.stringify({ ts: tsSeconds, request: { method: "GET", uri: "/health" }, duration: 0.001, status: 200 });
+}
+
 try {
   const baseSeconds = Date.parse(start) / 1000;
-  writeFileSync(edgePath, [
+  const edgePayload = [
+    edgeOther(baseSeconds - 1),
     edge(baseSeconds + 10, "secret-request-a", 0.100, 200),
     edge(baseSeconds + 20, "secret-request-b", 0.300, 200),
     edge(baseSeconds + 30, "secret-request-c", 0.050, 202),
     edge(baseSeconds + 40, "secret-request-missing", 0.100, 200),
     edge(baseSeconds + 50, undefined, 0.075, 200),
+    edgeOther(baseSeconds + 61),
     "{malformed",
-  ].join("\n") + "\n", "utf8");
+  ].join("\n") + "\n";
+  writeFileSync(edgePath, edgePayload, "utf8");
   writeFileSync(backendPath, [
     backend("2026-09-05T00:00:10.000Z", "secret-request-a", 80, 200),
     backend("2026-09-05T00:00:20.000Z", "secret-request-b", 150, 200),
@@ -48,6 +55,9 @@ try {
 
   const stdout = execFileSync(process.execPath, [analyzer, edgePath, backendPath, start, end], { encoding: "utf8", windowsHide: true });
   const report = JSON.parse(stdout);
+  assert.equal(report.edge_source_window.timestamped_rows, 7);
+  assert.equal(report.edge_source_window.requested_start_covered, true);
+  assert.equal(report.edge_source_window.requested_end_covered, true);
   assert.equal(report.edge_mcp_posts, 5);
   assert.equal(report.edge_posts_with_request_id, 4);
   assert.equal(report.edge_posts_without_request_id, 1);
@@ -59,10 +69,15 @@ try {
   assert.deepEqual(report.edge_minus_backend_duration_ms, { count: 3, min: 5, p50: 20, p95: 150, p99: 150, max: 150 });
   assert.deepEqual(report.proxy_overhead_thresholds, { over_50ms: 1, over_100ms: 1, over_250ms: 0, below_minus_10ms: 0 });
   assert.equal(report.privacy.raw_request_ids_emitted, false);
+
+  const stdinStdout = execFileSync(process.execPath, [analyzer, "-", backendPath, start, end], { input: edgePayload, encoding: "utf8", windowsHide: true });
+  const stdinReport = JSON.parse(stdinStdout);
+  assert.deepEqual(stdinReport, report);
+
   for (const secret of ["secret-request-a", "secret-request-b", "secret-request-c", "secret-request-missing", "secret-request-unrelated"]) {
     assert.ok(!stdout.includes(secret), `aggregate output leaked request id: ${secret}`);
   }
-  console.log("PASS edge_backend_correlation matched_requests=true status_check=true proxy_overhead=true raw_request_ids_emitted=false");
+  console.log("PASS edge_backend_correlation matched_requests=true status_check=true proxy_overhead=true stdin_edge=true source_coverage=true raw_request_ids_emitted=false");
 } finally {
   rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
 }

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import readline from "node:readline";
 
 function usage() {
-  console.error("usage: node scripts/analyze-edge-backend-correlation.mjs <caddy-access.jsonl> <transport.jsonl> <start-iso> <end-iso>");
+  console.error("usage: node scripts/analyze-edge-backend-correlation.mjs <caddy-access.jsonl|-> <transport.jsonl> <start-iso> <end-iso>");
   process.exit(2);
 }
 
@@ -38,7 +38,11 @@ function roundMs(value) {
 const edgeRequests = [];
 let edgeMalformedLines = 0;
 let edgePostsWithoutRequestId = 0;
-const edgeInput = fs.createReadStream(edgePath, { encoding: "utf8" });
+let edgeSourceTimestampedRows = 0;
+let edgeSourceStartMs = Number.POSITIVE_INFINITY;
+let edgeSourceEndMs = Number.NEGATIVE_INFINITY;
+const edgeInput = edgePath === "-" ? process.stdin : fs.createReadStream(edgePath, { encoding: "utf8" });
+if (edgePath === "-") process.stdin.setEncoding("utf8");
 for await (const line of readline.createInterface({ input: edgeInput, crlfDelay: Infinity })) {
   if (!line.trim()) continue;
   let event;
@@ -48,9 +52,14 @@ for await (const line of readline.createInterface({ input: edgeInput, crlfDelay:
     edgeMalformedLines++;
     continue;
   }
+  const eventMs = Number(event.ts) * 1000;
+  if (Number.isFinite(eventMs)) {
+    edgeSourceTimestampedRows++;
+    edgeSourceStartMs = Math.min(edgeSourceStartMs, eventMs);
+    edgeSourceEndMs = Math.max(edgeSourceEndMs, eventMs);
+  }
   const request = event.request ?? {};
   if (request.method !== "POST" || request.uri !== "/mcp") continue;
-  const eventMs = Number(event.ts) * 1000;
   if (!Number.isFinite(eventMs) || eventMs < startMs || eventMs > endMs) continue;
   const requestId = header(event.resp_headers, "X-Shell-Mcp-Request-Id");
   if (!requestId) edgePostsWithoutRequestId++;
@@ -104,6 +113,15 @@ for (const edge of edgeRequests) {
 
 deltas.sort((a, b) => a - b);
 const report = {
+  edge_source_window: {
+    timestamped_rows: edgeSourceTimestampedRows,
+    start: edgeSourceTimestampedRows ? new Date(edgeSourceStartMs).toISOString() : null,
+    end: edgeSourceTimestampedRows ? new Date(edgeSourceEndMs).toISOString() : null,
+    requested_start: new Date(startMs).toISOString(),
+    requested_end: new Date(endMs).toISOString(),
+    requested_start_covered: edgeSourceTimestampedRows > 0 && edgeSourceStartMs <= startMs,
+    requested_end_covered: edgeSourceTimestampedRows > 0 && edgeSourceEndMs >= endMs,
+  },
   window: { start: new Date(startMs).toISOString(), end: new Date(endMs).toISOString() },
   edge_mcp_posts: edgeRequests.length,
   edge_posts_with_request_id: edgeRequests.length - edgePostsWithoutRequestId,
