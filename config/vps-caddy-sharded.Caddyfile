@@ -1,7 +1,7 @@
 {
 	servers {
 		timeouts {
-			idle 15s
+			idle 2s
 		}
 	}
 }
@@ -24,9 +24,6 @@
 
 	handle {
 		reverse_proxy 10.203.0.2:3011 {
-			health_uri /health
-			health_interval 5s
-			health_timeout 2s
 		}
 	}
 
