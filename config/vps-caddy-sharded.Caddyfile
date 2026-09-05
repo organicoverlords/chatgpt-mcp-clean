@@ -1,3 +1,11 @@
+{
+	servers {
+		timeouts {
+			idle 15s
+		}
+	}
+}
+
 5-61-91-127.sslip.io {
 	handle /edge-status {
 		root * /var/lib/mcp-edge
@@ -15,15 +23,10 @@
 	}
 
 	handle {
-		reverse_proxy 10.203.0.2:3011 127.0.0.1:3101 127.0.0.1:3102 127.0.0.1:3103 127.0.0.1:3104 {
-			lb_policy first
-			lb_try_duration 2s
-			lb_try_interval 50ms
+		reverse_proxy 10.203.0.2:3011 {
 			health_uri /health
 			health_interval 5s
 			health_timeout 2s
-			fail_duration 30s
-			max_fails 1
 		}
 	}
 

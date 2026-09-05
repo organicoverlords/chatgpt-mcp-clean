@@ -6,7 +6,7 @@ const caddy = fs.readFileSync(new URL('../config/vps-caddy-sharded.Caddyfile', i
 
 for (const port of [3101, 3102, 3103, 3104]) {
   assert.match(launcher, new RegExp(`\\b${port}\\b`), `launcher must own fallback lane ${port}`);
-  assert.match(caddy, new RegExp(`127\\.0\\.0\\.1:${port}\\b`), `Caddy must retain fallback lane ${port}`);
+  assert.doesNotMatch(caddy, new RegExp(`127\\.0\\.0\\.1:${port}\\b`), `Caddy must not automatically route public MCP traffic through fallback lane ${port}`);
 }
 assert.match(launcher, /Git\\usr\\bin\\ssh\.exe/i, 'fallback launcher must use native OpenSSH');
 assert.match(launcher, /ExitOnForwardFailure=yes/);
@@ -18,14 +18,10 @@ const proxy = caddy.match(/reverse_proxy\s+([^\n{]+)\s*\{/);
 assert.ok(proxy, 'Caddy reverse_proxy upstream list must exist');
 assert.deepEqual(
   proxy[1].trim().split(/\s+/),
-  ['10.203.0.2:3011', '127.0.0.1:3101', '127.0.0.1:3102', '127.0.0.1:3103', '127.0.0.1:3104'],
-  'WireGuard must be first, with all four native SSH lanes retained as ordered fallback',
+  ['10.203.0.2:3011'],
+  'public MCP routing must stay pinned to the WireGuard upstream',
 );
-assert.match(caddy, /lb_policy first/);
-assert.doesNotMatch(caddy, /lb_policy round_robin/);
-assert.match(caddy, /lb_try_duration 2s/);
-assert.match(caddy, /health_uri \/health/);
-assert.match(caddy, /max_fails 1/);
+assert.match(caddy, /timeouts\s*\{[\s\S]*idle 15s/, 'public client idle connections must be reaped after 15s');
 assert.doesNotMatch(caddy, /reverse_proxy\s+127\.0\.0\.1:3011(?:\s|$)/, 'Caddy must not restore the retired single reverse-SSH ingress');
 
 console.log('vps-wireguard-primary-contract: PASS');
