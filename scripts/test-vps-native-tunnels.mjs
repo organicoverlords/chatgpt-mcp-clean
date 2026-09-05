@@ -23,7 +23,12 @@ assert.deepEqual(
 );
 assert.match(caddy, /timeouts\s*\{[\s\S]*idle 15s/, 'public client idle connections must be reaped after 15s');
 assert.match(caddy, /transport\s+http\s*\{[\s\S]*keepalive 30s[\s\S]*keepalive_idle_conns_per_host 4/, 'Caddy upstream idle pool must be time-bounded and capped per host');
-assert.doesNotMatch(caddy, /\\bhealth_(?:uri|interval|timeout)\\b/, 'Caddy must not restore active upstream health polling');
+const activeHealthDirective = /\bhealth_(?:uri|interval|timeout)\b/;
+for (const directive of ['health_uri /health', 'health_interval 5s', 'health_timeout 2s']) {
+  assert.throws(() => assert.doesNotMatch(`${caddy}\n${directive}`, activeHealthDirective),
+    assert.AssertionError, `health polling guard must reject ${directive}`);
+}
+assert.doesNotMatch(caddy, activeHealthDirective, 'Caddy must not restore active upstream health polling');
 assert.doesNotMatch(caddy, /reverse_proxy\s+127\.0\.0\.1:3011(?:\s|$)/, 'Caddy must not restore the retired single reverse-SSH ingress');
 
 console.log('vps-wireguard-primary-contract: PASS');
