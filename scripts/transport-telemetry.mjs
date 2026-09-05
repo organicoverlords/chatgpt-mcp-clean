@@ -42,7 +42,7 @@ await telemetry.withTelemetryContext({
   connection_id: connectionId,
   session_id: sessionId,
 }, async () => {
-  started = manager.start(rawCommand, undefined, "caller_owner");
+  started = await manager.startWithWait(rawCommand, undefined, "caller_owner", 17);
 });
 
 const deadline = Date.now() + 10_000;
@@ -54,7 +54,7 @@ do {
     connection_id: "connection_reconnected",
     session_id: "session_reconnected",
   }, async () => {
-    state = manager.read(started.process_id);
+    state = await manager.readWithWait(started.process_id, undefined, 23);
   });
   if (!state.running) break;
   await new Promise((resolve) => setTimeout(resolve, 10));
@@ -66,7 +66,9 @@ assert.match(state.stdout, /TELEMETRY_OK/);
 const opened = events.find((event) => event.event === "connection_open");
 const closed = events.find((event) => event.event === "connection_close");
 const processStarted = events.find((event) => event.event === "process_started");
-const processRead = events.find((event) => event.event === "process_read");
+const startWait = events.find((event) => event.event === "process_wait_requested" && event.action === "start");
+const readWait = events.find((event) => event.event === "process_wait_requested" && event.action === "read");
+const processRead = events.find((event) => event.event === "process_read" && event.request_id === "request_read");
 const processExited = events.find((event) => event.event === "process_exit_observed");
 
 assert.equal(opened.connection_id, connectionId);
@@ -77,6 +79,12 @@ assert.equal(processStarted.owner_caller_id, "caller_owner");
 assert.equal(processStarted.request_id, "request_start");
 assert.equal(processStarted.command_hash, undefined, "guessable command fingerprints must not enter telemetry");
 assert.equal(processStarted.command, undefined, "raw commands must not enter telemetry");
+assert.equal(startWait.request_id, "request_start");
+assert.equal(startWait.process_id, started.process_id);
+assert.equal(startWait.requested_wait_ms, 17);
+assert.equal(readWait.request_id, "request_read");
+assert.equal(readWait.process_id, started.process_id);
+assert.equal(readWait.requested_wait_ms, 23);
 assert.equal(processRead.owner_caller_id, "caller_owner");
 assert.equal(processRead.caller_id, "caller_reconnected");
 assert.equal(processRead.reassociated, true);

@@ -1057,6 +1057,12 @@ export class ProcessManager {
     const cwd = await boundedValidatedCwd(workingDirectory);
     const started = this.start(command, cwd, callerId);
     const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
+    emitTelemetry({
+      event: "process_wait_requested",
+      action: "start",
+      process_id: started.process_id,
+      requested_wait_ms: boundedWaitMs,
+    });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
     if (!state || state.exitCode !== null) return this.read(started.process_id, MAX_READ_CHARS, false);
@@ -1122,6 +1128,12 @@ export class ProcessManager {
 
   async readWithWait(processId: string, maxChars = MAX_READ_CHARS, waitMs = 0): Promise<Record<string, unknown>> {
     const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
+    emitTelemetry({
+      event: "process_wait_requested",
+      action: "read",
+      process_id: processId,
+      requested_wait_ms: boundedWaitMs,
+    });
     const state = this.processes.get(processId);
     if (!state) {
       const receipt = await this.readReceiptAsync(processId, maxChars);
