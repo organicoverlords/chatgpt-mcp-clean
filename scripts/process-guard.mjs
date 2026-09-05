@@ -77,6 +77,18 @@ try {
   for (const process of liveProcesses) await concurrencyManager.kill(process.process_id).catch(() => undefined);
 }
 
+const drainStatusManager = new ProcessManager();
+let drainStatusProcess;
+try {
+  assert.equal(drainStatusManager.liveProcessCount(), 0, "fresh process manager must report no live processes");
+  drainStatusProcess = drainStatusManager.start("Start-Sleep -Seconds 10", undefined, "caller_drain_status_test");
+  assert.equal(drainStatusManager.liveProcessCount(), 1, "live process count must expose a replacement drain blocker");
+  await drainStatusManager.kill(drainStatusProcess.process_id);
+  assert.equal(drainStatusManager.liveProcessCount(), 0, "live process count must clear after the managed process exits");
+} finally {
+  if (drainStatusProcess) await drainStatusManager.kill(drainStatusProcess.process_id).catch(() => undefined);
+}
+
 const receiptDirectory = mkdtempSync(join(tmpdir(), "shell-mcp-process-receipts-"));
 try {
   const beforeRestart = new ProcessManager({ receiptDirectory });
