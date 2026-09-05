@@ -298,6 +298,42 @@ function p3BuildSlotWaitError(command: string, code: string): string | undefined
   return undefined;
 }
 
+function residentPollingWaitError(command: string, code: string): string | undefined {
+  const hasSleep = /\bStart-Sleep\b/i.test(code);
+  if (!hasSleep) return undefined;
+
+  // A single interactive start_process must not become a resident scheduler. Keep short
+  // settling sleeps and owned child observation available, but reject the recurring shapes
+  // that park PowerShell for minutes while repeatedly reading external state.
+  const ownsChild = /\bStart-Process\b/i.test(code)
+    && /\.(?:WaitForExit|HasExited)\b/i.test(code);
+  if (ownsChild) return undefined;
+
+  const timeOrCountLoop = /\bwhile\s*\(|\bdo\s*\{|\bfor\s*\([^)]*(?:-lt|-le|\+\+|--)/i.test(code);
+  const readOnlyObserver = /\bGet-(?:Process|CimInstance|Counter|ScheduledTask|Job)\b/i.test(code)
+    || /\bGet-P3BuildPressureSnapshot\b/i.test(code)
+    || /\bTest-P3BuildPressureRetryAdmission\b/i.test(code)
+    || /\bgh(?:\.exe)?\s+(?:run|pr|issue|workflow)\s+(?:view|list|status|watch)\b/i.test(code)
+    || /\bInvoke-(?:WebRequest|RestMethod)\b/i.test(code)
+    || /\b(?:curl|curl\.exe)\b[^\r\n]*(?:status|health|ready|api\.github\.com)/i.test(code);
+  if (timeOrCountLoop && readOnlyObserver) {
+    return "resident polling loops are blocked; use a one-shot probe and yield to the normal worker cadence, or the existing remote observer for network-only continuous monitoring";
+  }
+
+  // Do not use a sleeping PowerShell process as a delayed scheduler. Ten-second settling
+  // waits remain valid; only an explicit >=30s initial delay is rejected here.
+  const initialSleep = code.match(/^\s*Start-Sleep\s+(?:(?:-Seconds|-S)\s+)?(\d+(?:\.\d+)?)/i);
+  if (initialSleep && Number(initialSleep[1]) >= 30) {
+    return "resident delayed execution is blocked; run a one-shot probe on the next worker cadence instead of keeping PowerShell asleep";
+  }
+  const initialMsSleep = code.match(/^\s*Start-Sleep\s+(?:-Milliseconds|-Ms)\s+(\d+)/i);
+  if (initialMsSleep && Number(initialMsSleep[1]) >= 30_000) {
+    return "resident delayed execution is blocked; run a one-shot probe on the next worker cadence instead of keeping PowerShell asleep";
+  }
+
+  return undefined;
+}
+
 function mcpProductionMutationError(command: string, code: string): string | undefined {
   const productionIngressError = "direct MCP production ingress mutation is blocked; use the documented redundant replacement/recovery scripts and prove the replacement off-path before changing serving production";
 
@@ -338,6 +374,8 @@ function powershellPreflightError(command: string): string | undefined {
   if (rootScanError) return rootScanError;
   const p3BuildWaitError = p3BuildSlotWaitError(command, code);
   if (p3BuildWaitError) return p3BuildWaitError;
+  const residentWaitError = residentPollingWaitError(command, code);
+  if (residentWaitError) return residentWaitError;
   const productionMutationError = mcpProductionMutationError(command, code);
   if (productionMutationError) return productionMutationError;
   const automaticVariable = String.raw`\$(?:(?:global|script|local|private):)?(?:PID|args)`;
