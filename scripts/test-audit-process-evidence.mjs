@@ -38,6 +38,7 @@ try {
 
   const p2 = receipt({
     process_id: "p2",
+    audit_schema: undefined,
     request_id: null,
     stdout: "SECRET-BOUNDED",
     stderr: "err",
@@ -68,6 +69,19 @@ try {
   });
   writeFileSync(path.join(root, "p3.json"), JSON.stringify(p3));
 
+  const p4 = receipt({
+    process_id: "p4",
+    caller_id: "caller_c",
+    request_id: null,
+    stdout: "ok",
+    retained_stdout_bytes: 2,
+    retained_output_bytes: 2,
+    stdout_sha256: undefined,
+    stderr_sha256: undefined,
+    finished_at: "2026-09-05T20:04:00.000Z",
+  });
+  writeFileSync(path.join(root, "p4.json"), JSON.stringify(p4));
+
   const old = receipt({ process_id: "old", finished_at: "2026-09-01T20:00:00.000Z" });
   writeFileSync(path.join(root, "old.json"), JSON.stringify(old));
   writeFileSync(path.join(root, "malformed.json"), "{");
@@ -84,19 +98,31 @@ try {
   assert.equal(report.semantics.aggregate_only, true);
   assert.equal(report.semantics.semantic_work_quality_scored, false);
   assert.equal(report.semantics.caller_id_is_opaque_not_named_worker_identity, true);
-  assert.equal(report.source.deduplicated_process_receipts, 3);
+  assert.equal(report.source.deduplicated_process_receipts, 4);
   assert.equal(report.source.malformed_json_files, 1);
   assert.equal(report.source.non_receipt_json_files, 1);
-  assert.equal(report.totals.process_count, 3);
-  assert.equal(report.totals.total_retained_output_bytes, 21);
-  assert.equal(report.totals.completeness.complete, 2);
+  assert.equal(report.totals.process_count, 4);
+  assert.equal(report.totals.total_retained_output_bytes, 23);
+  assert.equal(report.totals.completeness.complete, 3);
   assert.equal(report.totals.completeness.bounded, 1);
-  assert.equal(report.totals.outcomes.success, 1);
+  assert.equal(report.totals.outcomes.success, 2);
   assert.equal(report.totals.outcomes.nonzero_exit, 1);
   assert.equal(report.totals.outcomes.signaled, 1);
-  assert.equal(report.totals.missing_request_id_count, 1);
+  assert.equal(report.totals.missing_request_id_count, 2);
+  assert.equal(report.totals.audit_v1_receipt_count, 3);
+  assert.equal(report.totals.non_audit_v1_receipt_count, 1);
+  assert.equal(report.totals.audit_v1_missing_request_id_count, 1);
+  assert.equal(report.totals.audit_v1_missing_integrity_metadata_count, 1);
+  assert.equal(report.totals.audit_v1_coverage_pct, 75);
+  assert.equal(report.totals.request_id_coverage_pct, 50);
+  assert.equal(report.totals.integrity_metadata_coverage_pct, 75);
+  assert.equal(report.totals.audit_v1_request_id_coverage_pct, 66.67);
+  assert.equal(report.totals.audit_v1_integrity_metadata_coverage_pct, 66.67);
+  assert.equal(report.totals.first_finished_at, "2026-09-05T20:00:01.000Z");
+  assert.equal(report.totals.last_finished_at, "2026-09-05T20:04:00.000Z");
   assert.equal(report.totals.hash_verification.verified, 2);
   assert.equal(report.totals.hash_verification.mismatch, 1);
+  assert.equal(report.totals.hash_verification.unavailable, 1);
   const callerA = report.callers.find((row) => row.caller_id === "caller_a");
   assert.equal(callerA.process_count, 2);
   assert.equal(callerA.total_retained_output_bytes, 20);
@@ -106,6 +132,10 @@ try {
   const callerB = report.callers.find((row) => row.caller_id === "caller_b");
   assert.equal(callerB.process_count, 1);
   assert.equal(callerB.hash_verification.mismatch, 1);
+  const callerC = report.callers.find((row) => row.caller_id === "caller_c");
+  assert.equal(callerC.process_count, 1);
+  assert.equal(callerC.audit_v1_missing_request_id_count, 1);
+  assert.equal(callerC.audit_v1_missing_integrity_metadata_count, 1);
   console.log("PASS audit_process_evidence aggregate_only=true deduplicated=true raw_output=false hashes_verified=true semantic_quality_not_scored=true");
 } finally {
   rmSync(root, { recursive: true, force: true });
