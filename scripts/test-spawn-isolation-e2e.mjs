@@ -27,7 +27,7 @@ async function jsonFetch(url, options = {}) {
 const temporary = mkdtempSync(join(tmpdir(), "mcp-spawn-e2e-"));
 const port = await unusedPort();
 const origin = `http://127.0.0.1:${port}`;
-const publicOrigin = "https://spawn-isolation.invalid";
+const publicOrigin = "https://spawn-isolation.test.ts.net";
 const server = spawn(process.execPath, [resolve("dist/index.js")], {
   cwd: resolve("."),
   env: {

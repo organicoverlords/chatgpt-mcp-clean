@@ -37,6 +37,12 @@ async function waitHealth(origin, expectedPort, timeoutMs = 15_000) {
   }
   throw new Error(`health timeout: ${origin}`);
 }
+async function waitChildExit(child, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (child.exitCode === null && Date.now() < deadline) await sleep(25);
+  if (child.exitCode === null) throw new Error("child exit timeout");
+  return child.exitCode;
+}
 
 function startClone(id, port, extraEnv = {}) {
   const state = join(temporary, id);
@@ -140,6 +146,12 @@ async function connect(clone, clientName) {
 let cloneA;
 let cloneB;
 try {
+  const invalidPort = await unusedPort();
+  const invalid = startClone("clone-invalid", invalidPort, { MCP_PUBLIC_ORIGIN: "https://example.test" });
+  const invalidExit = await waitChildExit(invalid.child);
+  assert.notEqual(invalidExit, 0);
+  assert.match(invalid.stderr(), /approved HTTPS \.ts\.net or canonical sslip production origin/);
+
   const portA = await unusedPort();
   const portB = await unusedPort();
   cloneA = startClone("clone-a", portA, { MCP_FORCE_CONNECTION_CLOSE: "1" });
