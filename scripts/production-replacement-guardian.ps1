@@ -6,6 +6,7 @@ $ProgressPreference = 'SilentlyContinue'
 $productionTask = 'McpV3Production3011'
 $candidateTask = 'McpV3ProductionReplacementCandidate'
 $edgeOwner = Join-Path $env:LOCALAPPDATA 'McpVpsEdge\provision_edge_extras.py'
+$busyGuard = Join-Path $PSScriptRoot 'assert-live-busy-claim.ps1'
 $publicOrigin = 'https://5-61-91-127.sslip.io'
 $publicHost = '5-61-91-127.sslip.io'
 $wireGuardHost = '10.203.0.2'
@@ -161,6 +162,7 @@ try {
     if ($gate.verdict -ne 'PASS' -or $gate.target.component -ne 'mcp_minimal_clone' -or $gate.actor -ne [string]$request.gate_actor) { throw 'guardian gate identity mismatch' }
     if (-not $gate.checks.explicit_user_authorization_for_specific_live_change -or -not $gate.checks.independent_rollback_control_route_verified -or -not $gate.checks.offpath_canary_proof_verified) { throw 'guardian gate receipt is missing required proofs' }
     if ($gate.busy_scope -ne $requiredScope -or $gate.checks.busy_scope.claim.scope -ne $requiredScope -or $gate.checks.busy_scope.claim.actor -ne $gate.actor) { throw 'guardian gate receipt lost the exact production backend Busy scope' }
+    & $busyGuard -Scope $requiredScope -Actor ([string]$gate.actor) | Out-Null
     $runtimeRoot = [IO.Path]::GetFullPath([string]$request.runtime_root)
     $candidateRoot = [IO.Path]::GetFullPath([string]$request.candidate_root)
     $expectedCommit = ([string]$request.expected_candidate_commit).ToLowerInvariant()
@@ -192,6 +194,7 @@ try {
     $remoteCandidate = (& $ssh -o BatchMode=yes -o ConnectTimeout=5 -i $key root@5.61.91.127 'curl -fsS --max-time 5 http://10.203.0.2:3012/health') | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0 -or [string]$remoteCandidate.backend_generation -ne $candidateGeneration) { throw 'VPS cannot reach the exact replacement candidate over WireGuard' }
 
+    & $busyGuard -Scope $requiredScope -Actor ([string]$gate.actor) | Out-Null
     Invoke-EdgePort 3012
     $edgeOnCandidate = $true
     $publicCandidate = Wait-Health "$publicOrigin/health" { param($h) [int]$h.port -eq 3012 -and [string]$h.backend_generation -eq $candidateGeneration -and $h.wireguard_candidate -eq $true } 30
@@ -202,6 +205,7 @@ try {
 
     $drain = Wait-BackendDrain $oldPid 300
 
+    & $busyGuard -Scope $requiredScope -Actor ([string]$gate.actor) | Out-Null
     Stop-ScheduledTask -TaskName $productionTask
     $productionStopped = $true
     Wait-PortFree 3011 20
@@ -225,6 +229,7 @@ try {
     $newGeneration = [string]$new.backend_generation
     if ($newGeneration -eq $oldGeneration) { throw 'production task did not create a new backend generation' }
 
+    & $busyGuard -Scope $requiredScope -Actor ([string]$gate.actor) | Out-Null
     Invoke-EdgePort 3011
     $edgeOnCandidate = $false
     $publicCanonical = Wait-Health "$publicOrigin/health" { param($h) [int]$h.port -eq 3011 -and [string]$h.backend_generation -eq $newGeneration -and $h.wireguard_candidate -eq $false } 30

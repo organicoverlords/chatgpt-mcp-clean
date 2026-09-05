@@ -7,6 +7,7 @@ const request = readFileSync(new URL("./replace-wireguard-production.ps1", impor
 const guardian = readFileSync(new URL("./production-replacement-guardian.ps1", import.meta.url), "utf8");
 const candidate = readFileSync(new URL("./production-replacement-candidate.ps1", import.meta.url), "utf8");
 const installer = readFileSync(new URL("./install-production-replacement-task.ps1", import.meta.url), "utf8");
+const busyGuard = readFileSync(new URL("./assert-live-busy-claim.ps1", import.meta.url), "utf8");
 
 assert.match(index, /MCP_WIREGUARD_CANDIDATE/);
 assert.match(index, /wireGuardHost = "10\.203\.0\.2"/);
@@ -23,6 +24,12 @@ assert.match(request, /GateReceiptPath/);
 assert.match(request, /production-change-gate receipt does not PASS/);
 assert.match(request, /mcp_minimal_clone:production-backend-3011/);
 assert.match(guardian, /gate_receipt_sha256/);
+assert.match(busyGuard, /BusyCoordinator\\busy\.py/);
+assert.match(busyGuard, /inspect \$Scope/);
+assert.match(busyGuard, /claim\.actor/);
+assert.match(request, /assert-live-busy-claim\.ps1/);
+assert.match(request, /-Scope \$requiredScope -Actor/);
+assert.ok((guardian.match(/-Scope \$requiredScope -Actor/g) ?? []).length >= 4, "guardian must revalidate live Busy before forward serving mutations");
 assert.match(guardian, /Wait-CandidateDrain/);
 assert.match(guardian, /SUCCEEDED_CANDIDATE_DRAIN_PENDING/);
 assert.match(guardian, /ROLLED_BACK_CANDIDATE_DRAIN_PENDING/);
