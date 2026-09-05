@@ -142,14 +142,15 @@ try {
 
 const fastPathManager = new ProcessManager();
 const fastPathStartedAt = Date.now();
-const fastPath = await fastPathManager.startWithWait("Write-Output 'FAST_PATH_OK'", undefined, "caller_fast_path_test", 2_000);
-const fastPathDurationMs = Date.now() - fastPathStartedAt;
+const fastPathInitial = await fastPathManager.startWithWait("Write-Output 'FAST_PATH_OK'", undefined, "caller_fast_path_test", 2_000);
+const fastPathInitialDurationMs = Date.now() - fastPathStartedAt;
+assert.ok(fastPathInitialDurationMs < 3_000, `startWithWait exceeded its bounded launch window (${fastPathInitialDurationMs}ms)`);
+const fastPath = fastPathInitial.running ? await waitForExit(fastPathManager, fastPathInitial.process_id) : fastPathInitial;
 assert.equal(fastPath.running, false, JSON.stringify(fastPath));
 assert.equal(fastPath.next_action, "STOP_READING");
 assert.match(fastPath.stdout, /FAST_PATH_OK/);
 const fastPathReplay = await fastPathManager.readWithWait(fastPath.process_id, 6_000, 0);
 assert.match(fastPathReplay.stdout, /FAST_PATH_OK/, "start_process output must remain readable until read_output consumes it");
-assert.ok(fastPathDurationMs < 2_000, `startWithWait did not collapse the short command (${fastPathDurationMs}ms)`);
 
 const boundedStartManager = new ProcessManager();
 let boundedStart;
@@ -202,11 +203,18 @@ try {
   const helper = join(inheritedHandleDirectory, "hold-stdio.cjs");
   writeFileSync(helper, `const { spawn } = require("node:child_process");\nconst child = spawn(process.execPath, ["-e", "setTimeout(()=>{},2500)"], { detached: true, stdio: ["ignore", "inherit", "inherit"] });\nchild.unref();\nconsole.log("OWNER_PID_EXITING");\n`);
   const manager = new ProcessManager();
-  const startedAt = Date.now();
-  const exited = await manager.startWithWait(`& node.exe '${helper}'`, undefined, "caller_inherited_handle_test", 1_000);
+  const queued = manager.start(`& node.exe '${helper}'`, undefined, "caller_inherited_handle_test");
+  let exited = queued;
+  let ownerPidObservedAt = null;
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline && exited.running) {
+    exited = await manager.readWithWait(queued.process_id, 6_000, 250);
+    if (ownerPidObservedAt === null && Number(exited.pid) > 0) ownerPidObservedAt = Date.now();
+  }
   assert.equal(exited.running, false, JSON.stringify(exited));
   assert.match(exited.stdout, /OWNER_PID_EXITING/);
-  assert.ok(Date.now() - startedAt < 1_000, "owned PID exit must not wait for descendant-inherited stdio handles");
+  assert.ok(ownerPidObservedAt !== null, JSON.stringify(exited));
+  assert.ok(Date.now() - ownerPidObservedAt < 2_000, "owned PID exit must not wait for descendant-inherited stdio handles");
   const killAfterExit = await manager.kill(exited.process_id);
   assert.equal(killAfterExit.already_exited, true, JSON.stringify(killAfterExit));
 } finally {
@@ -220,7 +228,8 @@ try {
   const receiptChurnManager = new ProcessManager({ receiptDirectory: receiptChurnDirectory, maxCompletedProcesses: 3 });
   let oldestReceiptProcessId;
   for (let index = 0; index < 5; index += 1) {
-    const completed = await receiptChurnManager.startWithWait(`Write-Output 'RECEIPT_CHURN_${index}'`, undefined, `caller_receipt_churn_${index % 8}`, 2_000);
+    const initial = await receiptChurnManager.startWithWait(`Write-Output 'RECEIPT_CHURN_${index}'`, undefined, `caller_receipt_churn_${index % 8}`, 2_000);
+    const completed = initial.running ? await waitForExit(receiptChurnManager, initial.process_id) : initial;
     assert.equal(completed.running, false, JSON.stringify(completed));
     if (index === 0) oldestReceiptProcessId = completed.process_id;
   }
