@@ -542,41 +542,6 @@ export class ProcessManager {
     } finally { try { await unlinkAsync(temporaryPath); } catch {} }
   }
 
-  private persistPreflightRejection(command: string, workingDirectory: string | undefined, callerId: string, reason: string): string | undefined {
-    if (!this.receiptArchiveDirectory) return undefined;
-    const rejectionId = randomUUID();
-    const rejectedAt = new Date().toISOString();
-    const dayDirectory = join(this.receiptArchiveDirectory, rejectedAt.slice(0, 10));
-    mkdirSync(dayDirectory, { recursive: true });
-    const path = join(dayDirectory, `rejected-${rejectionId}.json`);
-    const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    const record = {
-      version: 1,
-      kind: "process_preflight_rejection",
-      rejection_id: rejectionId,
-      caller_id: callerId,
-      command: command.slice(0, MAX_COMMAND_REPORT_CHARS),
-      ...(command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}),
-      working_directory: workingDirectory ?? null,
-      reason,
-      rejected_at: rejectedAt,
-    };
-    try {
-      writeFileSync(temporaryPath, JSON.stringify(record), { encoding: "utf8", flag: "wx" });
-      renameSync(temporaryPath, path);
-      this.pruneReceiptArchive();
-      return rejectionId;
-    } catch (error) {
-      try { unlinkSync(temporaryPath); } catch { /* best-effort temporary cleanup */ }
-      emitTelemetry({
-        event: "process_preflight_rejection_archive_error",
-        reason,
-        error_message: error instanceof Error ? error.message : String(error),
-      });
-      return undefined;
-    }
-  }
-
   private async persistPreflightRejectionAsync(rejectionId: string, command: string, workingDirectory: string | undefined, callerId: string, reason: string): Promise<void> {
     if (!this.receiptArchiveDirectory) return;
     const rejectedAt = new Date().toISOString();

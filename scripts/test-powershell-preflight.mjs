@@ -84,8 +84,16 @@ try {
   );
   const day = new Date().toISOString().slice(0, 10);
   const dayDirectory = join(rejectionReceiptDirectory, "archive", day);
-  const files = readdirSync(dayDirectory).filter((name) => name.startsWith("rejected-") && name.endsWith(".json"));
-  assert.equal(files.length, 1, JSON.stringify(files));
+  const deadline = Date.now() + 2_000;
+  let files = [];
+  while (Date.now() < deadline) {
+    try {
+      files = readdirSync(dayDirectory).filter((name) => name.startsWith("rejected-") && name.endsWith(".json"));
+      if (files.length > 0) break;
+    } catch {}
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+  }
+  assert.equal(files.length, 1, `durable preflight rejection did not arrive within 2s: ${JSON.stringify(files)}`);
   const rejection = JSON.parse(readFileSync(join(dayDirectory, files[0]), "utf8"));
   assert.equal(rejection.kind, "process_preflight_rejection");
   assert.equal(rejection.caller_id, "caller_durable_preflight_reject");
