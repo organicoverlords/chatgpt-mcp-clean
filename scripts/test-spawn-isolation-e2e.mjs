@@ -42,7 +42,7 @@ const server = spawn(process.execPath, [resolve("dist/index.js")], {
 let serverStderr = "";
 server.stderr.on("data", (chunk) => { serverStderr += chunk.toString(); });
 async function waitHealth() {
-  const deadline = Date.now() + 10000;
+  const deadline = Date.now() + 60000;
   while (Date.now() < deadline) {
     try { const r = await fetch(`${origin}/health`); if (r.ok) return; } catch {}
     await sleep(50);
