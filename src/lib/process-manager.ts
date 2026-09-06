@@ -353,13 +353,41 @@ function mcpProductionMutationError(command: string, code: string): string | und
     && /(?:10\.203\.0\.2|(?:listen|connect)port\s*=\s*3011|\b3011\b)/i.test(command);
   if (mutatesProductionPortProxy) return productionIngressError;
 
-  const mutatesWireGuardService = /\b(?:Stop-Service|Restart-Service|Set-Service|sc(?:\.exe)?\s+(?:stop|delete|config))\b/i.test(code)
-    && /WireGuardTunnel\$mcp-wireguard/i.test(command);
+  const productionWireGuardTarget = /(?:WireGuardTunnel\$mcp-wireguard|\bmcp-wireguard\b|10\.203\.0\.2\b)/i.test(command);
+  const mutatesWireGuardService = productionWireGuardTarget && (
+    /\b(?:Start|Stop|Restart|Set|Remove)-Service\b/i.test(code)
+    || /\bsc(?:\.exe)?\s+(?:start|stop|delete|config)\b/i.test(code)
+    || /\bnet(?:\.exe)?\s+(?:start|stop)\b/i.test(code)
+    || (/\b(?:Invoke-CimMethod|Invoke-WmiMethod)\b/i.test(code) && /\b(?:StartService|StopService|ChangeStartMode|Delete)\b/i.test(command))
+  );
   if (mutatesWireGuardService) return productionIngressError;
 
-  const mutatesProductionTask = /(?:McpV3Production3011|McpVpsEdgeTunnel)/i.test(command)
-    && /\b(?:Stop-ScheduledTask|Disable-ScheduledTask|Unregister-ScheduledTask|schtasks(?:\.exe)?\s+\/(?:End|Delete|Change))\b/i.test(code);
+  const productionTaskTarget = /(?:McpV3Production3011|McpVpsEdgeTunnel)/i.test(command);
+  const mutatesProductionTask = productionTaskTarget && (
+    /\b(?:Start|Stop|Disable|Enable|Set|Register|Unregister)-ScheduledTask\b/i.test(code)
+    || /\bschtasks(?:\.exe)?\s+\/(?:Run|End|Delete|Change|Create)\b/i.test(code)
+  );
   if (mutatesProductionTask) return productionIngressError;
+
+  const productionNetworkTarget = /(?:\bmcp-wireguard\b|10\.203\.0\.2\b|(?:local|listen|connect)?port\s*[=:]?\s*3011\b|McpV3Production3011|McpVpsEdgeTunnel)/i.test(command);
+  const mutatesProductionFirewall = productionNetworkTarget && (
+    /\b(?:New|Set|Remove|Disable|Enable)-NetFirewallRule\b/i.test(code)
+    || /\bnetsh(?:\.exe)?\s+advfirewall\s+firewall\s+(?:add|delete|set)\s+rule\b/i.test(code)
+  );
+  const mutatesProductionRoute = productionNetworkTarget && (
+    /\b(?:New|Set|Remove)-NetRoute\b/i.test(code)
+    || /\broute(?:\.exe)?\s+(?:add|change|delete)\b/i.test(code)
+    || /\bnetsh(?:\.exe)?\s+interface\s+(?:ipv4|ipv6)\s+(?:add|set|delete)\s+route\b/i.test(code)
+  );
+  const mutatesProductionAdapter = productionNetworkTarget && (
+    /\b(?:Disable|Enable|Restart|Rename|Set)-NetAdapter\b/i.test(code)
+    || /\bnetsh(?:\.exe)?\s+interface\s+set\s+interface\b/i.test(code)
+  );
+  const mutatesProductionAddress = productionNetworkTarget && (
+    /\b(?:New|Set|Remove)-NetIPAddress\b/i.test(code)
+    || /\bSet-NetIPInterface\b/i.test(code)
+  );
+  if (mutatesProductionFirewall || mutatesProductionRoute || mutatesProductionAdapter || mutatesProductionAddress) return productionIngressError;
 
   const terminatesProcess = /\b(?:Stop-Process|taskkill(?:\.exe)?|kill-process)\b/i.test(code);
   const identifiesServingMcp = /(?:127\.0\.0\.1:(?:3011|3003)\/health|10\.203\.0\.2:3011|McpV3Production3011|ChatGPTMcpMinimal|dist[\\/]front-door\.js|dist[\\/]index\.js)/i.test(command);
