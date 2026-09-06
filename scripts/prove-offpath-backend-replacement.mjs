@@ -86,7 +86,7 @@ try {
   const frontDoorHost = `127.0.0.1:${frontDoorPort}`;
   const commonBackendEnv = {
     MCP_BACKEND_MODE: "1",
-    MCP_TOOL_PROFILE: "full",
+    MCP_TOOL_PROFILE: "process",
     MCP_FRONT_DOOR_HOST: frontDoorHost,
     MCP_PUBLIC_ORIGIN: publicOrigin,
     TAILSCALE_OWNER_LOGIN: owner,
@@ -134,14 +134,12 @@ try {
   };
   const before = await rpc({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
   const beforeTools = before.body.result.tools.map((tool) => tool.name).sort();
-  assert.deepEqual(beforeTools, ["busy_claim", "busy_list", "busy_release", "kill_process", "read_output", "start_process", "view_image"]);
+  assert.deepEqual(beforeTools, ["kill_process", "read_output", "start_process"], "off-path production proof must exercise only the deployed ChatGPT process-tool surface");
   const beforeByName = Object.fromEntries(before.body.result.tools.map((tool) => [tool.name, tool]));
   for (const [name, annotations] of Object.entries(expectedProcessAnnotations)) {
     assert.deepEqual(beforeByName[name]?.annotations, annotations, `${name} safety annotations missing before replacement`);
   }
   assert.equal(before.response.headers.has("x-shell-mcp-front-door"), false, "front door must not inject worker-visible response metadata");
-  const claim = await call("busy_claim", { actor: "continuity-proof", scope: "offpath:backend-replacement" });
-  assert.equal(claim.ok, true);
   const started = await call("start_process", { command: "Write-Output 'BLUE_PROCESS'; Start-Sleep -Seconds 120" });
   assert.ok(started.process_id && started.running);
 
@@ -169,8 +167,6 @@ try {
   for (const [name, annotations] of Object.entries(expectedProcessAnnotations)) {
     assert.deepEqual(afterByName[name]?.annotations, annotations, `${name} safety annotations changed across backend replacement`);
   }
-  const claims = await call("busy_list", {});
-  assert.ok(claims.claims.some((item) => item.actor === "continuity-proof" && item.scope === "offpath:backend-replacement"), "BUSY claim did not survive backend replacement");
   let output;
   for (let attempt = 0; attempt < 10; attempt++) {
     output = await call("read_output", { process_id: started.process_id, wait_ms: 500 });
@@ -181,8 +177,6 @@ try {
   assert.equal(output.running, true, "same process_id was not routed to the draining backend");
   const killed = await call("kill_process", { process_id: started.process_id });
   assert.equal(killed.killed, true);
-  const released = await call("busy_release", { actor: "continuity-proof", scope: "offpath:backend-replacement" });
-  assert.equal(released.ok, true);
   const refreshed = await jsonFetch(`${frontDoorOrigin}/token`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -197,7 +191,7 @@ try {
   assert.deepEqual(healthFailures, [], `front-door health disappeared: ${healthFailures.join("; ")}`);
   assert.equal(frontDoor.exitCode, null, frontDoor.stderrText);
   assert.equal(green.exitCode, null, green.stderrText);
-  console.log(`PASS offpath_backend_replacement front_door_pid=${firstHealth.pid} health_failures=0 tools_unchanged=true oauth_preserved=true busy_preserved=true process_id_preserved=true blue_port=${bluePort} green_port=${greenPort}`);
+  console.log(`PASS offpath_backend_replacement front_door_pid=${firstHealth.pid} health_failures=0 production_tools_only=true tools_unchanged=true oauth_preserved=true process_id_preserved=true blue_port=${bluePort} green_port=${greenPort}`);
 } finally {
   monitor = false;
   if (monitorPromise) await monitorPromise.catch(() => undefined);

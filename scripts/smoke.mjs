@@ -8,7 +8,7 @@ const ownerLogin = (process.env.TAILSCALE_OWNER_LOGIN || "owner@example.com").tr
 const redirectUri = "https://chatgpt.com/connector/oauth/smoke";
 const resource = `${publicOrigin}/mcp`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const toolProfile = (process.env.MCP_TOOL_PROFILE || "full").trim().toLowerCase();
+const toolProfile = (process.env.MCP_TOOL_PROFILE || "process").trim().toLowerCase();
 const expectedTools = toolProfile === "process"
   ? ["kill_process", "read_output", "start_process"]
   : ["busy_claim", "busy_list", "busy_release", "kill_process", "read_output", "start_process", "view_image"];

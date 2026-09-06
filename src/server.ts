@@ -5,7 +5,10 @@ import { BusyStore } from "./lib/busy-store.js";
 import { viewImage } from "./lib/image-viewer.js";
 import { ProcessManager } from "./lib/process-manager.js";
 
-const toolProfile = (process.env.MCP_TOOL_PROFILE || "full").trim().toLowerCase();
+// The deployed ChatGPT connector surface is the process profile. Keep the broader
+// full profile explicit-only for internal/local tests so repo inspection without a
+// deployment-specific environment cannot silently advertise non-plugin tools.
+const toolProfile = (process.env.MCP_TOOL_PROFILE || "process").trim().toLowerCase();
 if (toolProfile !== "full" && toolProfile !== "process") throw new Error("MCP_TOOL_PROFILE must be full or process");
 const fullToolProfile = toolProfile === "full";
 
