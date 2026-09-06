@@ -12,6 +12,30 @@ param(
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $Root
+function Set-McpRuntimePriority {
+    $currentProcess = Get-Process -Id $PID
+    $currentProcess.PriorityClass = 'Normal'
+    if (-not ('McpRuntimePriorityNative' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class McpRuntimePriorityNative {
+    [StructLayout(LayoutKind.Sequential)] public struct ProcessMemoryPriorityInfo { public uint MemoryPriority; }
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern bool SetProcessInformation(IntPtr process, int informationClass, ref ProcessMemoryPriorityInfo information, uint informationSize);
+    [DllImport("ntdll.dll")] public static extern int NtSetInformationProcess(IntPtr process, int informationClass, ref uint information, uint informationSize);
+}
+"@
+    }
+    $memory = New-Object McpRuntimePriorityNative+ProcessMemoryPriorityInfo
+    $memory.MemoryPriority = 5
+    if (-not [McpRuntimePriorityNative]::SetProcessInformation($currentProcess.Handle, 0, [ref]$memory, [Runtime.InteropServices.Marshal]::SizeOf($memory))) {
+        throw "failed to set MCP memory priority: win32=$([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+    }
+    $ioPriority = [uint32]2
+    $ioStatus = [McpRuntimePriorityNative]::NtSetInformationProcess($currentProcess.Handle, 33, [ref]$ioPriority, 4)
+    if ($ioStatus -ne 0) { throw ('failed to set MCP I/O priority: ntstatus=0x{0:X8}' -f ([uint32]$ioStatus)) }
+}
+Set-McpRuntimePriority
 
 $originUri = [uri]$PublicOrigin
 $publicSlug = $originUri.AbsolutePath.Trim('/')
