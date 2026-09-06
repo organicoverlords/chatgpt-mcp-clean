@@ -96,6 +96,12 @@ function directBlockAttempts(event) {
   return Number.isFinite(attempts) && attempts > 0 ? Math.floor(attempts) : 1;
 }
 
+function adverseFamily(event) {
+  const classification = String(event.classification ?? "").trim().toLowerCase();
+  if (!isAdverseClassification(classification)) return null;
+  return classification.includes("block") ? "direct_tool_block" : "user_visible_or_above_mcp";
+}
+
 function binIndex(atMs) {
   return Math.min(Math.floor((atMs - startMs) / binMs), Math.max(0, Math.ceil((endMs - startMs) / binMs) - 1));
 }
@@ -218,6 +224,8 @@ for (const transportPath of transportSources) {
 
 const knownAdverseClassifications = new Map();
 const unknownAdverseReportClassifications = new Map();
+const knownAdverseFamilies = new Map();
+const unknownAdverseReportFamilies = new Map();
 let routingMalformed = 0;
 let routingRecords = 0;
 let knownAdverseInWindow = 0;
@@ -237,6 +245,8 @@ for await (const line of readline.createInterface({ input: routingInput, crlfDel
     if (eventTimeMs >= startMs && eventTimeMs <= endMs) {
       knownAdverseInWindow++;
       increment(knownAdverseClassifications, event.classification ?? "unknown");
+      const family = adverseFamily(event);
+      if (family) increment(knownAdverseFamilies, family);
       knownDirectBlockAttempts += directBlockAttempts(event);
     }
     continue;
@@ -246,6 +256,8 @@ for await (const line of readline.createInterface({ input: routingInput, crlfDel
   if (Number.isFinite(reportedAtMs) && reportedAtMs >= startMs && reportedAtMs <= endMs) {
     unknownAdverseReportsInWindow++;
     increment(unknownAdverseReportClassifications, event.classification ?? "unknown");
+    const family = adverseFamily(event);
+    if (family) increment(unknownAdverseReportFamilies, family);
   }
 }
 
@@ -314,9 +326,11 @@ const report = {
     malformed_lines: routingMalformed,
     known_event_time_adverse_in_window: knownAdverseInWindow,
     known_event_time_adverse_classifications: statusObject(knownAdverseClassifications),
+    known_event_time_adverse_families: statusObject(knownAdverseFamilies),
     known_direct_block_attempts_in_window: knownDirectBlockAttempts,
     unknown_event_time_adverse_reports_received_in_window: unknownAdverseReportsInWindow,
     unknown_event_time_report_classifications: statusObject(unknownAdverseReportClassifications),
+    unknown_event_time_adverse_report_families: statusObject(unknownAdverseReportFamilies),
     time_semantics: "event_time_known=true uses event_time for occurrence-window assignment; unknown occurrence times are never inferred from reported_at and are surfaced separately if the report was received inside the window",
   },
   acceptance: {
