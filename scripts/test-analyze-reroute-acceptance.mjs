@@ -72,6 +72,9 @@ try {
   assert.deepEqual(report.routing_events.known_event_time_adverse_families, {});
   assert.equal(report.routing_events.unknown_event_time_adverse_reports_received_in_window, 0);
   assert.deepEqual(report.routing_events.unknown_event_time_adverse_report_families, {});
+  assert.equal(report.routing_events.normalized_rates_per_1000_process_tool_calls.denominator_process_tool_calls, 4);
+  assert.equal(report.routing_events.normalized_rates_per_1000_process_tool_calls.known_event_time_adverse, 0);
+  assert.equal(report.routing_events.normalized_rates_per_1000_process_tool_calls.unknown_event_time_adverse_reports_received, 0);
   assert.equal(report.acceptance.transport_clean, true);
 
   // An adverse report received inside the window with unknown occurrence time cannot be assigned before/after.
@@ -84,6 +87,8 @@ try {
   assert.deepEqual(report.routing_events.known_event_time_adverse_families, {});
   assert.equal(report.routing_events.unknown_event_time_adverse_reports_received_in_window, 1);
   assert.deepEqual(report.routing_events.unknown_event_time_adverse_report_families, { user_visible_or_above_mcp: 1 });
+  assert.equal(report.routing_events.normalized_rates_per_1000_process_tool_calls.unknown_event_time_adverse_reports_received, 250);
+  assert.deepEqual(report.routing_events.normalized_rates_per_1000_process_tool_calls.unknown_event_time_adverse_report_families, { user_visible_or_above_mcp: 250 });
   assert.equal(report.acceptance.unknown_event_time_adverse_report_present, true);
 
   // A known-time direct block inside the window is a recurrence; attempts_blocked must be counted.
@@ -96,6 +101,9 @@ try {
   assert.deepEqual(report.routing_events.known_event_time_adverse_families, { direct_tool_block: 1 });
   assert.equal(report.routing_events.known_direct_block_attempts_in_window, 2);
   assert.deepEqual(report.routing_events.known_event_time_adverse_classifications, { assistant_observed_direct_read_output_security_block: 1 });
+  assert.equal(report.routing_events.normalized_rates_per_1000_process_tool_calls.known_event_time_adverse, 250);
+  assert.equal(report.routing_events.normalized_rates_per_1000_process_tool_calls.known_direct_block_attempts, 500);
+  assert.deepEqual(report.routing_events.normalized_rates_per_1000_process_tool_calls.known_event_time_adverse_families, { direct_tool_block: 250 });
 
   const serialized = JSON.stringify(report);
   for (const forbidden of ["request-a", "caller-a", "session-a", "connection-a", "secret-process-id"]) {
@@ -126,6 +134,9 @@ try {
   assert.equal(report.transport.process_tool_calls.last_at, null);
   assert.equal(report.transport.process_tool_calls.observation_span_minutes, 0);
   assert.equal(report.transport.process_tool_calls.active_bins, 0);
+  assert.equal(report.routing_events.normalized_rates_per_1000_process_tool_calls.denominator_process_tool_calls, 0);
+  assert.equal(report.routing_events.normalized_rates_per_1000_process_tool_calls.known_event_time_adverse, null);
+  assert.equal(report.routing_events.normalized_rates_per_1000_process_tool_calls.unknown_event_time_adverse_reports_received, null);
 
   console.log("PASS reroute_acceptance exact_event_time=true unknown_time_indeterminate=true transport_joined=true transport_degradation=true no_vacuous_clean=true raw_identifiers_emitted=false");
 } finally {
