@@ -69,7 +69,9 @@ try {
   assert.equal(report.transport.bins[0].process_tool_calls, 3);
   assert.equal(report.transport.bins[1].process_tool_calls, 1);
   assert.equal(report.routing_events.known_event_time_adverse_in_window, 0);
+  assert.deepEqual(report.routing_events.known_event_time_adverse_families, {});
   assert.equal(report.routing_events.unknown_event_time_adverse_reports_received_in_window, 0);
+  assert.deepEqual(report.routing_events.unknown_event_time_adverse_report_families, {});
   assert.equal(report.acceptance.transport_clean, true);
 
   // An adverse report received inside the window with unknown occurrence time cannot be assigned before/after.
@@ -79,7 +81,9 @@ try {
   report = run();
   assert.equal(report.acceptance.status, "INDETERMINATE_UNKNOWN_EVENT_TIME");
   assert.equal(report.routing_events.known_event_time_adverse_in_window, 0);
+  assert.deepEqual(report.routing_events.known_event_time_adverse_families, {});
   assert.equal(report.routing_events.unknown_event_time_adverse_reports_received_in_window, 1);
+  assert.deepEqual(report.routing_events.unknown_event_time_adverse_report_families, { user_visible_or_above_mcp: 1 });
   assert.equal(report.acceptance.unknown_event_time_adverse_report_present, true);
 
   // A known-time direct block inside the window is a recurrence; attempts_blocked must be counted.
@@ -89,6 +93,7 @@ try {
   report = run();
   assert.equal(report.acceptance.status, "RECURRENCE_OBSERVED");
   assert.equal(report.routing_events.known_event_time_adverse_in_window, 1);
+  assert.deepEqual(report.routing_events.known_event_time_adverse_families, { direct_tool_block: 1 });
   assert.equal(report.routing_events.known_direct_block_attempts_in_window, 2);
   assert.deepEqual(report.routing_events.known_event_time_adverse_classifications, { assistant_observed_direct_read_output_security_block: 1 });
 
