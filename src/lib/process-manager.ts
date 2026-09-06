@@ -1277,6 +1277,12 @@ export class ProcessManager {
     return { process_id: state.id, pid: state.pid, killed: true, running: false, exit_code: state.exitCode, signal: state.signal ?? null };
   }
 
+  liveProcessCount(): number {
+    let count = 0;
+    for (const state of this.processes.values()) if (state.exitCode === null) count += 1;
+    return count;
+  }
+
   hasLiveScope(scope: string): boolean {
     const candidate = scope.startsWith("process:") ? scope.slice("process:".length) : scope;
     const state = this.processes.get(candidate);
