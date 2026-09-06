@@ -82,6 +82,17 @@ function statusObject(map) {
   return Object.fromEntries([...map.entries()].sort(([a], [b]) => a.localeCompare(b)));
 }
 
+function perThousand(count, exposure) {
+  if (!Number.isFinite(exposure) || exposure <= 0) return null;
+  return Number(((count / exposure) * 1000).toFixed(6));
+}
+
+function rateObject(map, exposure) {
+  return Object.fromEntries([...map.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, count]) => [key, perThousand(count, exposure)]));
+}
+
 function isAdverseClassification(value) {
   const classification = String(value ?? "").trim().toLowerCase();
   if (!classification) return false;
@@ -331,6 +342,15 @@ const report = {
     unknown_event_time_adverse_reports_received_in_window: unknownAdverseReportsInWindow,
     unknown_event_time_report_classifications: statusObject(unknownAdverseReportClassifications),
     unknown_event_time_adverse_report_families: statusObject(unknownAdverseReportFamilies),
+    normalized_rates_per_1000_process_tool_calls: {
+      denominator_process_tool_calls: processToolCalls,
+      known_event_time_adverse: perThousand(knownAdverseInWindow, processToolCalls),
+      known_direct_block_attempts: perThousand(knownDirectBlockAttempts, processToolCalls),
+      known_event_time_adverse_families: rateObject(knownAdverseFamilies, processToolCalls),
+      unknown_event_time_adverse_reports_received: perThousand(unknownAdverseReportsInWindow, processToolCalls),
+      unknown_event_time_adverse_report_families: rateObject(unknownAdverseReportFamilies, processToolCalls),
+      semantics: "Descriptive exposure-normalized counts only. Known-time event rates use occurrence-window assignment; unknown-time rates are report-receipt density, not occurrence rates. These rates do not establish statistical significance or causal effect.",
+    },
     time_semantics: "event_time_known=true uses event_time for occurrence-window assignment; unknown occurrence times are never inferred from reported_at and are surfaced separately if the report was received inside the window",
   },
   acceptance: {
