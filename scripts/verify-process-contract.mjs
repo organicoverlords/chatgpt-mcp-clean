@@ -4,7 +4,10 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
 
-process.env.MCP_TOOL_PROFILE = "process";
+// Verify the default server surface itself. Production launchers also set process
+// explicitly, but the default must remain production-safe so audits/tests that omit
+// deployment env cannot accidentally inspect the internal full profile.
+delete process.env.MCP_TOOL_PROFILE;
 process.env.MCP_PROCESS_RECEIPT_DIR = resolve(".state/process-contract-verifier-receipts");
 const { createServer } = await import("../dist/server.js");
 const server = createServer("contract-verifier");
