@@ -31,7 +31,7 @@ $edgeOwner = Join-Path $env:LOCALAPPDATA 'McpVpsEdge\provision_edge_extras.py'
 $state = Join-Path $repo '.state\production-replacement'
 $requestPath = Join-Path $state 'request.json'
 $receiptPath = Join-Path $state 'receipt.json'
-$freezePath = 'C:\Users\Lauri\Desktop\vault\04 Operating Contracts\mcp-known-good-freeze.json'
+$recoveryStatePath = 'C:\Users\Lauri\Desktop\vault\04 Operating Contracts\mcp-recovery-state.json'
 $guardianTask = 'McpV3ProductionReplacementGuardian'
 $candidateTask = 'McpV3ProductionReplacementCandidate'
 foreach ($taskName in @($guardianTask,$candidateTask)) {
@@ -57,10 +57,11 @@ if ($listener) { throw "candidate port 3012 is already listening at $($listener.
 if (-not (Test-Path -LiteralPath $edgeOwner -PathType Leaf)) { throw 'McpVpsEdge provisioner is missing' }
 $render = & uv.exe run --with asyncssh python $edgeOwner --render-caddy --backend-port 3012
 if ($LASTEXITCODE -ne 0 -or ($render -join "`n") -notmatch 'reverse_proxy 10\.203\.0\.2:3012') { throw 'edge owner cannot render the temporary WireGuard candidate route' }
-if (-not (Test-Path -LiteralPath $freezePath -PathType Leaf)) { throw 'canonical MCP freeze is missing' }
-$freeze = Get-Content -LiteralPath $freezePath -Raw | ConvertFrom-Json
-if ([string]$freeze.status -notin @('CANDIDATE_KNOWN_GOOD','PROVEN_KNOWN_GOOD')) { throw 'canonical MCP freeze is not usable as a replacement boundary' }
-if (([string]$freeze.production_identity.caddy.sha256).ToLowerInvariant() -ne $ExpectedCaddySha256.ToLowerInvariant()) { throw 'expected Caddy hash does not match the canonical freeze; refresh live preflight before replacement' }
+if (-not (Test-Path -LiteralPath $recoveryStatePath -PathType Leaf)) { throw 'canonical MCP recovery state is missing' }
+$recoveryState = Get-Content -LiteralPath $recoveryStatePath -Raw | ConvertFrom-Json
+if ([string]$recoveryState.schema -ne 'mcp-recovery-state.v1') { throw 'canonical MCP recovery state schema is unsupported' }
+if ([string]$recoveryState.deployment.id -ne [string]$recoveryState.recovery_target.deployment_id) { throw 'canonical MCP recovery state selected deployment is inconsistent' }
+if (([string]$recoveryState.deployment.caddy.sha256).ToLowerInvariant() -ne $ExpectedCaddySha256.ToLowerInvariant()) { throw 'expected Caddy hash does not match the canonical MCP recovery state; refresh live preflight before replacement' }
 $runtimeDirty = @(& git.exe -C $runtimeRoot status --porcelain=v1 --untracked-files=no)
 if ($LASTEXITCODE -ne 0 -or $runtimeDirty.Count -gt 0) { throw 'production runtime root has tracked modifications; replacement refused' }
 New-Item -ItemType Directory -Force -Path $state | Out-Null
