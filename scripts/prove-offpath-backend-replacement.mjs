@@ -127,9 +127,18 @@ try {
   const rpc = async (message) => jsonFetch(`${frontDoorOrigin}/mcp`, { method: "POST", headers: { authorization: auth, "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-06-18" }, body: JSON.stringify(message) });
   const call = async (name, args) => rpcPayload(await rpc({ jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name, arguments: args } }));
 
+  const expectedProcessAnnotations = {
+    start_process: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+    read_output: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    kill_process: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+  };
   const before = await rpc({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
   const beforeTools = before.body.result.tools.map((tool) => tool.name).sort();
   assert.deepEqual(beforeTools, ["busy_claim", "busy_list", "busy_release", "kill_process", "read_output", "start_process", "view_image"]);
+  const beforeByName = Object.fromEntries(before.body.result.tools.map((tool) => [tool.name, tool]));
+  for (const [name, annotations] of Object.entries(expectedProcessAnnotations)) {
+    assert.deepEqual(beforeByName[name]?.annotations, annotations, `${name} safety annotations missing before replacement`);
+  }
   assert.equal(before.response.headers.has("x-shell-mcp-front-door"), false, "front door must not inject worker-visible response metadata");
   const claim = await call("busy_claim", { actor: "continuity-proof", scope: "offpath:backend-replacement" });
   assert.equal(claim.ok, true);
@@ -156,6 +165,10 @@ try {
   const after = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
   const afterTools = after.body.result.tools.map((tool) => tool.name).sort();
   assert.deepEqual(afterTools, beforeTools, "worker-visible tool surface changed across backend replacement");
+  const afterByName = Object.fromEntries(after.body.result.tools.map((tool) => [tool.name, tool]));
+  for (const [name, annotations] of Object.entries(expectedProcessAnnotations)) {
+    assert.deepEqual(afterByName[name]?.annotations, annotations, `${name} safety annotations changed across backend replacement`);
+  }
   const claims = await call("busy_list", {});
   assert.ok(claims.claims.some((item) => item.actor === "continuity-proof" && item.scope === "offpath:backend-replacement"), "BUSY claim did not survive backend replacement");
   let output;
