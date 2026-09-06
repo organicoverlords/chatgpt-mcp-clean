@@ -168,8 +168,13 @@ try {
   ]);
   const expected = ["kill_process", "read_output", "start_process"];
   for (const client of [a1, a2, b1, b2]) {
-    const names = (await client.tools()).map((tool) => tool.name).sort();
+    const tools = await client.tools();
+    const names = tools.map((tool) => tool.name).sort();
     assert.deepEqual(names, expected);
+    const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
+    assert.deepEqual(byName.start_process.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: true });
+    assert.deepEqual(byName.read_output.annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: false });
+    assert.deepEqual(byName.kill_process.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: false });
   }
 
   const started = await a1.call("start_process", { command: "Write-Output 'CLONE_MULTI_CLIENT'; Start-Sleep -Milliseconds 600; Write-Output 'DONE'" });
