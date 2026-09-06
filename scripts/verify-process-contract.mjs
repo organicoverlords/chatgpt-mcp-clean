@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { z } from "zod";
 
 process.env.MCP_TOOL_PROFILE = "process";
+process.env.MCP_PROCESS_RECEIPT_DIR = resolve(".state/process-contract-verifier-receipts");
 const { createServer } = await import("../dist/server.js");
 const server = createServer("contract-verifier");
 const actualTools = Object.entries(server._registeredTools)
