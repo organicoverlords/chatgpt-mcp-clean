@@ -324,6 +324,18 @@ function mcpProductionMutationError(command: string, code: string): string | und
     && !/--render-caddy\b/i.test(command);
   if (invokesDirectEdgeMutation) return productionIngressError;
 
+  const productionVpsHost = /(?:5[.]61[.]91[.]127|5-61-91-127[.]sslip[.]io|10[.]203[.]0[.]1)\b/i.test(command);
+  const rawRemoteTransportInCode = /(?:^|[;&|{}\r\n])\s*(?:&\s*)?(?:ssh|scp|sftp|rsync|plink|pscp|psftp|winscp(?:[.]com|[.]exe)?)(?:[.]exe)?\b/im.test(code)
+    || /\bStart-Process(?:\s+-FilePath)?\s+(?:ssh|scp|sftp|rsync|plink|pscp|psftp|winscp(?:[.]com|[.]exe)?)(?:[.]exe)?\b/i.test(code);
+  const quotedRemoteTransportInvocation = /(?:&|Start-Process(?:\s+-FilePath)?)\s*['"][^'"\r\n]*(?:ssh|scp|sftp|rsync|plink|pscp|psftp|winscp(?:[.]com|[.]exe)?)(?:[.]exe)?['"]/i.test(command);
+  const nestedShellRemoteTransport = /\b(?:cmd(?:[.]exe)?\s+\/(?:c|k)|(?:powershell|pwsh)(?:[.]exe)?\b|wsl(?:[.]exe)?\b|(?:bash|sh)(?:[.]exe)?\b)/i.test(code)
+    && /\b(?:ssh|scp|sftp|rsync|plink|pscp|psftp|winscp(?:[.]com|[.]exe)?)(?:[.]exe)?\b/i.test(command);
+  const interpreterRemoteLibrary = /\b(?:python|py|uv)(?:[.]exe)?\b/i.test(code)
+    && /\b(?:asyncssh|paramiko|ssh2|node-ssh)\b/i.test(command);
+  const invokesRawProductionVpsTransport = productionVpsHost
+    && (rawRemoteTransportInCode || quotedRemoteTransportInvocation || nestedShellRemoteTransport || interpreterRemoteLibrary);
+  if (invokesRawProductionVpsTransport) return productionIngressError;
+
   const startsReplacementInternalTask = /\b(?:Start-ScheduledTask|schtasks(?:\.exe)?\s+\/Run)\b/i.test(code)
     && /McpV3ProductionReplacement(?:Guardian|Candidate)/i.test(command);
   if (startsReplacementInternalTask) return productionIngressError;

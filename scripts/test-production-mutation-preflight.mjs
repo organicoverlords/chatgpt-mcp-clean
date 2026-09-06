@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import { ProcessManager } from "../dist/lib/process-manager.js";
 
 const manager = new ProcessManager();
+const productionVpsIp = ["5", "61", "91", "127"].join(".");
+const productionVpsHost = ["5-61-91-127", "sslip", "io"].join(".");
+const wireGuardVpsIp = ["10", "203", "0", "1"].join(".");
+const caddyPath = ["", "etc", "caddy", "Caddyfile"].join("/");
+
 
 function rejects(command) {
   assert.throws(
@@ -23,6 +28,19 @@ async function run(command) {
 }
 
 rejects(`& ssh.exe root@5.61.91.127 "cp /tmp/Caddyfile /etc/caddy/Caddyfile; systemctl reload caddy"`);
+rejects(`& ssh.exe root@${productionVpsIp} "python3 -c 'print(1)'"`);
+rejects(`scp.exe C:\tmp\Caddyfile root@${productionVpsIp}:${caddyPath}`);
+rejects(`sftp.exe root@${productionVpsIp}`);
+rejects(`rsync.exe C:\tmp\Caddyfile root@${productionVpsIp}:${caddyPath}`);
+rejects(`plink.exe root@${productionVpsIp} -batch echo mutation-capable-raw-transport`);
+rejects(`uv run --with asyncssh python -c "import asyncssh; print('${productionVpsIp}')"`);
+rejects(`ssh root@${productionVpsHost} true`);
+rejects(`& 'C:\Windows\System32\OpenSSH\ssh.exe' root@${productionVpsIp} true`);
+rejects(`Start-Process -FilePath 'C:\Windows\System32\OpenSSH\ssh.exe' -ArgumentList 'root@${productionVpsIp}','true'`);
+rejects(`ssh root@${wireGuardVpsIp} true`);
+rejects(`cmd.exe /c "ssh root@${productionVpsIp} true"`);
+rejects(`pwsh.exe -NoProfile -Command "scp C:\\tmp\\Caddyfile root@${productionVpsIp}:${caddyPath}"`);
+rejects(`python -c "import paramiko; print('${productionVpsIp}')"`);
 rejects("netsh interface portproxy set v4tov4 listenaddress=10.203.0.2 listenport=3011 connectaddress=127.0.0.1 connectport=3003");
 rejects("$h=Invoke-RestMethod http://127.0.0.1:3011/health; Stop-Process -Id $h.pid -Force");
 rejects("$h=Invoke-RestMethod http://127.0.0.1:3003/health; taskkill.exe /PID $h.pid /T /F");
@@ -46,15 +64,35 @@ assert.match(supportedReplacementRequest.stdout, /SUPPORTED_WIREGUARD_REPLACEMEN
 const supportedReplacementInstaller = await run("if ($false) { & 'C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\install-production-replacement-task.ps1' }; Write-Output 'SUPPORTED_REPLACEMENT_TASK_INSTALLER_ALLOWED'");
 assert.equal(supportedReplacementInstaller.exit_code, 0);
 assert.match(supportedReplacementInstaller.stdout, /SUPPORTED_REPLACEMENT_TASK_INSTALLER_ALLOWED/);
+const supportedEdgeSnapshot = await run("if ($false) { node scripts/capture-edge-runtime.mjs }; Write-Output 'SUPPORTED_EDGE_SNAPSHOT_ALLOWED'");
+assert.equal(supportedEdgeSnapshot.exit_code, 0);
+assert.match(supportedEdgeSnapshot.stdout, /SUPPORTED_EDGE_SNAPSHOT_ALLOWED/);
+
+const supportedEdgeFanout = await run("if ($false) { node scripts/capture-edge-fanout.mjs --since 2026-09-06T00:00:00Z }; Write-Output 'SUPPORTED_EDGE_FANOUT_ALLOWED'");
+assert.equal(supportedEdgeFanout.exit_code, 0);
+assert.match(supportedEdgeFanout.stdout, /SUPPORTED_EDGE_FANOUT_ALLOWED/);
+
+const supportedEdgeCorrelation = await run("if ($false) { node scripts/capture-edge-backend-correlation.mjs --since 2026-09-06T00:00:00Z }; Write-Output 'SUPPORTED_EDGE_CORRELATION_ALLOWED'");
+assert.equal(supportedEdgeCorrelation.exit_code, 0);
+assert.match(supportedEdgeCorrelation.stdout, /SUPPORTED_EDGE_CORRELATION_ALLOWED/);
+
 
 
 const renderOnlyEdgeOwner = await run("if ($false) { uv run --with asyncssh python C:\\Users\\Example\\McpVpsEdge\\provision_edge_extras.py --render-caddy --backend-port 3012 }; Write-Output 'EDGE_RENDER_ONLY_ALLOWED'");
 assert.equal(renderOnlyEdgeOwner.exit_code, 0);
 assert.match(renderOnlyEdgeOwner.stdout, /EDGE_RENDER_ONLY_ALLOWED/);
 
+const benignTransportReference = await run(`Get-Command ssh.exe -ErrorAction SilentlyContinue | Out-Null; Write-Output 'https://${productionVpsHost}/health'; Write-Output 'BENIGN_TRANSPORT_REFERENCE_ALLOWED'`);
+assert.equal(benignTransportReference.exit_code, 0);
+assert.match(benignTransportReference.stdout, /BENIGN_TRANSPORT_REFERENCE_ALLOWED/);
+
+const publicHealthReference = await run(`if ($false) { Invoke-RestMethod https://${productionVpsHost}/health }; Write-Output 'PUBLIC_HEALTH_REFERENCE_ALLOWED'`);
+assert.equal(publicHealthReference.exit_code, 0);
+assert.match(publicHealthReference.stdout, /PUBLIC_HEALTH_REFERENCE_ALLOWED/);
+
 const benign = await run("Write-Output '/etc/caddy/Caddyfile'; Write-Output 'http://127.0.0.1:3012/health'");
 assert.equal(benign.exit_code, 0);
 assert.match(benign.stdout, /Caddyfile/);
 assert.match(benign.stdout, /3012/);
 
-console.log("PASS production_mutation_preflight direct_serving_mutations_blocked=true offpath_reference_allowed=true");
+console.log("PASS production_mutation_preflight direct_serving_mutations_blocked=true raw_production_vps_transport_blocked=true supported_edge_wrappers_allowed=true offpath_reference_allowed=true");
