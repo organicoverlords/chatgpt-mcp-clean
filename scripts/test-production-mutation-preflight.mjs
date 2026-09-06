@@ -41,6 +41,11 @@ rejects(`ssh root@${wireGuardVpsIp} true`);
 rejects(`cmd.exe /c "ssh root@${productionVpsIp} true"`);
 rejects(`pwsh.exe -NoProfile -Command "scp C:\\tmp\\Caddyfile root@${productionVpsIp}:${caddyPath}"`);
 rejects(`python -c "import paramiko; print('${productionVpsIp}')"`);
+rejects("$env:PORT='3011'; node dist/index.js");
+rejects("$env:FRONT_DOOR_PORT='3003'; node dist/front-door.js");
+rejects("cmd.exe /c \"node dist/index.js\"");
+rejects("Start-Process -FilePath node.exe -ArgumentList 'dist/front-door.js'");
+rejects("& .\\scripts\\start-minimal-clone.ps1 -InstanceId clone-a -Port 3011 -PublicOrigin https://example.test");
 rejects("netsh interface portproxy set v4tov4 listenaddress=10.203.0.2 listenport=3011 connectaddress=127.0.0.1 connectport=3003");
 rejects("$h=Invoke-RestMethod http://127.0.0.1:3011/health; Stop-Process -Id $h.pid -Force");
 rejects("$h=Invoke-RestMethod http://127.0.0.1:3003/health; taskkill.exe /PID $h.pid /T /F");
@@ -65,6 +70,14 @@ rejects("schtasks.exe /Run /TN McpV3ProductionReplacementCandidate");
 const supportedLauncher = await run("if ($false) { & 'C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\launch-production.ps1' }; Write-Output 'SUPPORTED_PRODUCTION_LAUNCHER_ALLOWED'");
 assert.equal(supportedLauncher.exit_code, 0);
 assert.match(supportedLauncher.stdout, /SUPPORTED_PRODUCTION_LAUNCHER_ALLOWED/);
+
+const supportedOffpathProof = await run("if ($false) { node scripts/prove-offpath-backend-replacement.mjs }; Write-Output 'SUPPORTED_OFFPATH_PROOF_ALLOWED'");
+assert.equal(supportedOffpathProof.exit_code, 0);
+assert.match(supportedOffpathProof.stdout, /SUPPORTED_OFFPATH_PROOF_ALLOWED/);
+
+const cloneIdentityValidation = await run("if ($false) { & .\\scripts\\start-minimal-clone.ps1 -InstanceId clone-a -Port 3011 -PublicOrigin https://example.test -ValidateOnly }; Write-Output 'CLONE_IDENTITY_VALIDATION_ALLOWED'");
+assert.equal(cloneIdentityValidation.exit_code, 0);
+assert.match(cloneIdentityValidation.stdout, /CLONE_IDENTITY_VALIDATION_ALLOWED/);
 
 const supportedReplacementRequest = await run("if ($false) { & 'C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\replace-wireguard-production.ps1' }; Write-Output 'SUPPORTED_WIREGUARD_REPLACEMENT_REQUEST_ALLOWED'");
 assert.equal(supportedReplacementRequest.exit_code, 0);
@@ -116,4 +129,4 @@ assert.equal(benign.exit_code, 0);
 assert.match(benign.stdout, /Caddyfile/);
 assert.match(benign.stdout, /3012/);
 
-console.log("PASS production_mutation_preflight direct_serving_mutations_blocked=true raw_production_vps_transport_blocked=true windows_production_controls_blocked=true supported_edge_wrappers_allowed=true offpath_reference_allowed=true");
+console.log("PASS production_mutation_preflight direct_serving_mutations_blocked=true raw_production_vps_transport_blocked=true windows_production_controls_blocked=true direct_serving_starts_blocked=true supported_edge_wrappers_allowed=true offpath_reference_allowed=true");

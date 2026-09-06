@@ -389,6 +389,20 @@ function mcpProductionMutationError(command: string, code: string): string | und
   );
   if (mutatesProductionFirewall || mutatesProductionRoute || mutatesProductionAdapter || mutatesProductionAddress) return productionIngressError;
 
+  const servingEntrypoint = /\b(?:dist[\\/](?:index|front-door)\.js|src[\\/](?:index|front-door)\.ts)\b/i.test(command);
+  const directServingRuntime = /(?:^|[;&|{}\r\n])\s*(?:&\s*)?(?:node|tsx|ts-node|bun|deno)(?:\.exe)?\b/im.test(code)
+    || /\bStart-Process(?:\s+-FilePath)?\s+(?:node|tsx|ts-node|bun|deno)(?:\.exe)?\b/i.test(code)
+    || /(?:&|Start-Process(?:\s+-FilePath)?)\s*['"][^'"\r\n]*(?:node|tsx|ts-node|bun|deno)(?:\.exe)?['"]/i.test(command)
+    || (/\b(?:cmd(?:\.exe)?\s+\/(?:c|k)|(?:powershell|pwsh)(?:\.exe)?\b|wsl(?:\.exe)?\b|(?:bash|sh)(?:\.exe)?\b)/i.test(code)
+      && /\b(?:node|tsx|ts-node|bun|deno)(?:\.exe)?\b/i.test(command))
+    || /\bnpx(?:\.cmd|\.exe)?\s+(?:tsx|ts-node)\b/i.test(code);
+  if (servingEntrypoint && directServingRuntime) return productionIngressError;
+
+  const invokesCanonicalCloneHelper = /(?:^|[\\/])scripts[\\/]start-minimal-clone\.ps1\b/i.test(command)
+    && /(?:^|\s)-Port\s+3011\b/i.test(command)
+    && !/(?:^|\s)-ValidateOnly\b/i.test(command);
+  if (invokesCanonicalCloneHelper) return productionIngressError;
+
   const terminatesProcess = /\b(?:Stop-Process|taskkill(?:\.exe)?|kill-process)\b/i.test(code);
   const identifiesServingMcp = /(?:127\.0\.0\.1:(?:3011|3003)\/health|10\.203\.0\.2:3011|McpV3Production3011|ChatGPTMcpMinimal|dist[\\/]front-door\.js|dist[\\/]index\.js)/i.test(command);
   if (terminatesProcess && identifiesServingMcp) return productionIngressError;
