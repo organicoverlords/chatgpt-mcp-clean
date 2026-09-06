@@ -46,6 +46,15 @@ rejects("$h=Invoke-RestMethod http://127.0.0.1:3011/health; Stop-Process -Id $h.
 rejects("$h=Invoke-RestMethod http://127.0.0.1:3003/health; taskkill.exe /PID $h.pid /T /F");
 rejects("Stop-Service 'WireGuardTunnel$mcp-wireguard'");
 rejects("Stop-ScheduledTask -TaskName 'McpV3Production3011'");
+rejects("net.exe stop 'WireGuardTunnel$mcp-wireguard'");
+rejects("Get-CimInstance Win32_Service -Filter 'Name=\"WireGuardTunnel$mcp-wireguard\"' | Invoke-CimMethod -MethodName StopService");
+rejects("Set-ScheduledTask -TaskName 'McpV3Production3011' -Settings (New-ScheduledTaskSettingsSet)");
+rejects("schtasks.exe /Create /TN McpV3Production3011 /TR calc.exe /SC ONCE /ST 23:59 /F");
+rejects("Start-ScheduledTask -TaskName 'McpVpsEdgeTunnel'");
+rejects("New-NetFirewallRule -DisplayName 'MCP test' -Direction Inbound -LocalAddress 10.203.0.2 -LocalPort 3011 -Action Block");
+rejects("Remove-NetRoute -DestinationPrefix '10.203.0.2/32' -Confirm:$false");
+rejects("Disable-NetAdapter -Name 'mcp-wireguard' -Confirm:$false");
+rejects("Set-NetIPAddress -InterfaceAlias 'mcp-wireguard' -IPAddress 10.203.0.2 -PrefixLength 30");
 rejects("& 'C:\\Users\\Example\\ChatGPTMcpClean\\minimal-connectors\\cutover-production-20260905.ps1'");
 rejects("& 'C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\production-replacement-guardian.ps1'");
 rejects("& 'C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\production-replacement-candidate.ps1'");
@@ -82,6 +91,18 @@ const renderOnlyEdgeOwner = await run("if ($false) { uv run --with asyncssh pyth
 assert.equal(renderOnlyEdgeOwner.exit_code, 0);
 assert.match(renderOnlyEdgeOwner.stdout, /EDGE_RENDER_ONLY_ALLOWED/);
 
+const unrelatedServiceControl = await run("if ($false) { Stop-Service 'Spooler' }; Write-Output 'UNRELATED_SERVICE_CONTROL_ALLOWED'");
+assert.equal(unrelatedServiceControl.exit_code, 0);
+assert.match(unrelatedServiceControl.stdout, /UNRELATED_SERVICE_CONTROL_ALLOWED/);
+
+const unrelatedTaskControl = await run("if ($false) { Set-ScheduledTask -TaskName 'UnrelatedTask' -Settings (New-ScheduledTaskSettingsSet) }; Write-Output 'UNRELATED_TASK_CONTROL_ALLOWED'");
+assert.equal(unrelatedTaskControl.exit_code, 0);
+assert.match(unrelatedTaskControl.stdout, /UNRELATED_TASK_CONTROL_ALLOWED/);
+
+const unrelatedAdapterControl = await run("if ($false) { Disable-NetAdapter -Name 'Ethernet' -Confirm:$false }; Write-Output 'UNRELATED_ADAPTER_CONTROL_ALLOWED'");
+assert.equal(unrelatedAdapterControl.exit_code, 0);
+assert.match(unrelatedAdapterControl.stdout, /UNRELATED_ADAPTER_CONTROL_ALLOWED/);
+
 const benignTransportReference = await run(`Get-Command ssh.exe -ErrorAction SilentlyContinue | Out-Null; Write-Output 'https://${productionVpsHost}/health'; Write-Output 'BENIGN_TRANSPORT_REFERENCE_ALLOWED'`);
 assert.equal(benignTransportReference.exit_code, 0);
 assert.match(benignTransportReference.stdout, /BENIGN_TRANSPORT_REFERENCE_ALLOWED/);
@@ -95,4 +116,4 @@ assert.equal(benign.exit_code, 0);
 assert.match(benign.stdout, /Caddyfile/);
 assert.match(benign.stdout, /3012/);
 
-console.log("PASS production_mutation_preflight direct_serving_mutations_blocked=true raw_production_vps_transport_blocked=true supported_edge_wrappers_allowed=true offpath_reference_allowed=true");
+console.log("PASS production_mutation_preflight direct_serving_mutations_blocked=true raw_production_vps_transport_blocked=true windows_production_controls_blocked=true supported_edge_wrappers_allowed=true offpath_reference_allowed=true");
