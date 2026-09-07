@@ -67,6 +67,25 @@ rejects("uv run --with asyncssh python C:\\Users\\Example\\McpVpsEdge\\provision
 rejects("Start-ScheduledTask -TaskName 'McpV3ProductionReplacementGuardian'");
 rejects("schtasks.exe /Run /TN McpV3ProductionReplacementCandidate");
 
+const guardianSourcePath = "C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\production-replacement-guardian.ps1";
+const candidateSourcePath = "C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\production-replacement-candidate.ps1";
+rejects(`pwsh.exe -NoLogo -NoProfile -File '${guardianSourcePath}'`);
+rejects(guardianSourcePath);
+rejects(`powershell.exe -NoProfile '${guardianSourcePath}'`);
+rejects(`. '${candidateSourcePath}'`);
+
+const sourceReference = await run(`Write-Output '${guardianSourcePath}'; Write-Output 'SOURCE_REFERENCE_ALLOWED'`);
+assert.equal(sourceReference.exit_code, 0);
+assert.match(sourceReference.stdout, /SOURCE_REFERENCE_ALLOWED/);
+
+const sourceRead = await run(`if ($false) { Get-Content -LiteralPath '${guardianSourcePath}' }; Write-Output 'SOURCE_READ_ALLOWED'`);
+assert.equal(sourceRead.exit_code, 0);
+assert.match(sourceRead.stdout, /SOURCE_READ_ALLOWED/);
+
+const sourceEditShape = await run(`if ($false) { Set-Content -LiteralPath '${candidateSourcePath}' -Value 'source-only' }; Write-Output 'SOURCE_EDIT_SHAPE_ALLOWED'`);
+assert.equal(sourceEditShape.exit_code, 0);
+assert.match(sourceEditShape.stdout, /SOURCE_EDIT_SHAPE_ALLOWED/);
+
 const supportedLauncher = await run("if ($false) { & 'C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\launch-production.ps1' }; Write-Output 'SUPPORTED_PRODUCTION_LAUNCHER_ALLOWED'");
 assert.equal(supportedLauncher.exit_code, 0);
 assert.match(supportedLauncher.stdout, /SUPPORTED_PRODUCTION_LAUNCHER_ALLOWED/);
