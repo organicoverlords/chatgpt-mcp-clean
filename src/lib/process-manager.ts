@@ -316,7 +316,13 @@ function mcpProductionMutationError(command: string, code: string): string | und
   const invokesObsoleteDatedCutoverHelper = /(?:^|[\\/])minimal-connectors[\\/]cutover-production-\d{8}\.ps1\b/i.test(command);
   if (invokesObsoleteDatedCutoverHelper) return productionIngressError;
 
-  const invokesReplacementInternal = /(?:^|[\\/])scripts[\\/](?:production-replacement-guardian|production-replacement-candidate)\.ps1\b/i.test(command);
+  const replacementInternalScript = String.raw`(?:production-replacement-guardian|production-replacement-candidate)\.ps1\b`;
+  const replacementInternalPath = String.raw`(?:[A-Za-z]:)?[^'";|\r\n]*?[\\/]scripts[\\/]${replacementInternalScript}`;
+  const invokesReplacementInternal = [
+    new RegExp(String.raw`(?:^|[;\r\n])\s*[.&]\s*['"]?${replacementInternalPath}`, "i"),
+    new RegExp(String.raw`\b(?:powershell|pwsh)(?:\.exe)?\b[^;\r\n]*?(?:-File\s+)?['"]?${replacementInternalPath}`, "i"),
+    new RegExp(String.raw`(?:^|[;\r\n])\s*(?:[A-Za-z]:[\\/])?[^\s;'"|]*[\\/]scripts[\\/]${replacementInternalScript}`, "i"),
+  ].some((pattern) => pattern.test(command));
   if (invokesReplacementInternal) return productionIngressError;
 
   const invokesDirectEdgeMutation = /provision_edge_extras\.py\b/i.test(command)
