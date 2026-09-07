@@ -32,9 +32,10 @@ const receipt = (overrides = {}) => ({
 });
 
 try {
-  const p1 = receipt({ process_id: "p1", request_id: "r1" });
-  writeFileSync(path.join(root, "p1.json"), JSON.stringify(p1));
-  writeFileSync(path.join(archive, "p1.json"), JSON.stringify(p1)); // duplicate must not double-count
+  const p1Id = "11111111-1111-4111-8111-111111111111";
+  const p1 = receipt({ process_id: p1Id, request_id: "r1" });
+  writeFileSync(path.join(root, `${p1Id}.json`), JSON.stringify(p1));
+  writeFileSync(path.join(archive, `${p1Id}.json`), JSON.stringify(p1)); // duplicate must be skipped before JSON parsing
 
   const p2 = receipt({
     process_id: "p2",
@@ -98,6 +99,9 @@ try {
   assert.equal(report.semantics.aggregate_only, true);
   assert.equal(report.semantics.semantic_work_quality_scored, false);
   assert.equal(report.semantics.caller_id_is_opaque_not_named_worker_identity, true);
+  assert.equal(report.source.scanned_json_files, 8);
+  assert.equal(report.source.parsed_json_files, 7);
+  assert.equal(report.source.duplicate_durable_files_skipped, 1);
   assert.equal(report.source.deduplicated_process_receipts, 4);
   assert.equal(report.source.malformed_json_files, 1);
   assert.equal(report.source.non_receipt_json_files, 1);
