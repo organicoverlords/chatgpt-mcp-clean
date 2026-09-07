@@ -16,6 +16,8 @@ assert.doesNotMatch(launcher, /asyncssh|uv\.exe|vps_mcp_reverse_tunnel\.py/i, 's
 
 const proxy = caddy.match(/reverse_proxy\s+([^\n{]+)\s*\{/);
 assert.ok(proxy, 'Caddy reverse_proxy upstream list must exist');
+assert.match(caddy, /header_up\s+-Tailscale-User-Login/i, 'public Caddy ingress must strip caller-supplied Tailscale owner identity');
+assert.match(caddy, /header_up\s+-Tailscale-Funnel-Request/i, 'public Caddy ingress must strip caller-supplied Funnel identity marker');
 assert.deepEqual(
   proxy[1].trim().split(/\s+/),
   ['10.203.0.2:3011'],

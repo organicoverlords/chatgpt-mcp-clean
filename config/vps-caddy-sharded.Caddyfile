@@ -25,6 +25,8 @@
 
 	handle {
 		reverse_proxy 10.203.0.2:3011 {
+			header_up -Tailscale-User-Login
+			header_up -Tailscale-Funnel-Request
 			transport http {
 				keepalive 30s
 				keepalive_idle_conns_per_host 4
