@@ -1,7 +1,7 @@
-# Agent rules pointer
+# Shared agent instructions
 
-Canonical rules: C:\Users\Lauri\Documents\agent-rules\RULES.md
-Context: C:\Users\Lauri\Documents\agent-rules\contexts\mcp.md
-Remote authority: https://github.com/organicoverlords/agent-rules/tree/rules/live
+Rules: `C:\Users\Lauri\.agents\RULES.md`
+Repo work contract: `C:\Users\Lauri\.agents\AGENTS.md`
+Remote authority: `https://github.com/organicoverlords/agents`
 
-Read the canonical rules and context directly. This file is pointer-only and contains no local policy.
+Read those two shared files directly. This local file is pointer-only and contains no policy.
