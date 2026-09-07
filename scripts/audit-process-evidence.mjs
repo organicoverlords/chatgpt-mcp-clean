@@ -1,7 +1,24 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
+
+const FILE_IO_CONCURRENCY = 96;
+const DURABLE_RECEIPT_NAME = /^(?:rejected-)?[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/i;
+
+async function mapLimit(items, limit, mapper) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, Math.max(1, items.length)) }, async () => {
+    while (true) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      results[index] = await mapper(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 function parseArgs(argv) {
   const args = { receiptDir: process.env.MCP_PROCESS_RECEIPT_DIR || null, since: null };
@@ -23,13 +40,13 @@ function parseArgs(argv) {
   return args;
 }
 
-function walkJsonFiles(root, sinceMs) {
-  const out = [];
+async function walkJsonFiles(root, sinceMs) {
+  const candidates = [];
   const stack = [root];
   while (stack.length) {
     const current = stack.pop();
     let entries;
-    try { entries = readdirSync(current, { withFileTypes: true }); }
+    try { entries = await readdir(current, { withFileTypes: true }); }
     catch { continue; }
     for (const entry of entries) {
       const full = path.join(current, entry.name);
@@ -41,15 +58,28 @@ function walkJsonFiles(root, sinceMs) {
           if (!Number.isNaN(dayEnd) && dayEnd < sinceMs) continue;
         }
         stack.push(full);
-      } else if (entry.isFile() && entry.name.endsWith(".json")) {
-        if (sinceMs != null) {
-          try { if (statSync(full).mtimeMs < sinceMs) continue; } catch { continue; }
-        }
-        out.push(full);
-      }
+      } else if (entry.isFile() && entry.name.endsWith(".json")) candidates.push(full);
     }
   }
-  return out;
+  const inspected = await mapLimit(candidates, FILE_IO_CONCURRENCY, async (file) => {
+    try {
+      const info = await stat(file);
+      return sinceMs != null && info.mtimeMs < sinceMs ? null : { file, mtimeMs: info.mtimeMs };
+    } catch { return null; }
+  });
+  return inspected.filter(Boolean);
+}
+
+function collapseDurableDuplicates(files) {
+  const unique = [];
+  const durable = new Map();
+  for (const candidate of files) {
+    const name = path.basename(candidate.file);
+    if (!DURABLE_RECEIPT_NAME.test(name)) { unique.push(candidate); continue; }
+    const current = durable.get(name);
+    if (!current || candidate.mtimeMs > current.mtimeMs) durable.set(name, candidate);
+  }
+  return { files: [...unique, ...durable.values()], skipped: files.length - unique.length - durable.size };
 }
 
 function sha256(text) {
@@ -151,21 +181,24 @@ function chooseDedup(existing, candidate) {
   return bMtime > aMtime ? candidate : existing;
 }
 
-function summarize(receiptDir, since) {
+async function summarize(receiptDir, since) {
   const sinceMs = since ? Date.parse(since) : null;
-  const files = walkJsonFiles(receiptDir, sinceMs);
+  const scannedFiles = await walkJsonFiles(receiptDir, sinceMs);
+  const collapsed = collapseDurableDuplicates(scannedFiles);
   const dedup = new Map();
   let malformedFiles = 0;
   let nonReceiptJsonFiles = 0;
-  for (const file of files) {
-    let receipt;
-    try { receipt = JSON.parse(readFileSync(file, "utf8")); }
-    catch { malformedFiles += 1; continue; }
+  const parsed = await mapLimit(collapsed.files, FILE_IO_CONCURRENCY, async ({ file, mtimeMs }) => {
+    try { return { receipt: JSON.parse(await readFile(file, "utf8")), file, mtimeMs }; }
+    catch { return { malformed: true }; }
+  });
+  for (const candidate of parsed) {
+    if (candidate.malformed) { malformedFiles += 1; continue; }
+    const { receipt, file, mtimeMs } = candidate;
     if (!receipt || typeof receipt.process_id !== "string") { nonReceiptJsonFiles += 1; continue; }
     const at = receiptTime(receipt);
     if (sinceMs != null && (!at || Number.isNaN(Date.parse(at)) || Date.parse(at) < sinceMs)) continue;
-    const candidate = { receipt, file, mtimeMs: statSync(file).mtimeMs };
-    dedup.set(receipt.process_id, chooseDedup(dedup.get(receipt.process_id), candidate));
+    dedup.set(receipt.process_id, chooseDedup(dedup.get(receipt.process_id), { receipt, file, mtimeMs }));
   }
 
   const totals = {
@@ -240,7 +273,9 @@ function summarize(receiptDir, since) {
     source: {
       receipt_dir: path.resolve(receiptDir),
       since: since || null,
-      scanned_json_files: files.length,
+      scanned_json_files: scannedFiles.length,
+      parsed_json_files: collapsed.files.length,
+      duplicate_durable_files_skipped: collapsed.skipped,
       malformed_json_files: malformedFiles,
       non_receipt_json_files: nonReceiptJsonFiles,
       deduplicated_process_receipts: dedup.size,
@@ -252,7 +287,7 @@ function summarize(receiptDir, since) {
 
 try {
   const args = parseArgs(process.argv.slice(2));
-  console.log(JSON.stringify(summarize(args.receiptDir, args.since), null, 2));
+  console.log(JSON.stringify(await summarize(args.receiptDir, args.since), null, 2));
 } catch (error) {
   console.error(`audit-process-evidence: ${error instanceof Error ? error.message : String(error)}`);
   process.exit(2);
