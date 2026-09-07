@@ -157,7 +157,7 @@ app.use((req, res, next) => {
 
 app.use("/authorize", (req, res, next) => {
   const login = (req.header("tailscale-user-login") || "").trim().toLowerCase();
-  if (login && login !== OWNER) {
+  if (login !== OWNER) {
     res.status(403).send("Owner authorization required");
     return;
   }
