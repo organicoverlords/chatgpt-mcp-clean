@@ -1,5 +1,5 @@
-# North star
+# MCP North Star moved
 
-Current focus (2026-08-26): keep the public MCP transport continuously reachable through backend deployments while preserving the exact minimal worker contract and every recoverable process, OAuth, and BUSY state transition.
+Canonical document: [NORTH_STAR.md](https://github.com/organicoverlords/agents/blob/main/docs/repos/chatgpt-mcp-clean/NORTH_STAR.md).
 
-The service should be boring infrastructure: transparent to workers, explicit about uncertainty, least-privilege, restartable behind a stable endpoint, and measurable at the local-server/Funnel boundary.
+This repository path is a compatibility pointer only. Edit human-facing product direction in `organicoverlords/agents`; machine-parsed README/CHANGELOG, runtime code/config, incident contracts, and evidence remain repo-owned.
