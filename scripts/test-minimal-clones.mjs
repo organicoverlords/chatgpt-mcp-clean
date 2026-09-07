@@ -103,6 +103,15 @@ async function connect(clone, clientName) {
     scope: "mcp offline_access",
     state: clientName,
   })) authorize.searchParams.set(key, value);
+  for (const headers of [
+    {},
+    { "tailscale-user-login": "   " },
+    { "tailscale-user-login": "not-owner@example.com" },
+  ]) {
+    const denied = await fetch(authorize, { redirect: "manual", headers });
+    assert.equal(denied.status, 403, `expected missing/non-owner identity to be denied, got ${denied.status}`);
+    assert.equal(await denied.text(), "Owner authorization required");
+  }
   const authorization = await fetch(authorize, { redirect: "manual", headers: { "tailscale-user-login": "owner@example.com" } });
   assert.equal(authorization.status, 302, await authorization.text());
   const code = new URL(authorization.headers.get("location")).searchParams.get("code");
