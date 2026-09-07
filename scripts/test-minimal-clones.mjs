@@ -107,9 +107,10 @@ async function connect(clone, clientName) {
     {},
     { "tailscale-user-login": "   " },
     { "tailscale-user-login": "not-owner@example.com" },
+    { "tailscale-user-login": "owner@example.com", "tailscale-funnel-request": "1" },
   ]) {
     const denied = await fetch(authorize, { redirect: "manual", headers });
-    assert.equal(denied.status, 403, `expected missing/non-owner identity to be denied, got ${denied.status}`);
+    assert.equal(denied.status, 403, `expected untrusted authorization context to be denied, got ${denied.status}`);
     assert.equal(await denied.text(), "Owner authorization required");
   }
   const authorization = await fetch(authorize, { redirect: "manual", headers: { "tailscale-user-login": "owner@example.com" } });
