@@ -73,6 +73,8 @@ New-Item -ItemType Directory -Force -Path $instanceState,$SharedReceiptDirectory
 if (-not $OAuthStorePath) { $OAuthStorePath = Join-Path $instanceState 'oauth.json' }
 $oauthDirectory = Split-Path -Parent $OAuthStorePath
 if ($oauthDirectory) { New-Item -ItemType Directory -Force -Path $oauthDirectory | Out-Null }
+& (Join-Path $Root 'scripts\protect-oauth-state.ps1') -OAuthStorePath $OAuthStorePath
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $env:PORT = [string]$Port
 $env:HOST = if ($WireGuardCandidate) { '10.203.0.2' } else { '127.0.0.1' }
 $env:MCP_WIREGUARD_CANDIDATE = if ($WireGuardCandidate) { '1' } else { '0' }
