@@ -13,6 +13,7 @@ import { LocalOAuthProvider } from "./lib/local-oauth-provider.js";
 import { observeSocket, sessionFingerprint, setTelemetrySink, withTelemetryContext } from "./lib/transport-telemetry.js";
 import { createResponseByteCounter } from "./lib/response-bytes.js";
 import { createServer, processRuntimeStatus } from "./server.js";
+import { registerVisualProofApp } from "./lib/visual-proof-app.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "127.0.0.1";
@@ -64,6 +65,7 @@ function jsonError(res: Response, status: number, message: string): void {
 
 async function handleStateless(req: Request, res: Response, body: unknown): Promise<void> {
   const server: McpServer = createServer(callerId(req));
+  if (process.env.MCP_VISUAL_PROOF_UI === "1") registerVisualProofApp(server);
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
