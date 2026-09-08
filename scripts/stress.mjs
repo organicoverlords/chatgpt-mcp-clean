@@ -94,11 +94,9 @@ async function mcpPost(message, extraHeaders = {}) {
 }
 
 const health = async () => (await jsonFetch(`${origin}/health`)).body;
-function rssMb() {
+function rssMb(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
   try {
-    const pid = JSON.parse(execFileSync("powershell.exe", ["-NoProfile", "-Command",
-      "(Get-NetTCPConnection -State Listen -LocalPort 3000).OwningProcess | Select-Object -First 1 | ConvertTo-Json"],
-      { encoding: "utf8" }).trim());
     const ws = execFileSync("powershell.exe", ["-NoProfile", "-Command",
       `(Get-Process -Id ${pid}).WorkingSet64`], { encoding: "utf8" }).trim();
     return Math.round(Number(ws) / 1048576 * 10) / 10;
@@ -131,7 +129,7 @@ async function pool(total, concurrency, task) {
 const listCall = () => ({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
 
 const baselineHealth = await health();
-const baselineRss = rssMb();
+const baselineRss = rssMb(Number(baselineHealth.pid));
 console.log(`baseline: rss=${baselineRss}MB active=${baselineHealth.active_requests} total=${baselineHealth.total_requests}\n`);
 
 // ---------- phase 1: burst ----------
@@ -223,7 +221,7 @@ console.log(`\nphase 5 - settle & leak check`);
 await new Promise((r) => setTimeout(r, 3000));
 {
   const after = await health();
-  const afterRss = rssMb();
+  const afterRss = rssMb(Number(after.pid));
   console.log(`  active_requests=${after.active_requests} total_requests=${after.total_requests} rss=${afterRss}MB (baseline ${baselineRss}MB)`);
   after.active_requests === 0 ? ok("no leaked in-flight requests") : fail(`active_requests=${after.active_requests}, expected 0`);
   if (baselineRss && afterRss) {
