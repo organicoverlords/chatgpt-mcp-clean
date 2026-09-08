@@ -113,6 +113,29 @@ function adverseFamily(event) {
   return classification.includes("block") ? "direct_tool_block" : "user_visible_or_above_mcp";
 }
 
+function parseEventWindow(event) {
+  if (event.event_time_known !== true || !event.event_window || typeof event.event_window !== "object") return null;
+  const window = event.event_window;
+  let startRaw = window.start ?? window.start_at ?? null;
+  let endRaw = window.end ?? window.end_at ?? window.end_at_least ?? null;
+
+  if (!startRaw || !endRaw) {
+    for (const key of ["local", "utc"]) {
+      const value = typeof window[key] === "string" ? window[key].trim() : "";
+      const parts = value.split("..");
+      if (parts.length !== 2) continue;
+      startRaw = parts[0].trim();
+      endRaw = parts[1].trim();
+      break;
+    }
+  }
+
+  const eventStartMs = Date.parse(startRaw);
+  const eventEndMs = Date.parse(endRaw);
+  if (!Number.isFinite(eventStartMs) || !Number.isFinite(eventEndMs) || eventEndMs < eventStartMs) return null;
+  return { startMs: eventStartMs, endMs: eventEndMs };
+}
+
 function binIndex(atMs) {
   return Math.min(Math.floor((atMs - startMs) / binMs), Math.max(0, Math.ceil((endMs - startMs) / binMs) - 1));
 }
@@ -240,6 +263,8 @@ const unknownAdverseReportFamilies = new Map();
 let routingMalformed = 0;
 let routingRecords = 0;
 let knownAdverseInWindow = 0;
+let knownPointAdverseInWindow = 0;
+let knownWindowAdverseInWindow = 0;
 let unknownAdverseReportsInWindow = 0;
 let knownDirectBlockAttempts = 0;
 
@@ -255,6 +280,20 @@ for await (const line of readline.createInterface({ input: routingInput, crlfDel
   if (Number.isFinite(eventTimeMs)) {
     if (eventTimeMs >= startMs && eventTimeMs <= endMs) {
       knownAdverseInWindow++;
+      knownPointAdverseInWindow++;
+      increment(knownAdverseClassifications, event.classification ?? "unknown");
+      const family = adverseFamily(event);
+      if (family) increment(knownAdverseFamilies, family);
+      knownDirectBlockAttempts += directBlockAttempts(event);
+    }
+    continue;
+  }
+
+  const eventWindow = parseEventWindow(event);
+  if (eventWindow) {
+    if (eventWindow.startMs <= endMs && eventWindow.endMs >= startMs) {
+      knownAdverseInWindow++;
+      knownWindowAdverseInWindow++;
       increment(knownAdverseClassifications, event.classification ?? "unknown");
       const family = adverseFamily(event);
       if (family) increment(knownAdverseFamilies, family);
@@ -336,6 +375,8 @@ const report = {
     total_records: routingRecords,
     malformed_lines: routingMalformed,
     known_event_time_adverse_in_window: knownAdverseInWindow,
+    known_point_event_adverse_in_window: knownPointAdverseInWindow,
+    known_event_window_adverse_in_window: knownWindowAdverseInWindow,
     known_event_time_adverse_classifications: statusObject(knownAdverseClassifications),
     known_event_time_adverse_families: statusObject(knownAdverseFamilies),
     known_direct_block_attempts_in_window: knownDirectBlockAttempts,
@@ -345,13 +386,15 @@ const report = {
     normalized_rates_per_1000_process_tool_calls: {
       denominator_process_tool_calls: processToolCalls,
       known_event_time_adverse: perThousand(knownAdverseInWindow, processToolCalls),
+      known_point_event_adverse: perThousand(knownPointAdverseInWindow, processToolCalls),
+      known_event_window_adverse: perThousand(knownWindowAdverseInWindow, processToolCalls),
       known_direct_block_attempts: perThousand(knownDirectBlockAttempts, processToolCalls),
       known_event_time_adverse_families: rateObject(knownAdverseFamilies, processToolCalls),
       unknown_event_time_adverse_reports_received: perThousand(unknownAdverseReportsInWindow, processToolCalls),
       unknown_event_time_adverse_report_families: rateObject(unknownAdverseReportFamilies, processToolCalls),
       semantics: "Descriptive exposure-normalized counts only. Known-time event rates use occurrence-window assignment; unknown-time rates are report-receipt density, not occurrence rates. These rates do not establish statistical significance or causal effect.",
     },
-    time_semantics: "event_time_known=true uses event_time for occurrence-window assignment; unknown occurrence times are never inferred from reported_at and are surfaced separately if the report was received inside the window",
+    time_semantics: "event_time_known=true uses a valid scalar event_time or supported exact event_window for occurrence-window assignment; event windows count only when their preserved interval overlaps the analysis window. The legacy known_event_time_* aggregate fields include both point and interval occurrence evidence. Unknown occurrence times are never inferred from reported_at and are surfaced separately if the report was received inside the window",
   },
   acceptance: {
     status: acceptanceStatus,
