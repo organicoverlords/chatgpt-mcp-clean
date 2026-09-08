@@ -91,6 +91,30 @@ try {
   assert.deepEqual(report.routing_events.normalized_rates_per_1000_process_tool_calls.unknown_event_time_adverse_report_families, { user_visible_or_above_mcp: 250 });
   assert.equal(report.acceptance.unknown_event_time_adverse_report_present, true);
 
+  // Exact preserved event windows are occurrence evidence; overlap must count without inventing a point timestamp.
+  writeFileSync(routingPath, [
+    r({ reported_at: "2026-09-06T15:20:00Z", classification: "user_confirmed_visible_reroute_with_active_then_idle_worker_and_stop_go_resume", event_time_known: true, event_window: { local: "2026-09-06T18:10:00+03:00..2026-09-06T18:12:00+03:00" } }),
+    r({ reported_at: "2026-09-06T15:21:00Z", classification: "user_observed_extended_reroute_or_thinking_stall_with_tool_activity_window", event_time_known: true, event_window: { source: "user supplied exact window", start: "2026-09-06T15:15:00Z", end_at_least: "2026-09-06T15:16:00Z" } }),
+  ].join("\n") + "\n", "utf8");
+  report = run();
+  assert.equal(report.acceptance.status, "RECURRENCE_OBSERVED");
+  assert.equal(report.routing_events.known_event_time_adverse_in_window, 2);
+  assert.equal(report.routing_events.known_point_event_adverse_in_window, 0);
+  assert.equal(report.routing_events.known_event_window_adverse_in_window, 2);
+  assert.deepEqual(report.routing_events.known_event_time_adverse_families, { user_visible_or_above_mcp: 2 });
+  assert.equal(report.routing_events.unknown_event_time_adverse_reports_received_in_window, 0);
+  assert.equal(report.routing_events.normalized_rates_per_1000_process_tool_calls.known_event_window_adverse, 500);
+
+  // A known exact event window outside the analysis interval must not be reassigned from report time.
+  writeFileSync(routingPath, [
+    r({ reported_at: "2026-09-06T15:10:00Z", classification: "user_confirmed_visible_reroute_with_active_then_idle_worker_and_stop_go_resume", event_time_known: true, event_window: { local: "2026-09-06T17:10:00+03:00..2026-09-06T17:12:00+03:00" } }),
+  ].join("\n") + "\n", "utf8");
+  report = run();
+  assert.equal(report.acceptance.status, "CLEAN_OBSERVED_WINDOW");
+  assert.equal(report.routing_events.known_event_time_adverse_in_window, 0);
+  assert.equal(report.routing_events.known_event_window_adverse_in_window, 0);
+  assert.equal(report.routing_events.unknown_event_time_adverse_reports_received_in_window, 0);
+
   // A known-time direct block inside the window is a recurrence; attempts_blocked must be counted.
   writeFileSync(routingPath, [
     r({ reported_at: "2026-09-06T15:12:01Z", classification: "assistant_observed_direct_read_output_security_block", event_time_known: true, event_time: "2026-09-06T15:12:00Z", operation: { attempts_blocked: 2, process_id: "secret-process-id" } }),
@@ -98,6 +122,8 @@ try {
   report = run();
   assert.equal(report.acceptance.status, "RECURRENCE_OBSERVED");
   assert.equal(report.routing_events.known_event_time_adverse_in_window, 1);
+  assert.equal(report.routing_events.known_point_event_adverse_in_window, 1);
+  assert.equal(report.routing_events.known_event_window_adverse_in_window, 0);
   assert.deepEqual(report.routing_events.known_event_time_adverse_families, { direct_tool_block: 1 });
   assert.equal(report.routing_events.known_direct_block_attempts_in_window, 2);
   assert.deepEqual(report.routing_events.known_event_time_adverse_classifications, { assistant_observed_direct_read_output_security_block: 1 });
