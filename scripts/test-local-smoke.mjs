@@ -94,7 +94,39 @@ try {
     smoke.once("exit", (code) => resolveExit(code ?? 1));
   });
   assert.equal(exitCode, 0, `local smoke failed; server stderr: ${serverStderr}`);
-  console.log(`PASS local_smoke origin=${origin} production_untouched=true`);
+
+  const stress = spawn(process.execPath, [resolve("scripts/stress.mjs")], {
+    cwd: resolve("."),
+    env: {
+      ...process.env,
+      MCP_SMOKE_ORIGIN: origin,
+      MCP_PUBLIC_ORIGIN: publicOrigin,
+      MCP_TOOL_PROFILE: "full",
+      TAILSCALE_OWNER_LOGIN: "owner@example.com",
+      STRESS_BURST: "1",
+      STRESS_SUSTAINED: "1",
+      STRESS_CONCURRENCY: "1",
+      STRESS_PROCS: "1",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  let stressStdout = "";
+  let stressStderr = "";
+  stress.stdout.on("data", (chunk) => { stressStdout += chunk.toString(); });
+  stress.stderr.on("data", (chunk) => { stressStderr += chunk.toString(); });
+  const stressExitCode = await new Promise((resolveExit, reject) => {
+    stress.once("error", reject);
+    stress.once("exit", (code) => resolveExit(code ?? 1));
+  });
+  assert.equal(stressExitCode, 0, `dynamic-port stress failed: ${stressStdout}
+${stressStderr}`);
+  assert.doesNotMatch(stressStdout, /rss=nullMB/, `dynamic-port stress lost RSS measurement: ${stressStdout}`);
+  assert.match(stressStdout, /baseline: rss=\d+(?:\.\d+)?MB/, `dynamic-port stress did not report baseline RSS: ${stressStdout}`);
+  assert.match(stressStdout, /rss=\d+(?:\.\d+)?MB \(baseline \d+(?:\.\d+)?MB\)/, `dynamic-port stress did not report settled RSS: ${stressStdout}`);
+  assert.equal(stressStderr.trim(), "", `dynamic-port stress emitted stderr: ${stressStderr}`);
+
+  console.log(`PASS local_smoke origin=${origin} stress_rss_dynamic_port=true production_untouched=true`);
 } finally {
   if (server.pid) spawnSync("taskkill.exe", ["/PID", String(server.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
   rmSync(temporary, { recursive: true, force: true });
