@@ -57,7 +57,10 @@ assert.match(installer, /McpV3ProductionReplacementGuardian/);
 for (const required of ["ExplicitUserAuthorization", "IndependentRollbackVerified", "OffPathProofVerified"]) assert.match(request, new RegExp(required));
 assert.match(request, /ExpectedCurrentGeneration/);
 assert.match(request, /ExpectedCaddySha256/);
-assert.match(request, /canonical MCP freeze/);
+assert.match(request, /mcp-recovery-state\.json/);
+assert.match(request, /mcp-recovery-state\.v1/);
+assert.match(request, /recovery_target\.deployment_id/);
+assert.match(request, /deployment\.caddy\.sha256/);
 assert.match(request, /candidate_port = 3012/);
 assert.match(request, /Start-ScheduledTask -TaskName \$guardianTask/);
 

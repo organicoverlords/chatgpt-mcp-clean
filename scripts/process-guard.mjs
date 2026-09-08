@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProcessManager } from "../dist/lib/process-manager.js";
@@ -95,6 +95,11 @@ try {
   const started = beforeRestart.start("Write-Output 'RESTART_RECEIPT_OK'", undefined, "caller_restart_receipt_test");
   const completed = await waitForExit(beforeRestart, started.process_id);
   assert.equal(completed.exit_code, 0);
+
+  const hotReceiptPath = join(receiptDirectory, `${started.process_id}.json`);
+  const receiptDeadline = Date.now() + 5_000;
+  while (!existsSync(hotReceiptPath) && Date.now() < receiptDeadline) await sleep(10);
+  assert.equal(existsSync(hotReceiptPath), true, "caller-visible completion must be followed by a durable hot receipt");
 
   const afterRestart = new ProcessManager({ receiptDirectory });
   const recovered = afterRestart.read(started.process_id);

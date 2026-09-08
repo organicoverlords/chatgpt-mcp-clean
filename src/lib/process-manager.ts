@@ -591,17 +591,17 @@ export class ProcessManager {
     state.terminalObserved = true;
     const exitCode = code ?? -1;
     const finishedAt = new Date().toISOString();
-    void (async () => {
-      await this.persistReceiptAsync(state, exitCode, signal, finishedAt);
-      state.exitCode = exitCode;
-      if (signal) state.signal = signal;
-      state.finishedAt = finishedAt;
-      state.launching = false;
-      this.markProcessChanged(state);
-      emitTelemetry({ event: "process_exit_observed", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, exit_code: state.exitCode, signal: state.signal ?? null, started_at: state.startedAt, finished_at: state.finishedAt }, state.ownerContext);
-      sharedLauncherHandlers.delete(state.id);
-      state.resolveDone();
-    })();
+    // Publish terminal state before receipt I/O. Under Windows hard paging,
+    // receipt/archive writes can be delayed long after the child has exited.
+    state.exitCode = exitCode;
+    if (signal) state.signal = signal;
+    state.finishedAt = finishedAt;
+    state.launching = false;
+    this.markProcessChanged(state);
+    emitTelemetry({ event: "process_exit_observed", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, exit_code: state.exitCode, signal: state.signal ?? null, started_at: state.startedAt, finished_at: state.finishedAt }, state.ownerContext);
+    sharedLauncherHandlers.delete(state.id);
+    state.resolveDone();
+    void this.persistReceiptAsync(state, exitCode, signal, finishedAt);
   }
 
   private handleLauncherMessage(message: any): void {

@@ -38,7 +38,9 @@ try {
 
   const archiveDay = completed.finished_at.slice(0, 10);
   const archivedPath = join(receiptDirectory, "archive", archiveDay, `${started.process_id}.json`);
-  assert.equal(existsSync(archivedPath), true, "new receipts must be archived immediately");
+  const archiveDeadline = Date.now() + 5_000;
+  while (!existsSync(archivedPath) && Date.now() < archiveDeadline) await sleep(10);
+  assert.equal(existsSync(archivedPath), true, "caller-visible completion must be followed by durable archival");
   const archived = JSON.parse(readFileSync(archivedPath, "utf8"));
   assert.equal(archived.request_id, "request_receipt_archive_test", "durable receipt must join back to its originating MCP request");
   assert.equal(archived.retained_stdout_chars, archived.stdout.length);
