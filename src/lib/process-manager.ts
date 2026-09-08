@@ -310,6 +310,40 @@ function p3BuildSlotWaitError(command: string, code: string): string | undefined
   return undefined;
 }
 
+function swarmRouteDecisionIsolationError(command: string, code: string): string | undefined {
+  const boundaries = [...code.matchAll(/[;\r\n]/g)].map((match) => match.index ?? 0);
+  const starts = [0, ...boundaries.map((index) => index + 1)];
+  const ends = [...boundaries, command.length];
+  let routeSegment = -1;
+
+  for (let segmentIndex = 0; segmentIndex < starts.length; segmentIndex += 1) {
+    const start = starts[segmentIndex]!;
+    const end = ends[segmentIndex]!;
+    const rawSegment = command.slice(start, end);
+    const codeSegment = code.slice(start, end);
+    const invokesPython = /\b(?:python|python3|py)(?:\.exe)?\b/i.test(codeSegment);
+    const routeMatch = /\bswarm_route\.py['"]?\s+route\b/i.exec(rawSegment);
+    const routeVerbOffset = routeMatch ? routeMatch[0].toLowerCase().lastIndexOf("route") : -1;
+    const routeVerbVisible = routeMatch !== null && routeVerbOffset >= 0
+      && codeSegment.slice(routeMatch.index + routeVerbOffset, routeMatch.index + routeVerbOffset + 5).toLowerCase() === "route";
+    if (!invokesPython || !routeVerbVisible) continue;
+    routeSegment = segmentIndex;
+    if (/\|/.test(codeSegment) || /&&/.test(codeSegment)) {
+      return "swarm_route.py route must run as a standalone start_process call; inspect its route result before executing assigned work";
+    }
+  }
+
+  if (routeSegment < 0) return undefined;
+  for (let segmentIndex = 0; segmentIndex < starts.length; segmentIndex += 1) {
+    if (segmentIndex === routeSegment) continue;
+    const codeSegment = code.slice(starts[segmentIndex]!, ends[segmentIndex]!);
+    if (codeSegment.trim()) {
+      return "swarm_route.py route must run as a standalone start_process call; inspect its route result before executing assigned work";
+    }
+  }
+  return undefined;
+}
+
 function mcpProductionMutationError(command: string, code: string): string | undefined {
   const productionIngressError = "direct MCP production ingress mutation is blocked; use the documented redundant replacement/recovery scripts and prove the replacement off-path before changing serving production";
 
@@ -422,6 +456,8 @@ function powershellPreflightError(command: string): string | undefined {
   if (rootScanError) return rootScanError;
   const p3BuildWaitError = p3BuildSlotWaitError(command, code);
   if (p3BuildWaitError) return p3BuildWaitError;
+  const swarmRouteError = swarmRouteDecisionIsolationError(command, code);
+  if (swarmRouteError) return swarmRouteError;
   const productionMutationError = mcpProductionMutationError(command, code);
   if (productionMutationError) return productionMutationError;
   const automaticVariable = String.raw`\$(?:(?:global|script|local|private):)?(?:PID|args)`;

@@ -56,6 +56,19 @@ rejects("$lane='C:\\work'; $ownerPid=20052; while((Get-Date)-lt (Get-Date).AddMi
 rejects("Wait-Process -Id 20052; & 'C:\\work\\scripts\\Invoke-P3HotSourceBuild.ps1' -Module P3Gameplay", /P3 build-slot waits/);
 rejects("$lane='C:\\work'; $ubt='C:\\UE\\UnrealBuildTool.dll'; $slot=[Threading.Mutex]::new($false,'Global\\P3BuildGraphSlot_v3_1'); $held=$slot.WaitOne(120000); & $dot $ubt p3Editor Win64 Development '-Project=C:\\work\\p3.uproject' -Module=p3", /P3 build-slot mutex waits/);
 
+rejects("python C:\\Users\\Lauri\\Desktop\\vault\\tools\\swarm_route.py route --work-id p3-2442-integration --kind portable-light; Write-Output 'LOCAL_WORK_CONTINUED'", /standalone start_process/);
+rejects("python 'C:\\Users\\Lauri\\Desktop\\vault\\tools\\swarm_route.py' route --work-id p3-2442-integration --kind portable-light\nWrite-Output 'LOCAL_WORK_CONTINUED'", /standalone start_process/);
+rejects("python C:\\Users\\Lauri\\Desktop\\vault\\tools\\swarm_route.py route --work-id p3-2442-integration --kind portable-light | ConvertFrom-Json", /standalone start_process/);
+const standaloneRoute = await run("python 'C:\\definitely-missing\\swarm_route.py' route --work-id preflight-selftest --kind windows-only", "caller_swarm_route_standalone");
+assert.notEqual(standaloneRoute.exit_code, 0, "missing fixture route should fail at execution, not preflight");
+const routeLiterals = await run("Write-Output 'python C:\\fake\\swarm_route.py route --work-id literal --kind portable; Write-Output bad'; # python C:\\fake\\swarm_route.py route --work-id comment --kind portable\nWrite-Output 'ROUTE_LITERAL_ALLOWED'", "caller_swarm_route_literals");
+assert.equal(routeLiterals.exit_code, 0, JSON.stringify(routeLiterals));
+assert.match(routeLiterals.stdout, /ROUTE_LITERAL_ALLOWED/);
+
+const pythonRouteLiteral = await run("python -c \"print('swarm_route.py route')\"; Write-Output 'PYTHON_ROUTE_LITERAL_ALLOWED'", "caller_python_swarm_route_literal");
+assert.equal(pythonRouteLiteral.exit_code, 0, JSON.stringify(pythonRouteLiteral));
+assert.match(pythonRouteLiteral.stdout, /PYTHON_ROUTE_LITERAL_ALLOWED/);
+
 const ordinaryWait = await run("Wait-Process -Id 2147483647 -ErrorAction SilentlyContinue; Write-Output 'ORDINARY_WAIT_ALLOWED'", "caller_ordinary_wait_allowed");
 assert.match(ordinaryWait.stdout, /ORDINARY_WAIT_ALLOWED/);
 const ordinaryMutex = await run("$m=[Threading.Mutex]::new($false,'Local\\McpOrdinaryMutex'); try { [void]$m.WaitOne(1); Write-Output 'ORDINARY_MUTEX_ALLOWED' } finally { try { $m.ReleaseMutex() } catch {}; $m.Dispose() }", "caller_ordinary_mutex_allowed");
