@@ -6,7 +6,8 @@ try {
     $held = $mutex.WaitOne(0)
     if (-not $held) { exit 0 }
     $runtimeRoot = Split-Path -Parent $PSScriptRoot
-    $env:MCP_OWNER_AUTH_ORIGIN = 'https://kone.tailbf0440.ts.net'
+    $env:MCP_OWNER_AUTH_ORIGIN = ''
+    $env:MCP_OWNER_AUTH_MODE = 'local-edge'
     & (Join-Path $runtimeRoot 'scripts\start-minimal-clone.ps1') `
         -InstanceId 'home-direct-test' `
         -Port 3022 `
