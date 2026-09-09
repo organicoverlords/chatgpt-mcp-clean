@@ -91,9 +91,9 @@ try {
   const launcher = readFileSync(resolve("scripts/start-minimal-clone.ps1"), "utf8");
   for (const required of [
     "$env:MCP_RUNTIME_INSTANCE_ID = $InstanceId",
-    "$env:MCP_RUNTIME_SOURCE_COMMIT = $runtimeSourceCommit",
-    "$env:MCP_RUNTIME_DIST_SHA256 = $runtimeDistSha256",
-    "$env:MCP_RUNTIME_SOURCE_DIRTY = if ($runtimeTrackedChanges.Count -gt 0) { '1' } else { '0' }",
+    "$env:MCP_RUNTIME_SOURCE_COMMIT = [string]$Identity.source_commit",
+    "$env:MCP_RUNTIME_DIST_SHA256 = [string]$Identity.dist_sha256",
+    "$env:MCP_RUNTIME_SOURCE_DIRTY = if ($Identity.source_dirty) { '1' } else { '0' }",
   ]) assert.ok(launcher.includes(required), `launcher missing runtime identity binding: ${required}`);
   assert.match(launcher, /Get-FileHash -LiteralPath \$runtimeDistIndex -Algorithm SHA256/);
   const publicHost = new URL(publicOrigin).hostname;
