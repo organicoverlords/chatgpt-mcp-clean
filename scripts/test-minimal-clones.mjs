@@ -214,7 +214,13 @@ try {
   const liveStarted = await a1.call("start_process", {
     command: "Start-Sleep -Milliseconds 300; Write-Output 'CLONE_LIVE_HANDOFF'; Start-Sleep -Seconds 10",
   });
-  const liveSeenFromB = await b1.call("read_output", { process_id: liveStarted.process_id, wait_ms: 1_500 });
+  let liveSeenFromB;
+  for (let i = 0; i < 10; i++) {
+    liveSeenFromB = await b1.call("read_output", { process_id: liveStarted.process_id, wait_ms: 1_000 });
+    if (/CLONE_LIVE_HANDOFF/.test(liveSeenFromB.stdout)) break;
+    assert.equal(liveSeenFromB.running, true, JSON.stringify(liveSeenFromB));
+    await sleep(100);
+  }
   assert.equal(liveSeenFromB.running, true, JSON.stringify(liveSeenFromB));
   assert.match(liveSeenFromB.stdout, /CLONE_LIVE_HANDOFF/);
   const killedFromB = await b1.call("kill_process", { process_id: liveStarted.process_id });

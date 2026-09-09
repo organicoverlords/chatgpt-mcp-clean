@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const index = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
 const launcher = readFileSync(new URL("./start-minimal-clone.ps1", import.meta.url), "utf8");
 const request = readFileSync(new URL("./replace-wireguard-production.ps1", import.meta.url), "utf8");
@@ -77,7 +80,7 @@ assert.equal(validateOnly.status, "MCP_PRODUCTION_REPLACEMENT_TASKS_VALIDATED");
 assert.equal(validateOnly.principal_user_id, "KONE\\McpServiceProof");
 assert.equal(validateOnly.principal_logon_type, "S4U");
 assert.equal(validateOnly.run_level, "Limited");
-assert.ok(validateOnly.repo_root.endsWith("issue196-identity-acl"));
+assert.equal(validateOnly.repo_root.toLowerCase(), repoRoot.toLowerCase());
 assert.ok(validateOnly.edge_owner_path.endsWith("McpVpsEdge\\provision_edge_extras.py"));
 assert.equal(validateOnly.mutates_task_scheduler, false);
 assert.deepEqual(validateOnly.task_names.sort(), ["McpV3ProductionReplacementCandidate", "McpV3ProductionReplacementGuardian"]);
