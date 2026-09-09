@@ -8,6 +8,7 @@ param(
     [switch]$WireGuardCandidate,
     [switch]$ValidateOnly,
     [switch]$SkipBuild,
+    [switch]$SkipNativeRuntimePriority,
     [switch]$RestartOnUnexpectedExit,
     [ValidateRange(1,60)][int]$RestartBackoffSeconds = 2,
     [ValidateRange(0,1000)][int]$RestartLimit = 0,
@@ -18,6 +19,7 @@ $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $Root
 function Set-McpRuntimePriority {
+    if ($SkipNativeRuntimePriority) { return }
     $currentProcess = Get-Process -Id $PID
     $currentProcess.PriorityClass = 'Normal'
     if (-not ('McpRuntimePriorityNative' -as [type])) {
