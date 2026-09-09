@@ -22,6 +22,26 @@ const ORIGIN = (process.env.MCP_PUBLIC_ORIGIN || "").trim();
 const OWNER = (process.env.TAILSCALE_OWNER_LOGIN || "").trim().toLowerCase();
 const STORE = process.env.MCP_OAUTH_STORE_PATH || ".state/oauth.json";
 
+const runtimeIdentityRaw = {
+  instanceId: (process.env.MCP_RUNTIME_INSTANCE_ID || "").trim(),
+  sourceCommit: (process.env.MCP_RUNTIME_SOURCE_COMMIT || "").trim().toLowerCase(),
+  distSha256: (process.env.MCP_RUNTIME_DIST_SHA256 || "").trim().toLowerCase(),
+  sourceDirty: (process.env.MCP_RUNTIME_SOURCE_DIRTY || "").trim(),
+};
+const runtimeIdentityValueCount = Object.values(runtimeIdentityRaw).filter(Boolean).length;
+if (runtimeIdentityValueCount !== 0 && runtimeIdentityValueCount !== 4) throw new Error("MCP runtime identity must be supplied completely or omitted");
+if (runtimeIdentityRaw.instanceId && !/^[A-Za-z0-9._-]+$/.test(runtimeIdentityRaw.instanceId)) throw new Error("MCP_RUNTIME_INSTANCE_ID is invalid");
+if (runtimeIdentityRaw.sourceCommit && !/^[0-9a-f]{40}$/.test(runtimeIdentityRaw.sourceCommit)) throw new Error("MCP_RUNTIME_SOURCE_COMMIT is invalid");
+if (runtimeIdentityRaw.distSha256 && !/^[0-9a-f]{64}$/.test(runtimeIdentityRaw.distSha256)) throw new Error("MCP_RUNTIME_DIST_SHA256 is invalid");
+if (runtimeIdentityRaw.sourceDirty && !/^[01]$/.test(runtimeIdentityRaw.sourceDirty)) throw new Error("MCP_RUNTIME_SOURCE_DIRTY must be 0 or 1");
+const runtimeIdentity = {
+  launcher_bound: runtimeIdentityValueCount === 4,
+  instance_id: runtimeIdentityRaw.instanceId || null,
+  source_commit: runtimeIdentityRaw.sourceCommit || null,
+  dist_sha256: runtimeIdentityRaw.distSha256 || null,
+  source_dirty: runtimeIdentityRaw.sourceDirty ? runtimeIdentityRaw.sourceDirty === "1" : null,
+};
+
 const backendMode = process.env.MCP_BACKEND_MODE === "1";
 const wireGuardCandidate = process.env.MCP_WIREGUARD_CANDIDATE === "1";
 const wireGuardHost = "10.203.0.2";
@@ -213,7 +233,7 @@ app.use("/mcp", (req, res, next) => {
 app.post("/mcp", bearer, handleMcp);
 app.get("/mcp", bearer, (_req, res) => res.status(405).set("Allow", "POST").send("Method not allowed."));
 app.delete("/mcp", bearer, (_req, res) => res.status(405).set("Allow", "POST").send("Method not allowed."));
-app.get("/health", (_req, res) => res.json({ status: "ok", name: "shell-mcp", role: backendMode ? "backend" : "direct", ...(backendGeneration ? { backend_generation: backendGeneration } : {}), host: HOST, port: PORT, pid: process.pid, active_requests: activeRequests, total_requests: totalRequests, ...processRuntimeStatus(), wireguard_candidate: wireGuardCandidate, force_connection_close: forceConnectionClose }));
+app.get("/health", (_req, res) => res.json({ status: "ok", name: "shell-mcp", role: backendMode ? "backend" : "direct", ...(backendGeneration ? { backend_generation: backendGeneration } : {}), runtime_identity: runtimeIdentity, host: HOST, port: PORT, pid: process.pid, active_requests: activeRequests, total_requests: totalRequests, ...processRuntimeStatus(), wireguard_candidate: wireGuardCandidate, force_connection_close: forceConnectionClose }));
 
 const httpServer = app.listen(PORT, HOST, () => console.error(`shell-mcp listening on http://${HOST}:${PORT}/mcp`));
 httpServer.on("connection", (socket) => { observeSocket(socket); });
