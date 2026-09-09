@@ -219,6 +219,7 @@ const oauthMetadata = {
   scopes_supported: ["mcp", "offline_access"],
 };
 
+if (!publicBasePath) app.get("/.well-known/oauth-authorization-server", (_req, res) => res.json(oauthMetadata));
 app.get("/.well-known/openid-configuration", (_req, res) => res.json(oauthMetadata));
 // Path-scoped connector identities use RFC 8414 discovery with the issuer path
 // inserted after the well-known prefix. Keep these explicit routes ahead of the
