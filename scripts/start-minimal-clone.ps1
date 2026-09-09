@@ -87,6 +87,17 @@ $env:MCP_PROCESS_RECEIPT_DIR = $SharedReceiptDirectory
 
 if (-not $env:TAILSCALE_OWNER_LOGIN) { throw 'TAILSCALE_OWNER_LOGIN is required (normally supplied by .env)' }
 if (-not $SkipBuild) { & npm.cmd run build --silent; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+$runtimeSourceCommit = (& git.exe -C $Root rev-parse HEAD).Trim().ToLowerInvariant()
+if ($LASTEXITCODE -ne 0 -or $runtimeSourceCommit -notmatch '^[0-9a-f]{40}$') { throw 'cannot bind MCP runtime source commit' }
+$runtimeTrackedChanges = @(& git.exe -C $Root status --porcelain=v1 --untracked-files=no)
+if ($LASTEXITCODE -ne 0) { throw 'cannot bind MCP runtime source cleanliness' }
+$runtimeDistIndex = Join-Path $Root 'dist\index.js'
+if (-not (Test-Path -LiteralPath $runtimeDistIndex -PathType Leaf)) { throw 'cannot bind MCP runtime dist identity: dist/index.js is missing' }
+$runtimeDistSha256 = (Get-FileHash -LiteralPath $runtimeDistIndex -Algorithm SHA256).Hash.ToLowerInvariant()
+$env:MCP_RUNTIME_INSTANCE_ID = $InstanceId
+$env:MCP_RUNTIME_SOURCE_COMMIT = $runtimeSourceCommit
+$env:MCP_RUNTIME_DIST_SHA256 = $runtimeDistSha256
+$env:MCP_RUNTIME_SOURCE_DIRTY = if ($runtimeTrackedChanges.Count -gt 0) { '1' } else { '0' }
 & node.exe scripts/verify-process-contract.mjs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & node.exe dist/index.js

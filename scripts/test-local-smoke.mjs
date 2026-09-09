@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -37,7 +37,7 @@ async function waitHealth(origin, port) {
       const response = await fetch(`${origin}/health`);
       if (response.ok) {
         const body = await response.json();
-        if (body.status === "ok" && body.port === port) return;
+        if (body.status === "ok" && body.port === port) return body;
       }
     } catch {}
     await sleep(100);
@@ -49,6 +49,8 @@ const temporary = mkdtempSync(join(tmpdir(), "mcp-local-smoke-"));
 const port = await unusedPort();
 const origin = `http://127.0.0.1:${port}`;
 const publicOrigin = "https://branch-smoke.test.ts.net";
+const runtimeSourceCommit = "a".repeat(40);
+const runtimeDistSha256 = "b".repeat(64);
 const server = spawn(process.execPath, [resolve("dist/index.js")], {
   cwd: resolve("."),
   env: {
@@ -64,6 +66,10 @@ const server = spawn(process.execPath, [resolve("dist/index.js")], {
     MCP_OAUTH_STORE_PATH: join(temporary, "oauth.json"),
     MCP_TRANSPORT_LOG_PATH: join(temporary, "transport.jsonl"),
     MCP_PROCESS_RECEIPT_DIR: join(temporary, "receipts"),
+    MCP_RUNTIME_INSTANCE_ID: "local-smoke",
+    MCP_RUNTIME_SOURCE_COMMIT: runtimeSourceCommit,
+    MCP_RUNTIME_DIST_SHA256: runtimeDistSha256,
+    MCP_RUNTIME_SOURCE_DIRTY: "0",
   },
   stdio: ["ignore", "pipe", "pipe"],
   windowsHide: true,
@@ -71,7 +77,22 @@ const server = spawn(process.execPath, [resolve("dist/index.js")], {
 let serverStderr = "";
 server.stderr.on("data", (chunk) => { serverStderr += chunk.toString(); });
 try {
-  await waitHealth(origin, port);
+  const health = await waitHealth(origin, port);
+  assert.deepEqual(health.runtime_identity, {
+    launcher_bound: true,
+    instance_id: "local-smoke",
+    source_commit: runtimeSourceCommit,
+    dist_sha256: runtimeDistSha256,
+    source_dirty: false,
+  });
+  const launcher = readFileSync(resolve("scripts/start-minimal-clone.ps1"), "utf8");
+  for (const required of [
+    "$env:MCP_RUNTIME_INSTANCE_ID = $InstanceId",
+    "$env:MCP_RUNTIME_SOURCE_COMMIT = $runtimeSourceCommit",
+    "$env:MCP_RUNTIME_DIST_SHA256 = $runtimeDistSha256",
+    "$env:MCP_RUNTIME_SOURCE_DIRTY = if ($runtimeTrackedChanges.Count -gt 0) { '1' } else { '0' }",
+  ]) assert.ok(launcher.includes(required), `launcher missing runtime identity binding: ${required}`);
+  assert.match(launcher, /Get-FileHash -LiteralPath \$runtimeDistIndex -Algorithm SHA256/);
   const publicHost = new URL(publicOrigin).hostname;
   const bareHost = await requestWithHost(origin, publicHost);
   assert.equal(bareHost.status, 401, `configured public host should reach auth, got ${bareHost.status}: ${bareHost.body}`);
@@ -128,7 +149,7 @@ ${stressStderr}`);
   assert.match(stressStdout, /rss=\d+(?:\.\d+)?MB \(baseline \d+(?:\.\d+)?MB\)/, `dynamic-port stress did not report settled RSS: ${stressStdout}`);
   assert.equal(stressStderr.trim(), "", `dynamic-port stress emitted stderr: ${stressStderr}`);
 
-  console.log(`PASS local_smoke origin=${origin} stress_rss_dynamic_port=true production_untouched=true`);
+  console.log(`PASS local_smoke origin=${origin} stress_rss_dynamic_port=true production_untouched=true runtime_identity_bound=true`);
 } finally {
   if (server.pid) spawnSync("taskkill.exe", ["/PID", String(server.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
   rmSync(temporary, { recursive: true, force: true });
