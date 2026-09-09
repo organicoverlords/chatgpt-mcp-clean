@@ -104,7 +104,7 @@ try {
   assert.equal(protectedExit.running, false, JSON.stringify(protectedExit));
   assert.match(protectedExit.stdout, /PROTECTED_CONTROL_PROCESS_EXITED/);
 } finally {
-  rmSync(protectedControlDirectory, { recursive: true, force: true });
+  rmSync(protectedControlDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
 const protectedCrossCloneDirectory = mkdtempSync(join(tmpdir(), "mcp-protected-cross-clone-"));
@@ -123,7 +123,7 @@ try {
   assert.equal(protectedExit.running, false, JSON.stringify(protectedExit));
   assert.match(protectedExit.stdout, /PROTECTED_CROSS_CLONE_EXITED/);
 } finally {
-  rmSync(protectedCrossCloneDirectory, { recursive: true, force: true });
+  rmSync(protectedCrossCloneDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 const receiptDirectory = mkdtempSync(join(tmpdir(), "shell-mcp-process-receipts-"));
 try {
