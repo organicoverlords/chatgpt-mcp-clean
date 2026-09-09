@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "version": "2.11.3",
+  "asset": "caddy_2.11.3_windows_amd64.zip",
+  "url": "https://github.com/caddyserver/caddy/releases/download/v2.11.3/caddy_2.11.3_windows_amd64.zip",
+  "sha256": "94ba71226d30a07d8eca3f971e88222fafb13f8bc46f391ed01afd6780f9c030"
+}

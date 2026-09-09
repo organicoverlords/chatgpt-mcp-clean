@@ -12,9 +12,21 @@
 See the canonical [CHANGELOG.md](CHANGELOG.md) for the complete project timeline.
 <!-- PROJECT-TIMELINE:END -->
 
-Minimal authenticated Streamable HTTP MCP for the local Windows shell/process control boundary. The current MCPv3 production path is public Caddy HTTPS on the VPS -> an OS-level WireGuard link (`10.203.0.1/30` on the VPS to `10.203.0.2/30` on Windows) -> a persistent Windows TCP portproxy on `10.203.0.2:3011` -> the loopback-only minimal clone on `127.0.0.1:3011`. Four independent native OpenSSH reverse tunnels remain on VPS loopback ports 3101-3104 for explicit recovery, but Caddy does not route public MCP requests to them automatically. Caddy reaps idle public client connections after five minutes, preserving normal reuse across typical inter-request gaps while keeping the public idle pool bounded. No Python/AsyncSSH forwarding process or single shared SSH TCP stream is required by the primary path. The legacy local front door remains available for root/fallback topology but is not the current MCPv3 public ingress.
+Minimal authenticated Streamable HTTP MCP for the local Windows shell/process control boundary. The current home-direct serving path runs on the Windows host: local HTTPS Caddy proxies to the loopback MCP backend on `127.0.0.1:3022`, with local-edge authorization. Historical VPS/WireGuard/tunnel tooling remains in the repository for recovery/research history but is not part of this current serving path or the one-package installer.
 
 The default ChatGPT connector contract is `MCP_TOOL_PROFILE=process`, exposing exactly `start_process`, `read_output`, and `kill_process`. The broader `full` profile (`view_image`, the three process tools, and the three Busy tools) is explicit-only for internal/local testing and is not the ChatGPT plugin surface.
+
+## Local one-package install
+
+`install.ps1` installs the home-direct stack on one Windows machine: the loopback MCP backend, local Caddy, standalone BusyCoordinator, the shared rules checkout, PlanOnly, and autostart. This installer does not provision or depend on a VPS, WireGuard, reverse SSH, or Tailscale owner authorization.
+
+The connector surface stays exactly three tools: `start_process`, `read_output`, and `kill_process`. Library delivery uses the existing metadata/resource widget and does not add a tool. Busy is installed beside MCP and is not exposed as an MCP tool.
+
+From an elevated PowerShell 7 prompt in a clean clone, run `pwsh -File .\install.ps1 -PublicOrigin https://your-mcp.example -OwnerLogin you@example.com`. Use `-WithAgentEntrypoints` to install the supported agent pointers, or omit it for an agentless setup. `-Plan` prints the complete mutation-free install plan. Caddy is pinned and SHA-256 verified before installation.
+
+The package configures the same local-edge authorization model used by the home-direct setup: `/authorize` is accepted only through the local/private edge and otherwise fails closed. Internet reachability still requires the user's own router/DNS to deliver the public HTTPS endpoint to the installed local Caddy listener; the installer does not change router settings.
+
+Run `pwsh -File .\scripts\stack-doctor.ps1` to verify the installation. `scripts\uninstall-stack.ps1` removes the managed runtime/tasks; Busy, rules, state, and the firewall rule are removed only with their explicit switches.
 
 Process execution uses PowerShell 7 at `C:\Program Files\PowerShell\7\pwsh.exe` with no Windows PowerShell 5.1 fallback. The process preflight rejects drive-root recursive enumeration/search before spawn while allowing recursion under explicit project/subdirectory roots. Completed output retains up to 100,000 characters per stream and pages through the same `process_id` in 32,000-character logical pages.
 

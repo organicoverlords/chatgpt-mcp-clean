@@ -19,6 +19,7 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "127.0.0.1";
 const ORIGIN = (process.env.MCP_PUBLIC_ORIGIN || "").trim();
 const OWNER_AUTH_ORIGIN = (process.env.MCP_OWNER_AUTH_ORIGIN || "").trim();
+const OWNER_AUTH_MODE = (process.env.MCP_OWNER_AUTH_MODE || "tailscale").trim().toLowerCase();
 const OWNER = (process.env.TAILSCALE_OWNER_LOGIN || "").trim().toLowerCase();
 const STORE = process.env.MCP_OAUTH_STORE_PATH || ".state/oauth.json";
 
@@ -64,6 +65,8 @@ const ownerAuthOrigin = OWNER_AUTH_ORIGIN ? new URL(OWNER_AUTH_ORIGIN) : null;
 if (ownerAuthOrigin && (ownerAuthOrigin.protocol !== "https:" || !ownerAuthOrigin.hostname || ownerAuthOrigin.username || ownerAuthOrigin.password || ownerAuthOrigin.pathname !== "/" || ownerAuthOrigin.search || ownerAuthOrigin.hash)) {
   throw new Error("MCP_OWNER_AUTH_ORIGIN must be an HTTPS origin without credentials, path, query, or fragment");
 }
+if (!["tailscale", "local-edge"].includes(OWNER_AUTH_MODE)) throw new Error("MCP_OWNER_AUTH_MODE must be tailscale or local-edge");
+if (OWNER_AUTH_MODE === "local-edge" && ownerAuthOrigin) throw new Error("MCP_OWNER_AUTH_ORIGIN must be unset in local-edge mode");
 const publicBasePath = publicOrigin.pathname === "/" ? "" : publicOrigin.pathname.replace(/\/$/, "");
 const publicAllowedHosts = new Set([publicOrigin.host.toLowerCase()]);
 if (!publicOrigin.port) publicAllowedHosts.add(`${publicOrigin.hostname.toLowerCase()}:443`);
@@ -75,8 +78,8 @@ const allowedMcpOrigins = new Set([
 ]);
 if (approvedWireGuardCandidateBind) allowedMcpOrigins.add(`http://${wireGuardHost}:${PORT}`);
 const publicUrl = (path: string): URL => new URL(path.replace(/^\/+/, ""), publicOrigin);
-const authorizationUrl = ownerAuthOrigin ? new URL("authorize", ownerAuthOrigin) : publicUrl("authorize");
-const authorizationHost = ownerAuthOrigin?.host.toLowerCase() || null;
+const authorizationUrl = OWNER_AUTH_MODE === "local-edge" ? publicUrl("authorize") : (ownerAuthOrigin ? new URL("authorize", ownerAuthOrigin) : publicUrl("authorize"));
+const authorizationHost = OWNER_AUTH_MODE === "local-edge" ? publicOrigin.host.toLowerCase() : (ownerAuthOrigin?.host.toLowerCase() || null);
 const resource = publicUrl("mcp");
 const oauth = new LocalOAuthProvider(resource, OWNER, STORE);
 const bearer = requireBearerAuth({ verifier: oauth, requiredScopes: ["mcp"], resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resource) });
@@ -195,12 +198,17 @@ app.use((req, res, next) => {
 
 app.use("/authorize", (req, res, next) => {
   const host = (req.header("host") || "").toLowerCase();
-  const login = (req.header("tailscale-user-login") || "").trim().toLowerCase();
-  if ((authorizationHost && host !== authorizationHost) || req.header("tailscale-funnel-request") || login !== OWNER) {
+  if (OWNER_AUTH_MODE === "tailscale") {
+    const login = (req.header("tailscale-user-login") || "").trim().toLowerCase();
+    if ((authorizationHost && host !== authorizationHost) || req.header("tailscale-funnel-request") || login !== OWNER) {
+      res.status(403).send("Owner authorization required");
+      return;
+    }
+  } else if (authorizationHost && host !== authorizationHost) {
     res.status(403).send("Owner authorization required");
     return;
   }
-  if (login === OWNER && req.method === "GET") {
+  if (req.method === "GET") {
     const clientId = typeof req.query.client_id === "string" ? req.query.client_id : "";
     const redirectUri = typeof req.query.redirect_uri === "string" ? req.query.redirect_uri : "";
     if (clientId && redirectUri) oauth.recoverLegacyChatGptClient(clientId, redirectUri);
