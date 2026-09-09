@@ -49,8 +49,13 @@ try {
   assert.equal(archived.stdout_sha256, createHash("sha256").update(archived.stdout, "utf8").digest("hex"));
   assert.equal(archived.stderr_sha256, createHash("sha256").update(archived.stderr, "utf8").digest("hex"));
   assert.equal(archived.evidence_completeness, "complete");
-  const persisted = telemetry.find((event) => event.event === "process_receipt_persisted" && event.process_id === started.process_id);
-  assert.ok(persisted, "receipt persistence telemetry must exist");
+  let persisted = telemetry.find((event) => event.event === "process_receipt_persisted" && event.process_id === started.process_id);
+  const telemetryDeadline = Date.now() + 5_000;
+  while (!persisted && Date.now() < telemetryDeadline) {
+    await sleep(10);
+    persisted = telemetry.find((event) => event.event === "process_receipt_persisted" && event.process_id === started.process_id);
+  }
+  assert.ok(persisted, "receipt persistence telemetry must exist after durable archival");
   assert.equal(persisted.request_id, "request_receipt_archive_test");
   assert.equal(persisted.retained_output_chars, archived.retained_output_chars);
   assert.equal(persisted.stdout_sha256, archived.stdout_sha256);
