@@ -383,11 +383,46 @@ function mcpProductionMutationError(command: string, code: string): string | und
     && /McpV3ProductionReplacement(?:Guardian|Candidate)/i.test(command);
   if (startsReplacementInternalTask) return productionIngressError;
 
-  const mutatesCaddy = /\/etc\/caddy\/Caddyfile\b/i.test(command) && (
+  const caddyFileReference = /\/etc\/caddy\/Caddyfile\b/i.test(command);
+  const contentMutationMatches = [...code.matchAll(/\b(?:Set-Content|Add-Content|Out-File)\b/gi)];
+  const contentMutationCouldTargetCaddy = contentMutationMatches.some((match) => {
+    const start = match.index ?? 0;
+    let end = code.length;
+    for (let index = start; index < code.length; index += 1) {
+      if (/[;|}\r\n]/.test(code[index]!)) { end = index; break; }
+    }
+    const segment = command.slice(start, end);
+    const cmdlet = String(match[0] ?? "").toLowerCase();
+    const targetMatch = cmdlet === "out-file"
+      ? /-FilePath\s+(?:'([^']*)'|"([^"]*)"|([^\s;|}]+))/i.exec(segment)
+      : /-(?:LiteralPath|Path)\s+(?:'([^']*)'|"([^"]*)"|([^\s;|}]+))/i.exec(segment);
+    if (!targetMatch) return true;
+    const target = String(targetMatch[1] ?? targetMatch[2] ?? targetMatch[3] ?? "");
+    if (!target || /[$`*?(){}]/.test(target)) return true;
+    return /\/etc\/caddy\/Caddyfile\b/i.test(target);
+  });
+  const copyMatches = [...code.matchAll(/\bCopy-Item\b/gi)];
+  const copyCouldTargetCaddy = copyMatches.some((match) => {
+    const start = match.index ?? 0;
+    let end = code.length;
+    for (let index = start; index < code.length; index += 1) {
+      if (/[;|}\r\n]/.test(code[index]!)) { end = index; break; }
+    }
+    const segment = command.slice(start, end);
+    const destinationMatch = /-Destination\s+(?:'([^']*)'|"([^"]*)"|([^\s;|}]+))/i.exec(segment);
+    if (!destinationMatch) return true;
+    const destination = String(destinationMatch[1] ?? destinationMatch[2] ?? destinationMatch[3] ?? "");
+    if (!destination || /[$`*?(){}]/.test(destination)) return true;
+    return /\/etc\/caddy\/Caddyfile\b/i.test(destination);
+  });
+  const destructivePowerShellFileMutation = /\b(?:Move-Item|Remove-Item|Rename-Item)\b/i.test(code);
+  const mutatesCaddy = caddyFileReference && (
     /(?:^|[\s;&|])(?:cp|mv|rm|install|tee)\b/i.test(command)
     || /\bsed\s+-[^\s]*i\b/i.test(command)
     || /(?:>|>>)\s*\/?etc\/caddy\/Caddyfile\b/i.test(command)
-    || /\b(?:Set-Content|Add-Content|Out-File)\b/i.test(code)
+    || contentMutationCouldTargetCaddy
+    || copyCouldTargetCaddy
+    || destructivePowerShellFileMutation
   );
   const reloadsCaddy = /\b(?:systemctl\s+(?:reload|restart)\s+caddy|caddy\s+(?:reload|stop))\b/i.test(command);
   if (mutatesCaddy || reloadsCaddy) return productionIngressError;
