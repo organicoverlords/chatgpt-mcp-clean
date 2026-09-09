@@ -1,11 +1,14 @@
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { basename, extname, isAbsolute } from "node:path";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 export const PROCESS_LIBRARY_UPLOAD_WIDGET_URI = "ui://process/library-upload-v1.html";
 export const PROCESS_LIBRARY_UPLOAD_PREFIX = "CHATGPT_LIBRARY_UPLOAD=";
 
 const MAX_LIBRARY_UPLOAD_BYTES = 20 * 1024 * 1024;
+const MAX_RESOURCE_REGISTRY_BYTES = 64 * 1024 * 1024;
+const MAX_RESOURCE_REGISTRY_ENTRIES = 16;
 
 const MIME_BY_EXT: Record<string, string> = {
   ".gif": "image/gif",
@@ -22,18 +25,46 @@ export type ProcessLibraryUpload = {
   file_name: string;
   mime_type: string;
   bytes: number;
+  sha256: string;
+  resource_id: string;
   data_base64: string;
 };
 
+const resourceRegistry = new Map<string, ProcessLibraryUpload>();
+let resourceRegistryBytes = 0;
+
+function rememberProcessLibraryUpload(upload: ProcessLibraryUpload): void {
+  if (resourceRegistry.has(upload.resource_id)) return;
+  resourceRegistry.set(upload.resource_id, upload);
+  resourceRegistryBytes += upload.bytes;
+  while (resourceRegistry.size > MAX_RESOURCE_REGISTRY_ENTRIES || resourceRegistryBytes > MAX_RESOURCE_REGISTRY_BYTES) {
+    const oldest = resourceRegistry.entries().next().value as [string, ProcessLibraryUpload] | undefined;
+    if (!oldest) break;
+    resourceRegistry.delete(oldest[0]);
+    resourceRegistryBytes -= oldest[1].bytes;
+  }
+}
+
+export function processLibraryUploadResourceContents(uri: string) {
+  const parsed = new URL(uri);
+  if (parsed.protocol !== "mcp-upload:" || parsed.hostname !== "process") throw new Error("unsupported process upload resource URI");
+  const resourceId = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
+  const upload = resourceRegistry.get(resourceId);
+  if (!upload) throw new Error("process upload resource is unavailable or expired");
+  return { uri, mimeType: upload.mime_type, blob: upload.data_base64 };
+}
+
 export function processLibraryUploadContent(upload: ProcessLibraryUpload) {
   if (!upload.mime_type.startsWith("image/")) return null;
+  rememberProcessLibraryUpload(upload);
   return {
-    type: "resource" as const,
-    resource: {
-      uri: `mcp-upload://process/${encodeURIComponent(upload.file_name)}`,
-      mimeType: upload.mime_type,
-      blob: upload.data_base64,
-    },
+    type: "resource_link" as const,
+    uri: `mcp-upload://process/${upload.resource_id}`,
+    name: upload.file_name,
+    title: upload.file_name,
+    description: "Exact local file requested by CHATGPT_LIBRARY_UPLOAD",
+    mimeType: upload.mime_type,
+    size: upload.bytes,
     annotations: { audience: ["assistant", "user"] as ("assistant" | "user")[] },
   };
 }
@@ -68,11 +99,19 @@ export async function processLibraryUploadFromOutput(value: unknown): Promise<Pr
     file_name: basename(path),
     mime_type: mimeType,
     bytes: data.length,
+    sha256: createHash("sha256").update(data).digest("hex"),
+    resource_id: randomUUID(),
     data_base64: data.toString("base64"),
   };
 }
 
 export function registerProcessLibraryUploadWidget(server: McpServer): void {
+  server.registerResource(
+    "process-local-upload",
+    new ResourceTemplate("mcp-upload://process/{resource_id}", { list: undefined }),
+    { title: "Process local upload", description: "Exact local file explicitly requested by a process output marker" },
+    async (uri) => ({ contents: [processLibraryUploadResourceContents(uri.href)] }),
+  );
   server.registerResource("process-library-upload-widget", PROCESS_LIBRARY_UPLOAD_WIDGET_URI, {}, async () => ({
     contents: [{
       uri: PROCESS_LIBRARY_UPLOAD_WIDGET_URI,
@@ -91,7 +130,7 @@ export function processLibraryUploadWidgetHtml(): string {
 const statusEl=document.getElementById('status'); const imageEl=document.getElementById('image');
 let startedKey='';
 function setStatus(text){statusEl.textContent=text;statusEl.classList.add('on');window.openai?.notifyIntrinsicHeight?.();}
-function payloadFrom(result){const p=result?._meta?.chatgpt_library_upload||null;if(!p)return null;if(p.data_base64)return p;const resource=(result?.content||[]).find(x=>x?.type==='resource'&&x.resource?.blob&&x.resource?.mimeType);return resource?{...p,data_base64:resource.resource.blob,mime_type:resource.resource.mimeType}:p;}
+function payloadFrom(result){return result?._meta?.chatgpt_library_upload||null;}
 async function render(result){
  const p=payloadFrom(result); if(!p?.data_base64||!p?.file_name||!p?.mime_type)return;
  const key=p.file_name+':'+p.bytes; if(startedKey===key)return; startedKey=key;
