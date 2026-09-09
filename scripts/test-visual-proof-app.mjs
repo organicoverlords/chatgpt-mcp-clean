@@ -21,14 +21,19 @@ const meteor=Buffer.from("accepted-meteor-contact-sheet");
 const rejected=Buffer.from("rejected-meteor");
 const laneImage=Buffer.from("lane-contact-sheet");
 const laneVideo=Buffer.from("lane-video-exact");
+const notProven=Buffer.from("not-proven-fennec");
 await writeFile(join(meteorDir,"accepted_contact-sheet.jpg"),meteor);
 await writeFile(join(rejectedDir,"rejected.png"),rejected);
 await writeFile(join(laneDir,"runtime-contact-sheet.png"),laneImage);
 await writeFile(join(laneDir,"runtime.mp4"),laneVideo);
+const notProvenDir=join(p3,"2026-09-03","p3-fennec-not-proven");
+await mkdir(notProvenDir,{recursive:true});
+await writeFile(join(notProvenDir,"fennec.png"),notProven);
 await writeFile(join(p3,"index-v1.json"),JSON.stringify({schema:"p3.visual-evidence-index.v1",entries:[
  {run_id:"p3-pr750-meteor-vfx-accepted",date:"2026-09-02",claim:"Meteor spell impact",independent_review_state:"PROVEN",tags:["spell","meteor","vfx"],search_text:"meteor spell /Game/V2/Maps/Lvl_V2ProductionWorld",gaps:[],media:[{path:"2026-09-02/p3-pr750-meteor-vfx-accepted/accepted_contact-sheet.jpg",bytes:meteor.length,declared_sha256:digest(meteor),declared_size_matches:true}]},
  {run_id:"p3-pr622-meteor-rejected",date:"2026-09-01",claim:"Rejected meteor",independent_review_state:"REJECTED",search_text:"meteor /Game/V2/Maps/Lvl_V2ProductionWorld",gaps:[],media:[{path:"2026-09-01/p3-pr622-meteor-rejected/rejected.png",bytes:rejected.length,declared_sha256:digest(rejected),declared_size_matches:true}]},
- {run_id:"p3-pr723-v2-lanewar-runtime-video",date:"2026-09-01",claim:null,independent_review_state:"NOT_RECORDED",tags:["lane-war","lanewar","battlefield","map","world-layout"],search_text:"lane war lanewar map battlefield",gaps:["independent_review_not_recorded"],media:[{path:"2026-09-01/p3-pr723-v2-lanewar-runtime-video/runtime-contact-sheet.png",bytes:laneImage.length,declared_sha256:digest(laneImage),declared_size_matches:true},{path:"2026-09-01/p3-pr723-v2-lanewar-runtime-video/runtime.mp4",bytes:laneVideo.length,declared_sha256:digest(laneVideo),declared_size_matches:true}]}
+ {run_id:"p3-pr723-v2-lanewar-runtime-video",date:"2026-09-01",claim:null,independent_review_state:"NOT_RECORDED",tags:["lane-war","lanewar","battlefield","map","world-layout"],search_text:"lane war lanewar map battlefield",gaps:["independent_review_not_recorded"],media:[{path:"2026-09-01/p3-pr723-v2-lanewar-runtime-video/runtime-contact-sheet.png",bytes:laneImage.length,declared_sha256:digest(laneImage),declared_size_matches:true},{path:"2026-09-01/p3-pr723-v2-lanewar-runtime-video/runtime.mp4",bytes:laneVideo.length,declared_sha256:digest(laneVideo),declared_size_matches:true}]},
+ {run_id:"p3-fennec-not-proven",date:"2026-09-03",evidence_utc:"2026-09-03T12:00:00Z",claim:"Fennec diagnostic",independent_review_state:"NOT_PROVEN",search_text:"fennec diagnostic",gaps:[],media:[{path:"2026-09-03/p3-fennec-not-proven/fennec.png",bytes:notProven.length,declared_sha256:digest(notProven),declared_size_matches:true}]}
 ]}));
 
 const assetId="60c984e41bf738be97454ef74520e0c0b534c8ebb4f3b84fcb83aa44204b4d4e";
@@ -52,6 +57,16 @@ assert.equal(map.metadata.identity,"p3-pr723-v2-lanewar-runtime-video","semantic
 assert.equal(map.metadata.independent_review_state,"NOT_RECORDED");
 assert.deepEqual(map.image,laneImage);
 assert.deepEqual(map.video,laneVideo);
+const notProvenResult=await resolveVisualProof("p3-fennec-not-proven",{source:"p3",p3Root:p3});
+assert.equal(notProvenResult.metadata.independent_review_state,"NOT_PROVEN");
+assert.equal(notProvenResult.metadata.scope,"Independently reviewed P3 visual evidence: NOT_PROVEN. This capture does not establish visual acceptance.");
+assert.deepEqual(notProvenResult.image,notProven);
+const latest=await resolveVisualProof("latest",{source:"p3",p3Root:p3});
+assert.equal(latest.metadata.identity,"p3-fennec-not-proven","latest must select the newest indexed evidence instead of a run whose name contains latest");
+const latestMeteor=await resolveVisualProof("latest meteor",{source:"p3",p3Root:p3});
+assert.equal(latestMeteor.metadata.identity,"p3-pr750-meteor-vfx-accepted","latest must act as a recency modifier on semantic terms");
+const literalLatest=await resolveVisualProof("p3-pr723-v2-lanewar-runtime-video",{source:"p3",p3Root:p3});
+assert.equal(literalLatest.metadata.identity,"p3-pr723-v2-lanewar-runtime-video","exact run lookup must remain authoritative");
 
 const android=await resolveVisualProof("android",{source:"tiny3d",tiny3dRoot:t3d});
 assert.equal(android.metadata.identity,assetId);
