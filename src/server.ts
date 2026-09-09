@@ -4,6 +4,7 @@ import { z } from "zod";
 import { BusyStore } from "./lib/busy-store.js";
 import { viewImage } from "./lib/image-viewer.js";
 import { ProcessManager } from "./lib/process-manager.js";
+import { PROCESS_LIBRARY_UPLOAD_WIDGET_URI, processLibraryUploadFromOutput, registerProcessLibraryUploadWidget } from "./lib/process-library-upload.js";
 
 // The deployed ChatGPT connector surface is the process profile. Keep the broader
 // full profile explicit-only for internal/local tests so repo inspection without a
@@ -21,11 +22,18 @@ const busyStore = fullToolProfile ? new BusyStore((scope) => {
   return liveSessions.has(sessionId) || processManager.hasLiveScope(scope);
 }) : undefined;
 
-function textResult(value: unknown, id: string) {
+async function textResult(value: unknown, id: string) {
   const data = value && typeof value === "object" && !Array.isArray(value)
     ? { ...(value as Record<string, unknown>), caller_id: id }
     : { value, caller_id: id };
-  return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
+  const upload = await processLibraryUploadFromOutput(value);
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(data) }],
+    ...(upload ? {
+      structuredContent: { library_upload_requested: true, file_name: upload.file_name, mime_type: upload.mime_type, bytes: upload.bytes },
+      _meta: { chatgpt_library_upload: upload },
+    } : {}),
+  };
 }
 
 export function processRuntimeStatus(): { live_process_count: number } {
@@ -39,6 +47,7 @@ export function markSessionLive(sessionId: string, live: boolean): void {
 
 export function createServer(callerId: string): McpServer {
   const server = new McpServer({ name: "shell-mcp", version: "0.1.0" });
+  registerProcessLibraryUploadWidget(server);
 
   if (fullToolProfile) {
   server.registerTool(
@@ -60,6 +69,7 @@ export function createServer(callerId: string): McpServer {
     {
       description: "Start a noninteractive PowerShell process. By default this call waits up to 750 ms so fast commands can finish and return their output in this same tool call; set wait_ms=0 for immediate background launch or raise it up to 10 seconds for a known-short command. If next_action=STOP_READING, do not call read_output. If next_action=READ_SAME_PROCESS_ID, reuse the returned process_id; never start a replacement without process evidence.",
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+      _meta: { ui: { resourceUri: PROCESS_LIBRARY_UPLOAD_WIDGET_URI }, "openai/outputTemplate": PROCESS_LIBRARY_UPLOAD_WIDGET_URI },
       inputSchema: z.object({
         command: z.string().min(1),
         working_directory: z.string().optional(),
@@ -74,6 +84,7 @@ export function createServer(callerId: string): McpServer {
     {
       description: "Read a bounded tail of accumulated stdout and stderr. By default this waits up to 2 seconds for new output or process exit so sparse processes do not require rapid polling; set wait_ms=0 for a genuinely nonblocking snapshot. If a positive wait expires with no change, stdout/stderr are empty and no_change=true instead of repeating old output. The returned elapsed_ms is process age, not read-call latency. A disconnect is not evidence that the process stopped; reconnect and reuse the same process_id. Each stream is limited to 32,000 characters.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      _meta: { ui: { resourceUri: PROCESS_LIBRARY_UPLOAD_WIDGET_URI }, "openai/outputTemplate": PROCESS_LIBRARY_UPLOAD_WIDGET_URI },
       inputSchema: z.object({
         process_id: z.string().min(1),
         max_chars: z.number().int().min(1).max(32_000).optional(),
