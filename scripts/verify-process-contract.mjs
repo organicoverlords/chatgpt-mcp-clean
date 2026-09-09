@@ -8,9 +8,13 @@ import { z } from "zod";
 // explicitly, but the default must remain production-safe so audits/tests that omit
 // deployment env cannot accidentally inspect the internal full profile.
 delete process.env.MCP_TOOL_PROFILE;
+process.env.MCP_VISUAL_PROOF_UI = "1";
+process.env.MCP_VISUAL_PROOF_REVIEW = "1";
 process.env.MCP_PROCESS_RECEIPT_DIR = resolve(".state/process-contract-verifier-receipts");
 const { createServer } = await import("../dist/server.js");
+const { registerOptionalVisualProofTools } = await import("../dist/lib/visual-proof-registration.js");
 const server = createServer("contract-verifier");
+registerOptionalVisualProofTools(server, "contract-verifier");
 const actualTools = Object.entries(server._registeredTools)
   .sort(([a], [b]) => a.localeCompare(b))
   .map(([name, tool]) => ({ name, description: tool.description || "", inputSchema: z.toJSONSchema(tool.inputSchema) }));
