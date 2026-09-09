@@ -43,7 +43,7 @@ const script = resolve("scripts/start-minimal-clone.ps1");
 const scriptSource = readFileSync(script, "utf8");
 assert.match(scriptSource, /canonicalStateRoot = \[IO\.Path\]::GetFullPath\(\(Join-Path \$Root 'minimal-connectors'\)\)/, "canonical state guard must follow the explicit repo root, not the runtime account profile");
 function preflight(instanceId = "clone-a-next", extra = []) {
-  return spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-InstanceId", instanceId, "-Port", "3021", "-PublicOrigin", "https://example.test/clone-a", "-StateRoot", temporary, "-ValidateOnly", ...extra], { encoding: "utf8", windowsHide: true });
+  return spawnSync("pwsh.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-InstanceId", instanceId, "-Port", "3021", "-PublicOrigin", "https://example.test/clone-a", "-StateRoot", temporary, "-ValidateOnly", ...extra], { encoding: "utf8", windowsHide: true });
 }
 try {
   const missing = preflight();
@@ -61,17 +61,21 @@ try {
 
   const distIndex = resolve("dist/index.js");
   const originalDist = readFileSync(distIndex);
+  const distServer = resolve("dist/server.js");
+  const originalServer = readFileSync(distServer);
+  for (const reload of [false, true]) {
   const runtimeState = join(temporary, "runtime-state");
   const receipts = join(temporary, "runtime-receipts");
   mkdirSync(runtimeState, { recursive: true });
   mkdirSync(receipts, { recursive: true });
   const port = await unusedPort();
   const origin = `http://127.0.0.1:${port}`;
-  const launcher = spawn("powershell.exe", [
+  const launcher = spawn("pwsh.exe", [
     "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script,
     "-InstanceId", "generation-proof", "-Port", String(port), "-PublicOrigin", "https://generation-proof.test.ts.net",
     "-StateRoot", runtimeState, "-SharedReceiptDirectory", receipts, "-SkipBuild",
     "-GenerationProbeMilliseconds", "200", "-GenerationSettleProbeCount", "2",
+    ...(reload ? ["-ReloadOnGenerationChange"] : []),
   ], {
     cwd: resolve("."),
     env: { ...process.env, TAILSCALE_OWNER_LOGIN: "owner@example.com" },
@@ -83,9 +87,36 @@ try {
   try {
     const first = await waitHealth(origin, port);
     assert.equal(first.runtime_identity?.launcher_bound, true, JSON.stringify(first));
+    // This breaks the pinned implementation check without changing tracked source.
+    // The old launcher killed the healthy child before discovering this failure.
+    writeFileSync(distServer, Buffer.concat([originalServer, Buffer.from("\n// rejected candidate\n")]));
+    writeFileSync(distIndex, Buffer.concat([originalDist, Buffer.from("\n// rejected generation\n")]));
+    if (reload) {
+      const deadline = Date.now() + 20_000;
+      let rejected = false;
+      while (Date.now() < deadline) {
+        try {
+          rejected = readFileSync(join(runtimeState, "generation-proof", "launcher-supervisor.jsonl"), "utf8").includes('"serving_child_preserved":true');
+        } catch {}
+        if (rejected) break;
+        await sleep(200);
+      }
+      assert.equal(rejected, true, "invalid replacement must be rejected before stopping the child");
+    } else {
+      await sleep(2500);
+    }
+    const preserved = await waitHealth(origin, port);
+    assert.equal(preserved.pid, first.pid, "checkout/build changes must preserve the serving child");
+    assert.equal(launcher.exitCode, null);
+    writeFileSync(distServer, originalServer);
     const changedDist = Buffer.concat([originalDist, Buffer.from(`\n// generation-supervisor-proof-${Date.now()}\n`)]);
     const changedHash = createHash("sha256").update(changedDist).digest("hex");
     writeFileSync(distIndex, changedDist);
+    if (!reload) {
+      await sleep(1500);
+      assert.equal((await waitHealth(origin, port)).pid, first.pid, "valid build changes also require explicit reload opt-in");
+      continue;
+    }
     const replacement = await waitHealth(origin, port, (body) => body.pid !== first.pid && body.runtime_identity?.dist_sha256 === changedHash);
     assert.notEqual(replacement.pid, first.pid);
     assert.equal(replacement.runtime_identity?.dist_sha256, changedHash);
@@ -96,8 +127,15 @@ try {
   } finally {
     if (launcher.pid) spawnSync("taskkill.exe", ["/PID", String(launcher.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
     writeFileSync(distIndex, originalDist);
+    writeFileSync(distServer, originalServer);
   }
-  console.log("PASS minimal_clone_identity_guard unsafe_replacement_blocked=true same_instance_wrong_store_blocked=true stable_store_required=true generation_change_idle_restart=true");
+  }
+  console.log("PASS minimal_clone_identity_guard unsafe_replacement_blocked=true same_instance_wrong_store_blocked=true stable_store_required=true generation_change_idle_restart=true default_reload_disabled=true rejected_candidate_preserves_child=true");
 } finally {
-  rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  try {
+    rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  } catch (error) {
+    // OAuth ACL cleanup must not hide the assertion or launcher failure.
+    console.error(`test cleanup failed for ${temporary}: ${error.message}`);
+  }
 }

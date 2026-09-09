@@ -9,6 +9,7 @@ param(
     [switch]$ValidateOnly,
     [switch]$SkipBuild,
     [switch]$RestartOnUnexpectedExit,
+    [switch]$ReloadOnGenerationChange,
     [ValidateRange(1,60)][int]$RestartBackoffSeconds = 2,
     [ValidateRange(0,1000)][int]$RestartLimit = 0,
     [ValidateRange(100,5000)][int]$GenerationProbeMilliseconds = 1000,
@@ -179,9 +180,13 @@ while ($true) {
     $candidateKey = ''
     $candidateSeen = 0
     $candidateLogged = ''
+    $rejectedCandidateKey = ''
 
     while (-not $child.HasExited) {
         Start-Sleep -Milliseconds $GenerationProbeMilliseconds
+        # A checkout is not a deployment request. Keep crash recovery independent
+        # from source edits, branch switches, and builds in the serving directory.
+        if (-not $ReloadOnGenerationChange) { continue }
         $candidate = Get-RuntimeGeneration
         if (-not $candidate) {
             $candidateKey = ''
@@ -214,6 +219,25 @@ while ($true) {
             $candidateLogged = $observedKey
         }
         if ($verifiedCandidate.source_dirty) { continue }
+        if ($rejectedCandidateKey -eq $observedKey) { continue }
+        if (-not (Test-ChildIdle $child.Id)) { continue }
+
+        # Reject an invalid replacement while the serving child is still alive.
+        # The verifier runs in a separate process and must not change its identity.
+        try {
+            Set-RuntimeIdentityEnvironment $verifiedCandidate
+            & node.exe scripts/verify-process-contract.mjs
+            $candidateExitCode = $LASTEXITCODE
+        } finally {
+            Set-RuntimeIdentityEnvironment $runtimeIdentity
+        }
+        if ($candidateExitCode -ne 0) {
+            Write-LauncherEvent @{ event = 'generation_change_contract_rejected'; source_commit = [string]$verifiedCandidate.source_commit; dist_sha256 = [string]$verifiedCandidate.dist_sha256; exit_code = $candidateExitCode; serving_child_preserved = $true; child_pid = $child.Id }
+            $rejectedCandidateKey = $observedKey
+            continue
+        }
+        $checkedCandidate = Get-RuntimeIdentity
+        if (-not $checkedCandidate -or $checkedCandidate.source_dirty -or $checkedCandidate.source_commit -ne $verifiedCandidate.source_commit -or $checkedCandidate.dist_sha256 -ne $verifiedCandidate.dist_sha256) { continue }
         if (-not (Test-ChildIdle $child.Id)) { continue }
 
         Write-LauncherEvent @{
@@ -238,11 +262,6 @@ while ($true) {
     if ($generationRestart) {
         $runtimeIdentity = $nextIdentity
         Set-RuntimeIdentityEnvironment $runtimeIdentity
-        & node.exe scripts/verify-process-contract.mjs
-        if ($LASTEXITCODE -ne 0) {
-            Write-LauncherEvent @{ event = 'generation_change_contract_rejected'; source_commit = [string]$runtimeIdentity.source_commit; dist_sha256 = [string]$runtimeIdentity.dist_sha256; exit_code = $LASTEXITCODE }
-            exit $LASTEXITCODE
-        }
         $restartCount = 0
         continue
     }
