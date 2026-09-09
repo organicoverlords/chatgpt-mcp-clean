@@ -18,6 +18,16 @@ function rejects(command) {
   );
 }
 
+
+function rejectsProtected(command) {
+  assert.throws(
+    () => manager.start(command, undefined, "caller_control_plane_termination_reject"),
+    (error) => error instanceof Error
+      && error.message.startsWith("start_process_preflight_failed:")
+      && /protected MCP\/Commander control-plane termination is blocked/.test(error.message),
+    `expected protected control-plane termination rejection: ${command}`,
+  );
+}
 const allowedCommandTimeoutMs = 30_000;
 
 async function run(command) {
@@ -58,6 +68,11 @@ rejects("& .\\scripts\\start-minimal-clone.ps1 -InstanceId clone-a -Port 3011 -P
 rejects("netsh interface portproxy set v4tov4 listenaddress=10.203.0.2 listenport=3011 connectaddress=127.0.0.1 connectport=3003");
 rejects("$h=Invoke-RestMethod http://127.0.0.1:3011/health; Stop-Process -Id $h.pid -Force");
 rejects("$h=Invoke-RestMethod http://127.0.0.1:3003/health; taskkill.exe /PID $h.pid /T /F");
+rejectsProtected("Get-CimInstance Win32_Process | Where-Object CommandLine -Match 'Start-DesktopCommanderFallbackHidden.ps1' | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }");
+rejectsProtected("Get-CimInstance Win32_Process | Where-Object CommandLine -Match '@wonderwhy-er/desktop-commander' | Invoke-CimMethod -MethodName Terminate");
+rejectsProtected("Get-Process node | Stop-Process -Force");
+rejectsProtected("Stop-Process -Name pwsh -Force");
+rejectsProtected("taskkill.exe /IM powershell.exe /T /F");
 rejects("Stop-Service 'WireGuardTunnel$mcp-wireguard'");
 rejects("Stop-ScheduledTask -TaskName 'McpV3Production3011'");
 rejects("net.exe stop 'WireGuardTunnel$mcp-wireguard'");

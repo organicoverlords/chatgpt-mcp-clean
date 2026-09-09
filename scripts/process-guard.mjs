@@ -89,6 +89,42 @@ try {
   if (drainStatusProcess) await drainStatusManager.kill(drainStatusProcess.process_id).catch(() => undefined);
 }
 
+const protectedControlManager = new ProcessManager();
+const protectedControlDirectory = mkdtempSync(join(tmpdir(), "mcp-protected-control-plane-"));
+try {
+  const fakeCommanderLauncher = join(protectedControlDirectory, "Start-DesktopCommanderFallbackHidden.ps1");
+  writeFileSync(fakeCommanderLauncher, "Start-Sleep -Milliseconds 750\nWrite-Output 'PROTECTED_CONTROL_PROCESS_EXITED'\n");
+  const protectedProcess = protectedControlManager.start(`& '${fakeCommanderLauncher}'`, undefined, "caller_protected_control_test");
+  await assert.rejects(
+    protectedControlManager.kill(protectedProcess.process_id),
+    /protected MCP\/Commander control-plane termination is blocked/,
+    "kill_process must fail closed for a managed control-plane launch command",
+  );
+  const protectedExit = await waitForExit(protectedControlManager, protectedProcess.process_id);
+  assert.equal(protectedExit.running, false, JSON.stringify(protectedExit));
+  assert.match(protectedExit.stdout, /PROTECTED_CONTROL_PROCESS_EXITED/);
+} finally {
+  rmSync(protectedControlDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}
+
+const protectedCrossCloneDirectory = mkdtempSync(join(tmpdir(), "mcp-protected-cross-clone-"));
+try {
+  const fakeCommanderLauncher = join(protectedCrossCloneDirectory, "Start-DesktopCommanderFallbackHidden.ps1");
+  writeFileSync(fakeCommanderLauncher, "Start-Sleep -Milliseconds 900\nWrite-Output 'PROTECTED_CROSS_CLONE_EXITED'\n");
+  const ownerManager = new ProcessManager({ receiptDirectory: protectedCrossCloneDirectory });
+  const backupManager = new ProcessManager({ receiptDirectory: protectedCrossCloneDirectory });
+  const protectedProcess = ownerManager.start(`& '${fakeCommanderLauncher}'`, undefined, "caller_protected_cross_clone_owner");
+  await assert.rejects(
+    backupManager.kill(protectedProcess.process_id),
+    /protected MCP\/Commander control-plane termination is blocked/,
+    "cross-clone kill must preserve the owner-side protected-control-plane refusal",
+  );
+  const protectedExit = await waitForExit(ownerManager, protectedProcess.process_id);
+  assert.equal(protectedExit.running, false, JSON.stringify(protectedExit));
+  assert.match(protectedExit.stdout, /PROTECTED_CROSS_CLONE_EXITED/);
+} finally {
+  rmSync(protectedCrossCloneDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}
 const receiptDirectory = mkdtempSync(join(tmpdir(), "shell-mcp-process-receipts-"));
 try {
   const beforeRestart = new ProcessManager({ receiptDirectory });
@@ -257,4 +293,4 @@ try {
 } finally {
   rmSync(receiptChurnDirectory, { recursive: true, force: true });
 }
-console.log("PASS process guard enforces duplicate reuse, live concurrency, restart receipts, cross-clone control, fast-start collapse, compact no-change waits, nonblocking zero-wait, and bounded-wait behavior, and time-based receipt retention");
+console.log("PASS process guard enforces duplicate reuse, live concurrency, protected control-plane kill refusal, restart receipts, cross-clone control, fast-start collapse, compact no-change waits, nonblocking zero-wait, and bounded-wait behavior, and time-based receipt retention");
