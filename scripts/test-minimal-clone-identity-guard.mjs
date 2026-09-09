@@ -24,7 +24,7 @@ async function waitHealth(origin, expectedPort, predicate = () => true, timeoutM
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(`${origin}/health`);
+      const response = await fetch(`${origin}/health`, { signal: AbortSignal.timeout(2000) });
       if (response.ok) {
         const body = await response.json();
         if (body.status === "ok" && body.port === expectedPort && predicate(body)) return body;
@@ -75,6 +75,7 @@ try {
     "-InstanceId", "generation-proof", "-Port", String(port), "-PublicOrigin", "https://generation-proof.test.ts.net",
     "-StateRoot", runtimeState, "-SharedReceiptDirectory", receipts, "-SkipBuild",
     "-GenerationProbeMilliseconds", "200", "-GenerationSettleProbeCount", "2",
+    "-RestartOnUnexpectedExit",
     ...(reload ? ["-ReloadOnGenerationChange"] : []),
   ], {
     cwd: resolve("."),
@@ -115,6 +116,10 @@ try {
     if (!reload) {
       await sleep(1500);
       assert.equal((await waitHealth(origin, port)).pid, first.pid, "valid build changes also require explicit reload opt-in");
+      writeFileSync(distIndex, originalDist);
+      process.kill(first.pid);
+      const recovered = await waitHealth(origin, port, (body) => body.pid !== first.pid);
+      assert.notEqual(recovered.pid, first.pid, "unexpected exits must still recover with reload disabled");
       continue;
     }
     const replacement = await waitHealth(origin, port, (body) => body.pid !== first.pid && body.runtime_identity?.dist_sha256 === changedHash);
@@ -130,7 +135,7 @@ try {
     writeFileSync(distServer, originalServer);
   }
   }
-  console.log("PASS minimal_clone_identity_guard unsafe_replacement_blocked=true same_instance_wrong_store_blocked=true stable_store_required=true generation_change_idle_restart=true default_reload_disabled=true rejected_candidate_preserves_child=true");
+  console.log("PASS minimal_clone_identity_guard unsafe_replacement_blocked=true same_instance_wrong_store_blocked=true stable_store_required=true generation_change_idle_restart=true default_reload_disabled=true rejected_candidate_preserves_child=true unexpected_exit_recovered=true");
 } finally {
   try {
     rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
