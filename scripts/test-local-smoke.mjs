@@ -18,9 +18,9 @@ async function unusedPort() {
     });
   });
 }
-async function requestWithHost(origin, host) {
+async function requestWithHost(origin, host, { method = "GET", headers = {} } = {}) {
   return await new Promise((resolveRequest, reject) => {
-    const request = httpRequest(new URL("/mcp", origin), { method: "GET", headers: { Host: host } }, (response) => {
+    const request = httpRequest(new URL("/mcp", origin), { method, headers: { Host: host, ...headers } }, (response) => {
       let body = "";
       response.setEncoding("utf8");
       response.on("data", (chunk) => { body += chunk; });
@@ -100,6 +100,15 @@ try {
   assert.equal(defaultPortHost.status, 401, `configured public HTTPS host with explicit :443 should reach auth, got ${defaultPortHost.status}: ${defaultPortHost.body}`);
   const nonDefaultPortHost = await requestWithHost(origin, `${publicHost}:444`);
   assert.equal(nonDefaultPortHost.status, 403, `non-default public host port must remain rejected, got ${nonDefaultPortHost.status}: ${nonDefaultPortHost.body}`);
+  const untrustedOrigin = await requestWithHost(origin, publicHost, { method: "POST", headers: { Origin: "https://attacker.invalid" } });
+  assert.equal(untrustedOrigin.status, 403, `untrusted Origin must be rejected before bearer auth, got ${untrustedOrigin.status}: ${untrustedOrigin.body}`);
+  assert.match(untrustedOrigin.body, /Invalid Origin header/);
+  const trustedPublicOrigin = await requestWithHost(origin, publicHost, { method: "POST", headers: { Origin: new URL(publicOrigin).origin } });
+  assert.equal(trustedPublicOrigin.status, 401, `configured public Origin should reach bearer auth, got ${trustedPublicOrigin.status}: ${trustedPublicOrigin.body}`);
+  const trustedLocalOrigin = await requestWithHost(origin, `127.0.0.1:${port}`, { method: "POST", headers: { Origin: origin } });
+  assert.equal(trustedLocalOrigin.status, 401, `direct local Origin should reach bearer auth, got ${trustedLocalOrigin.status}: ${trustedLocalOrigin.body}`);
+  const trustedFrontDoorOrigin = await requestWithHost(origin, "127.0.0.1:3003", { method: "POST", headers: { Origin: "http://127.0.0.1:3003" } });
+  assert.equal(trustedFrontDoorOrigin.status, 401, `front-door Origin should reach bearer auth, got ${trustedFrontDoorOrigin.status}: ${trustedFrontDoorOrigin.body}`);
   const smoke = spawn(process.execPath, [resolve("scripts/smoke.mjs")], {
     cwd: resolve("."),
     env: {
@@ -149,7 +158,7 @@ ${stressStderr}`);
   assert.match(stressStdout, /rss=\d+(?:\.\d+)?MB \(baseline \d+(?:\.\d+)?MB\)/, `dynamic-port stress did not report settled RSS: ${stressStdout}`);
   assert.equal(stressStderr.trim(), "", `dynamic-port stress emitted stderr: ${stressStderr}`);
 
-  console.log(`PASS local_smoke origin=${origin} stress_rss_dynamic_port=true production_untouched=true runtime_identity_bound=true`);
+  console.log(`PASS local_smoke origin=${origin} stress_rss_dynamic_port=true production_untouched=true runtime_identity_bound=true origin_guard=true`);
 } finally {
   if (server.pid) spawnSync("taskkill.exe", ["/PID", String(server.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
   rmSync(temporary, { recursive: true, force: true });
