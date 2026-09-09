@@ -4,7 +4,7 @@ import { z } from "zod";
 import { BusyStore } from "./lib/busy-store.js";
 import { viewImage } from "./lib/image-viewer.js";
 import { ProcessManager } from "./lib/process-manager.js";
-import { PROCESS_LIBRARY_UPLOAD_WIDGET_URI, processLibraryUploadFromOutput, registerProcessLibraryUploadWidget } from "./lib/process-library-upload.js";
+import { PROCESS_LIBRARY_UPLOAD_WIDGET_URI, processLibraryUploadContent, processLibraryUploadFromOutput, processLibraryUploadMetadata, registerProcessLibraryUploadWidget } from "./lib/process-library-upload.js";
 
 // The deployed ChatGPT connector surface is the process profile. Keep the broader
 // full profile explicit-only for internal/local tests so repo inspection without a
@@ -27,11 +27,12 @@ async function textResult(value: unknown, id: string) {
     ? { ...(value as Record<string, unknown>), caller_id: id }
     : { value, caller_id: id };
   const upload = await processLibraryUploadFromOutput(value);
+  const media = upload ? processLibraryUploadContent(upload) : null;
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(data) }],
+    content: [{ type: "text" as const, text: JSON.stringify(data) }, ...(media ? [media] : [])],
     ...(upload ? {
       structuredContent: { library_upload_requested: true, file_name: upload.file_name, mime_type: upload.mime_type, bytes: upload.bytes },
-      _meta: { chatgpt_library_upload: upload },
+      _meta: { chatgpt_library_upload: processLibraryUploadMetadata(upload) },
     } : {}),
   };
 }

@@ -25,6 +25,21 @@ export type ProcessLibraryUpload = {
   data_base64: string;
 };
 
+export function processLibraryUploadContent(upload: ProcessLibraryUpload) {
+  if (!upload.mime_type.startsWith("image/")) return null;
+  return {
+    type: "image" as const,
+    data: upload.data_base64,
+    mimeType: upload.mime_type,
+    annotations: { audience: ["assistant", "user"] as ("assistant" | "user")[] },
+  };
+}
+
+export function processLibraryUploadMetadata(upload: ProcessLibraryUpload) {
+  const metadata = { file_name: upload.file_name, mime_type: upload.mime_type, bytes: upload.bytes };
+  return upload.mime_type.startsWith("image/") ? metadata : { ...metadata, data_base64: upload.data_base64 };
+}
+
 export async function processLibraryUploadFromOutput(value: unknown): Promise<ProcessLibraryUpload | null> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const stdout = (value as Record<string, unknown>).stdout;
@@ -67,13 +82,13 @@ export function registerProcessLibraryUploadWidget(server: McpServer): void {
 export function processLibraryUploadWidgetHtml(): string {
   return `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color-scheme:light dark}body{margin:0;padding:0;background:transparent}.status{display:none;padding:8px 10px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-all}.status.on{display:block}</style></head>
-<body><div id="status" class="status"></div>
+<style>:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color-scheme:light dark}body{margin:0;padding:0;background:transparent}.image{display:none;max-width:100%;height:auto;border-radius:8px}.image.on{display:block}.status{display:none;padding:8px 10px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-all}.status.on{display:block}</style></head>
+<body><img id="image" class="image" alt="Local image"><div id="status" class="status"></div>
 <script>
-const statusEl=document.getElementById('status');
+const statusEl=document.getElementById('status'); const imageEl=document.getElementById('image');
 let startedKey='';
 function setStatus(text){statusEl.textContent=text;statusEl.classList.add('on');window.openai?.notifyIntrinsicHeight?.();}
-function payloadFrom(result){return result?._meta?.chatgpt_library_upload||null;}
+function payloadFrom(result){const p=result?._meta?.chatgpt_library_upload||null;if(!p)return null;if(p.data_base64)return p;const image=(result?.content||[]).find(x=>x?.type==='image'&&x.data&&x.mimeType);return image?{...p,data_base64:image.data,mime_type:image.mimeType}:p;}
 async function render(result){
  const p=payloadFrom(result); if(!p?.data_base64||!p?.file_name||!p?.mime_type)return;
  const key=p.file_name+':'+p.bytes; if(startedKey===key)return; startedKey=key;
@@ -82,7 +97,9 @@ async function render(result){
  try{
   const raw=atob(p.data_base64); const bytes=new Uint8Array(raw.length);
   for(let i=0;i<raw.length;i++)bytes[i]=raw.charCodeAt(i);
-  const file=new File([bytes],p.file_name,{type:p.mime_type});
+  const blob=new Blob([bytes],{type:p.mime_type});
+  if(p.mime_type.startsWith('image/')){imageEl.src=URL.createObjectURL(blob);imageEl.classList.add('on');window.openai?.notifyIntrinsicHeight?.();}
+  const file=new File([blob],p.file_name,{type:p.mime_type});
   const result=await window.openai.uploadFile(file,{library:true});
   const fileId=result?.fileId||'';
   setStatus('LIBRARY_UPLOAD_OK '+fileId+' '+p.file_name);
