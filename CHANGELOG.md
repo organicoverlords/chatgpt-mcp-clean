@@ -4,6 +4,7 @@ All notable project changes are recorded here in Keep a Changelog 1.1.0 style.
 
 ## [Unreleased]
 
+- [2026-09-10] Added the one-command local home-direct stack installer (#233): one Windows host gets the loopback MCP backend, pinned local Caddy, standalone BusyCoordinator, shared base rules, PlanOnly, and autostart; the ChatGPT connector remains exactly `start_process`, `read_output`, and `kill_process`, while Library delivery stays metadata/resource-widget behavior rather than a fourth tool.
 - [2026-09-06] Made the three-process-tool ChatGPT connector profile the production-safe default, corrected stale full-profile documentation, and added a rotation-aware reroute acceptance analyzer that joins aggregate transport health with exact/unknown-time routing evidence without exposing raw identifiers (#81).
 - [2026-09-05] Extended the public Caddy client idle timeout from 15 seconds to 5 minutes after packet/access-log correlation showed Caddy was closing otherwise healthy client connections at about 15 seconds; retained WireGuard-only backend routing and the 30-second/max-4 upstream keep-alive pool, and live proof reused the same TLS socket after 20 seconds idle.
 - [2026-09-05] Pinned public MCP traffic to the OS-level WireGuard link (VPS `10.203.0.1/30` to Windows `10.203.0.2/30`) and added a 15-second public client idle timeout after live evidence showed one-request-per-connection OpenAI fan-out accumulating over 100 established sockets. The four native OpenSSH lanes remain available for explicit recovery only and are no longer automatic Caddy upstreams.

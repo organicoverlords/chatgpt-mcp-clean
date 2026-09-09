@@ -3,11 +3,11 @@
 <!-- PROJECT-TIMELINE:BEGIN -->
 ## Project timeline
 
+- [2026-09-10] Added the one-command local home-direct stack installer (#233): one Windows host gets the loopback MCP backend, pinned local Caddy, standalone BusyCoordinator, shared base rules, PlanOnly, and autostart; the ChatGPT connector remains exactly `start_process`, `read_output`, and `kill_process`, while Library delivery stays metadata/resource-widget behavior rather than a fourth tool.
 - [2026-09-06] Made the three-process-tool ChatGPT connector profile the production-safe default, corrected stale full-profile documentation, and added a rotation-aware reroute acceptance analyzer that joins aggregate transport health with exact/unknown-time routing evidence without exposing raw identifiers (#81).
 - [2026-09-05] Extended the public Caddy client idle timeout from 15 seconds to 5 minutes after packet/access-log correlation showed Caddy was closing otherwise healthy client connections at about 15 seconds; retained WireGuard-only backend routing and the 30-second/max-4 upstream keep-alive pool, and live proof reused the same TLS socket after 20 seconds idle.
 - [2026-09-05] Pinned public MCP traffic to the OS-level WireGuard link (VPS `10.203.0.1/30` to Windows `10.203.0.2/30`) and added a 15-second public client idle timeout after live evidence showed one-request-per-connection OpenAI fan-out accumulating over 100 established sockets. The four native OpenSSH lanes remain available for explicit recovery only and are no longer automatic Caddy upstreams.
 - [2026-09-05] Promoted an OS-level WireGuard link (VPS `10.203.0.1/30` to Windows `10.203.0.2/30`) to Caddy's primary MCP upstream while retaining the four independent native OpenSSH lanes as ordered health-checked failover; the Windows tunnel service auto-starts and a persistent portproxy bound to `10.203.0.2:3011` forwards to the loopback backend; no separate `MCP WireGuard 3011` Windows firewall rule was created.
-- [2026-09-05] Replaced the single Python/AsyncSSH VPS reverse tunnel with four independent native OpenSSH lanes behind Caddy round-robin health-aware routing; one-lane failure now leaves the other three serving and the existing recovery task recreates only the missing lane.
 
 See the canonical [CHANGELOG.md](CHANGELOG.md) for the complete project timeline.
 <!-- PROJECT-TIMELINE:END -->
@@ -22,7 +22,7 @@ The default ChatGPT connector contract is `MCP_TOOL_PROFILE=process`, exposing e
 
 The connector surface stays exactly three tools: `start_process`, `read_output`, and `kill_process`. Library delivery uses the existing metadata/resource widget and does not add a tool. Busy is installed beside MCP and is not exposed as an MCP tool.
 
-From an elevated PowerShell 7 prompt in a clean clone, run `pwsh -File .\install.ps1 -PublicOrigin https://your-mcp.example -OwnerLogin you@example.com`. Use `-WithAgentEntrypoints` to install the supported agent pointers, or omit it for an agentless setup. `-Plan` prints the complete mutation-free install plan. Caddy is pinned and SHA-256 verified before installation.
+From an elevated PowerShell 7 prompt in a clean clone, run `pwsh -File .\install.ps1 -PublicOrigin https://your-mcp.example -OwnerLogin you@example.com`. The default is agentless-compatible; add `-WithAgentEntrypoints` only when Codex/OpenCode pointer entrypoints are wanted. `-Plan` prints the complete mutation-free install plan. Caddy 2.11.3 is pinned and SHA-256 verified before installation, and the installer verifies the frozen three-tool MCP contract before promoting the runtime.
 
 The package configures the same local-edge authorization model used by the home-direct setup: `/authorize` is accepted only through the local/private edge and otherwise fails closed. Internet reachability still requires the user's own router/DNS to deliver the public HTTPS endpoint to the installed local Caddy listener; the installer does not change router settings.
 
