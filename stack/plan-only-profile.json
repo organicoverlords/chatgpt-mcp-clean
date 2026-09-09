@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "id": "plan-only",
+  "name": "PlanOnly",
+  "description": "Agent-neutral planning profile: inspect and plan freely, but do not mutate source, repositories, processes, services, schedulers, or shared ownership state.",
+  "permissions": {
+    "read": true,
+    "list": true,
+    "search": true,
+    "read_only_process_execution": true,
+    "write_artifacts": [
+      "plan.md",
+      "final-report.md",
+      ".agent-artifacts/**"
+    ],
+    "source_mutation": false,
+    "apply_patch": false,
+    "git_mutation": false,
+    "service_mutation": false,
+    "scheduler_mutation": false,
+    "process_termination": false,
+    "busy_claim_or_release": false
+  },
+  "notes": [
+    "This is a public interoperability contract, not a security sandbox by itself.",
+    "A compatible agent or harness must enforce these permissions before dispatching actions.",
+    "BusyCoordinator remains exact mutation collision control and is intentionally unused by PlanOnly work."
+  ]
+}

@@ -91,6 +91,8 @@ try {
     MCP_VISUAL_PROOF_REVIEW: "0",
     MCP_FRONT_DOOR_HOST: frontDoorHost,
     MCP_PUBLIC_ORIGIN: publicOrigin,
+    MCP_OWNER_AUTH_ORIGIN: "",
+    MCP_OWNER_AUTH_MODE: "tailscale",
     TAILSCALE_OWNER_LOGIN: owner,
     MCP_OAUTH_STORE_PATH: oauthPath,
     MCP_BUSY_STORE_PATH: busyPath,

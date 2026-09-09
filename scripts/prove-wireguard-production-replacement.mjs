@@ -69,6 +69,8 @@ const child = spawn(process.execPath, [resolve("dist/index.js")], {
     MCP_WIREGUARD_CANDIDATE: "1",
     MCP_TOOL_PROFILE: "process",
     MCP_PUBLIC_ORIGIN: `https://${PUBLIC_HOST}`,
+    MCP_OWNER_AUTH_ORIGIN: "",
+    MCP_OWNER_AUTH_MODE: "tailscale",
     TAILSCALE_OWNER_LOGIN: "wireguard-proof@example.com",
     MCP_OAUTH_STORE_PATH: join(temporary, "oauth.json"),
     MCP_TRANSPORT_LOG_PATH: join(temporary, "transport.jsonl"),

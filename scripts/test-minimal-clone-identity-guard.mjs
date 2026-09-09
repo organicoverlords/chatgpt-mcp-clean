@@ -79,7 +79,7 @@ try {
     ...(reload ? ["-ReloadOnGenerationChange"] : []),
   ], {
     cwd: resolve("."),
-    env: { ...process.env, TAILSCALE_OWNER_LOGIN: "owner@example.com" },
+    env: { ...process.env, MCP_OWNER_AUTH_ORIGIN: "", MCP_OWNER_AUTH_MODE: "tailscale", TAILSCALE_OWNER_LOGIN: "owner@example.com" },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });

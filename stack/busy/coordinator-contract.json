@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "contract_version": 6,
+  "authority": "standalone_busy_coordinator",
+  "canonical_store": {
+    "windows": "%LOCALAPPDATA%\\\\ChatGPTMcpClean\\\\.state\\\\busy-claims.json",
+    "coordinator_key": "coordinator",
+    "coordinator_schema_version": 1
+  },
+  "core_required_commands": [
+    "list",
+    "sweep",
+    "snapshot",
+    "recover",
+    "claim",
+    "heartbeat",
+    "release",
+    "inspect"
+  ],
+  "required_commands": [
+    "list",
+    "sweep",
+    "snapshot",
+    "recover",
+    "claim",
+    "heartbeat",
+    "release",
+    "inspect",
+    "contract",
+    "log",
+    "audit"
+  ],
+  "scope_metadata_states": [
+    "active"
+  ],
+  "retired_queue_commands": [
+    "enqueue",
+    "ready",
+    "next",
+    "handoff",
+    "block",
+    "complete"
+  ],
+  "limits": {
+    "max_operations": 512,
+    "max_snapshot_items": 32,
+    "max_audit_detail_chars": 2048,
+    "default_audit_max_bytes": 5242880,
+    "default_audit_backups": 3,
+    "max_audit_checkpoint_chars": 1024,
+    "max_audit_expired_items": 32,
+    "max_sweep_temp_items": 32
+  },
+  "invariants": [
+    "one canonical claims store",
+    "one claim per exact scope",
+    "active scope metadata has a matching claim and owner",
+    "unowned scope metadata is not retained in the BUSY store",
+    "queue selection, priority, blocked, completed, and handoff scheduling are outside coordinator authority",
+    "operation replay history stays bounded",
+    "legacy-only claims remain distinct from coordinator-managed ownership metadata",
+    "python and rust cores expose the same required ownership commands",
+    "installed wrappers expose the same contract and observability commands",
+    "runtime may add compatible metadata but may not omit required commands",
+    "new and renewed claim owners identify an approved harness plus task/session suffix; cleanup/recovery may address legacy owner strings",
+    "sweep removes only exact-store temp files at least 60 seconds old whose encoded writer PID is positively dead; fresh, live, malformed, unknown-writer, and unrelated temp files are preserved",
+    "new path-like relative claims are rejected; filesystem scopes must be absolute or namespaced logical identifiers such as <repo>:file:<path>"
+  ]
+}
