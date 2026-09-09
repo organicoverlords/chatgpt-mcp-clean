@@ -37,6 +37,7 @@ const supervisorEnvironment = {
   MCP_PUBLIC_ORIGIN: "https://supervisor-proof.test.ts.net",
   TAILSCALE_OWNER_LOGIN: "owner@example.com",
   MCP_OWNER_AUTH_ORIGIN: "",
+  MCP_OWNER_AUTH_MODE: "tailscale",
   MCP_BACKEND_GENERATION: "",
   MCP_WIREGUARD_CANDIDATE: "0",
   MCP_FORCE_CONNECTION_CLOSE: "0",

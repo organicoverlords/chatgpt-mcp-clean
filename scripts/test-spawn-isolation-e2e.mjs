@@ -33,7 +33,7 @@ const server = spawn(process.execPath, [resolve("dist/index.js")], {
   env: {
     ...process.env,
     PORT: String(port), HOST: "127.0.0.1", MCP_BACKEND_MODE: "1", MCP_TOOL_PROFILE: "process",
-    MCP_PUBLIC_ORIGIN: publicOrigin, TAILSCALE_OWNER_LOGIN: "owner@example.com",
+    MCP_PUBLIC_ORIGIN: publicOrigin, MCP_OWNER_AUTH_ORIGIN: "", MCP_OWNER_AUTH_MODE: "tailscale", TAILSCALE_OWNER_LOGIN: "owner@example.com",
     MCP_OAUTH_STORE_PATH: join(temporary, "oauth.json"), MCP_TRANSPORT_LOG_PATH: join(temporary, "transport.jsonl"),
     MCP_PROCESS_RECEIPT_DIR: join(temporary, "receipts"), MCP_TEST_LAUNCH_DELAY_MS: "3000",
   },
