@@ -53,7 +53,7 @@ try {
         if ($LASTEXITCODE -eq 0 -and $jsonLine) {
             $smokeResult = $jsonLine | ConvertFrom-Json
             $receipt.process_profile_smoke_pass = ([string]$smokeResult.result -eq 'PASS')
-            $receipt.process_profile_tools_exact = ((@($smokeResult.tools) -join ',') -eq 'kill_process,read_output,start_process')
+            $receipt.process_profile_tools_exact = ((@($smokeResult.tools) -join ',') -eq 'download_chatgpt_file,kill_process,read_output,start_process,upload_local_file')
             $receipt.process_profile_state_root_explicit = ([string]$smokeResult.state_root_mode -eq 'explicit')
         }
     } finally {

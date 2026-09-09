@@ -1,5 +1,51 @@
 [
   {
+    "name": "download_chatgpt_file",
+    "description": "Save one exact ChatGPT file onto the MCP host without transcoding. Pass the ChatGPT file in file and an absolute destination_path; overwrite defaults to false. The server streams the temporary ChatGPT download URL directly to disk and returns byte count plus SHA-256.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "object",
+          "properties": {
+            "download_url": {
+              "type": "string",
+              "minLength": 1
+            },
+            "file_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "mime_type": {
+              "type": "string"
+            },
+            "file_name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "download_url",
+            "file_id"
+          ],
+          "additionalProperties": false
+        },
+        "destination_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "overwrite": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "file",
+        "destination_path"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "kill_process",
     "description": "Terminate a background process and its entire Windows process tree.",
     "inputSchema": {
@@ -67,6 +113,24 @@
       },
       "required": [
         "command"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "upload_local_file",
+    "description": "Upload one exact local file from the MCP host into ChatGPT/Library. Transfers raw bytes through a dedicated short-lived endpoint instead of embedding file data in process output. HTTP zstd level 1 is used opportunistically for compressible formats when the client advertises support; already-compressed media is streamed unchanged.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "path"
       ],
       "additionalProperties": false
     }

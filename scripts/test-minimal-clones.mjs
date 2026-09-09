@@ -190,7 +190,7 @@ try {
     connect(cloneB, "clone-b-client-1"),
     connect(cloneB, "clone-b-client-2"),
   ]);
-  const expected = ["kill_process", "read_output", "start_process"];
+  const expected = ["download_chatgpt_file", "kill_process", "read_output", "start_process", "upload_local_file"];
   for (const client of [a1, a2, b1, b2]) {
     const tools = await client.tools();
     const names = tools.map((tool) => tool.name).sort();

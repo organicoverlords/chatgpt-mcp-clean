@@ -10,8 +10,8 @@ const resource = `${publicOrigin}/mcp`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const toolProfile = (process.env.MCP_TOOL_PROFILE || "process").trim().toLowerCase();
 const expectedTools = toolProfile === "process"
-  ? ["kill_process", "read_output", "start_process"]
-  : ["busy_claim", "busy_list", "busy_release", "kill_process", "read_output", "start_process", "view_image"];
+  ? ["download_chatgpt_file", "kill_process", "read_output", "start_process", "upload_local_file"]
+  : ["busy_claim", "busy_list", "busy_release", "download_chatgpt_file", "kill_process", "read_output", "start_process", "upload_local_file", "view_image"];
 
 async function jsonFetch(url, options = {}) {
   const response = await fetch(url, options);

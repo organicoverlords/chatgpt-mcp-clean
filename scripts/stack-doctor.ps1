@@ -37,8 +37,8 @@ if ($config) {
     } else { Add-Check 'busy-contract' $false $busyCmd }
     Add-Check 'rules' ((Test-Path -LiteralPath (Join-Path $rulesRoot 'RULES.md') -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $rulesRoot 'AGENTS.md') -PathType Leaf)) $rulesRoot
     Add-Check 'topology' ([string]$config.topology -eq 'local-home-direct') ([string]$config.topology)
-    Add-Check 'three-tool-profile' (([string]$config.tool_profile -eq 'process') -and ([int]$config.tool_count -eq 3)) ("profile={0} count={1}" -f $config.tool_profile,$config.tool_count)
-    Add-Check 'library-widget' ([string]$config.library_delivery -eq 'metadata/resource widget') ([string]$config.library_delivery)
+    Add-Check 'five-tool-profile' (([string]$config.tool_profile -eq 'process') -and ([int]$config.tool_count -eq 5)) ("profile={0} count={1}" -f $config.tool_profile,$config.tool_count)
+    Add-Check 'file-transfer-tools' ([string]$config.library_delivery -eq 'explicit file tools') ([string]$config.library_delivery)
     $caddyExe = [string]$config.caddy_exe
     $caddyConfig = [string]$config.caddy_config
     Add-Check 'caddy-exe' (Test-Path -LiteralPath $caddyExe -PathType Leaf) $caddyExe
