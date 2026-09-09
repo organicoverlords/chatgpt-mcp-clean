@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import { parentPort, workerData } from "node:worker_threads";
+import { processChildEnvironment } from "./process-child-environment.js";
 
 type LaunchData = { powershellExe: string };
 type LaunchMessage = { type: "launch"; requestId: string; command: string; cwd: string };
@@ -33,7 +34,7 @@ function launch(requestId: string, command: string, cwd: string): void {
       cwd,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
+      env: processChildEnvironment(),
     });
     if (!child.pid) throw new Error("Background process did not receive a PID");
     children.set(requestId, child);
