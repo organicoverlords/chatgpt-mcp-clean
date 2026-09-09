@@ -68,6 +68,13 @@ const server = spawn(process.execPath, [resolve("dist/index.js")], {
     PORT: String(port),
     HOST: "127.0.0.1",
     MCP_BACKEND_MODE: "1",
+    MCP_WIREGUARD_CANDIDATE: "0",
+    MCP_FORCE_CONNECTION_CLOSE: "0",
+    MCP_FRONT_DOOR_HOST: "127.0.0.1:3003",
+    MCP_RUNTIME_INSTANCE_ID: "",
+    MCP_RUNTIME_SOURCE_COMMIT: "",
+    MCP_RUNTIME_DIST_SHA256: "",
+    MCP_RUNTIME_SOURCE_DIRTY: "",
     MCP_TOOL_PROFILE: "process",
     MCP_VISUAL_PROOF_UI: "0",
     MCP_VISUAL_PROOF_REVIEW: "0",
@@ -84,7 +91,7 @@ const server = spawn(process.execPath, [resolve("dist/index.js")], {
 let stderr = "";
 server.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
 try {
-  await waitHealth(origin, port);
+  try { await waitHealth(origin, port); } catch (error) { throw new Error(`${error instanceof Error ? error.message : String(error)}; server_exit=${server.exitCode}; server_stderr=${stderr.trim()}`); }
 
   const metadata = await jsonFetch(`${origin}/.well-known/openid-configuration`);
   assert.equal(metadata.response.status, 200, metadata.text);
