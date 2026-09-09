@@ -9,6 +9,7 @@ const guardian = readFileSync(new URL("./production-replacement-guardian.ps1", i
 const candidate = readFileSync(new URL("./production-replacement-candidate.ps1", import.meta.url), "utf8");
 const installer = readFileSync(new URL("./install-production-replacement-task.ps1", import.meta.url), "utf8");
 const busyGuard = readFileSync(new URL("./assert-live-busy-claim.ps1", import.meta.url), "utf8");
+const recovery = readFileSync(new URL("./recover-wireguard-production.ps1", import.meta.url), "utf8");
 
 assert.match(index, /MCP_WIREGUARD_CANDIDATE/);
 assert.match(index, /wireGuardHost = "10\.203\.0\.2"/);
@@ -102,4 +103,22 @@ assert.match(guardian, /McpV3ProductionReplacementCandidate/);
 assert.match(guardian, /candidate_dist_sha256/);
 assert.match(guardian, /old_dist_sha256/);
 
-console.log("PASS wireguard_replacement_contract independent_candidate_task=true candidate_first=true drain_before_stop=true canonical_supervisor_reused=true rollback_or_candidate_serving=true");
+assert.match(recovery, /GateReceiptPath/);
+assert.match(recovery, /vps_edge_ingress/);
+assert.match(recovery, /mcp_minimal_clone:production-backend-3011/);
+assert.match(recovery, /DEGRADED_CANDIDATE_SERVING/);
+assert.match(recovery, /ExpectedRequestId/);
+assert.match(recovery, /ExpectedCanonicalGeneration/);
+assert.match(recovery, /ExpectedCandidateGeneration/);
+assert.match(recovery, /http:\/\/127\.0\.0\.1:3011\/health/);
+assert.match(recovery, /http:\/\/10\.203\.0\.2:3012\/health/);
+assert.match(recovery, /--caddy-only --backend-port 3011/);
+assert.match(recovery, /RECOVERED_CANONICAL/);
+assert.match(recovery, /Stop-ScheduledTask -TaskName \$candidateTask/);
+assert.doesNotMatch(recovery, /Stop-ScheduledTask -TaskName \$prodTask/);
+const recoveryRoute = recovery.indexOf("--caddy-only --backend-port 3011");
+const recoveryPublic = recovery.indexOf("$publicCanonical=WaitHealth", recoveryRoute);
+const recoveryStopCandidate = recovery.indexOf("Stop-ScheduledTask -TaskName $candidateTask", recoveryPublic);
+assert.ok(recoveryRoute >= 0 && recoveryPublic > recoveryRoute && recoveryStopCandidate > recoveryPublic, "recovery must route/verify canonical before stopping candidate");
+
+console.log("PASS wireguard_replacement_contract independent_candidate_task=true candidate_first=true drain_before_stop=true canonical_supervisor_reused=true rollback_or_candidate_serving=true degraded_candidate_recovery=true");
