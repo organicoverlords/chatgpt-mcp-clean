@@ -56,6 +56,13 @@ rejects("Get-CimInstance Win32_Service -Filter 'Name=\"WireGuardTunnel$mcp-wireg
 rejects("Set-ScheduledTask -TaskName 'McpV3Production3011' -Settings (New-ScheduledTaskSettingsSet)");
 rejects("schtasks.exe /Create /TN McpV3Production3011 /TR calc.exe /SC ONCE /ST 23:59 /F");
 rejects("Start-ScheduledTask -TaskName 'McpVpsEdgeTunnel'");
+rejects(`Set-Content -LiteralPath '${caddyPath}' -Value 'blocked'`);
+rejects(`Add-Content -LiteralPath '${caddyPath}' -Value 'blocked'`);
+rejects(`'blocked' | Out-File -FilePath '${caddyPath}'`);
+rejects(`$target='${caddyPath}'; Set-Content -LiteralPath $target -Value 'blocked'`);
+rejects(`Copy-Item -LiteralPath 'C:\\tmp\\Caddyfile' -Destination '${caddyPath}'`);
+rejects(`Move-Item -LiteralPath '${caddyPath}' -Destination 'C:\\tmp\\Caddyfile'`);
+rejects(`Remove-Item -LiteralPath '${caddyPath}'`);
 rejects("New-NetFirewallRule -DisplayName 'MCP test' -Direction Inbound -LocalAddress 10.203.0.2 -LocalPort 3011 -Action Block");
 rejects("Remove-NetRoute -DestinationPrefix '10.203.0.2/32' -Confirm:$false");
 rejects("Disable-NetAdapter -Name 'mcp-wireguard' -Confirm:$false");
@@ -85,6 +92,18 @@ assert.match(sourceRead.stdout, /SOURCE_READ_ALLOWED/);
 const sourceEditShape = await run(`if ($false) { Set-Content -LiteralPath '${candidateSourcePath}' -Value 'source-only' }; Write-Output 'SOURCE_EDIT_SHAPE_ALLOWED'`);
 assert.equal(sourceEditShape.exit_code, 0);
 assert.match(sourceEditShape.stdout, /SOURCE_EDIT_SHAPE_ALLOWED/);
+
+const unrelatedCaddyReferenceWithLocalWrite = await run(`if ($false) { $readOnly='sha256sum ${caddyPath}'; Set-Content -LiteralPath 'C:\\tmp\\mcp-readonly-diagnostic.ps1' -Value $readOnly }; Write-Output 'UNRELATED_CADDY_REFERENCE_LOCAL_WRITE_ALLOWED'`);
+assert.equal(unrelatedCaddyReferenceWithLocalWrite.exit_code, 0);
+assert.match(unrelatedCaddyReferenceWithLocalWrite.stdout, /UNRELATED_CADDY_REFERENCE_LOCAL_WRITE_ALLOWED/);
+
+const unrelatedCaddyReferenceWithLocalOutFile = await run(`if ($false) { $readOnly='sha256sum ${caddyPath}'; 'local' | Out-File -FilePath 'C:\\tmp\\mcp-readonly-diagnostic.txt' }; Write-Output 'UNRELATED_CADDY_REFERENCE_LOCAL_OUTFILE_ALLOWED'`);
+assert.equal(unrelatedCaddyReferenceWithLocalOutFile.exit_code, 0);
+assert.match(unrelatedCaddyReferenceWithLocalOutFile.stdout, /UNRELATED_CADDY_REFERENCE_LOCAL_OUTFILE_ALLOWED/);
+
+const readOnlyCaddyCopy = await run(`if ($false) { Copy-Item -LiteralPath '${caddyPath}' -Destination 'C:\\tmp\\caddy-snapshot.txt' }; Write-Output 'READ_ONLY_CADDY_COPY_ALLOWED'`);
+assert.equal(readOnlyCaddyCopy.exit_code, 0);
+assert.match(readOnlyCaddyCopy.stdout, /READ_ONLY_CADDY_COPY_ALLOWED/);
 
 const supportedLauncher = await run("if ($false) { & 'C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\launch-production.ps1' }; Write-Output 'SUPPORTED_PRODUCTION_LAUNCHER_ALLOWED'");
 assert.equal(supportedLauncher.exit_code, 0);
