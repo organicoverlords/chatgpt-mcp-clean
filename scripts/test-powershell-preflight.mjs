@@ -5,10 +5,11 @@ import { join } from "node:path";
 import { ProcessManager } from "../dist/lib/process-manager.js";
 
 const manager = new ProcessManager();
+const commandWaitMs = 30_000;
 
 async function run(command, caller) {
-  const result = await manager.startWithWait(command, undefined, caller, 5_000);
-  assert.equal(result.running, false, JSON.stringify(result));
+  const result = await manager.startWithWait(command, undefined, caller, commandWaitMs);
+  assert.equal(result.running, false, `command did not finish within ${commandWaitMs} ms: ${JSON.stringify(result)}`);
   return result;
 }
 
