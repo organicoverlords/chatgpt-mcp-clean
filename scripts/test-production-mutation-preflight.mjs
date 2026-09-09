@@ -18,12 +18,21 @@ function rejects(command) {
   );
 }
 
+const allowedCommandTimeoutMs = 30_000;
+
 async function run(command) {
   const started = manager.start(command, undefined, "caller_production_mutation_allow");
   let result = started;
-  for (let attempt = 0; attempt < 20 && result.running !== false; attempt += 1) {
-    result = await manager.readWithWait(started.process_id, 32_000, 250);
+  const deadline = Date.now() + allowedCommandTimeoutMs;
+  while (result.running !== false && Date.now() < deadline) {
+    const remainingMs = Math.max(1, deadline - Date.now());
+    result = await manager.readWithWait(started.process_id, 32_000, Math.min(1_000, remainingMs));
   }
+  assert.equal(
+    result.running,
+    false,
+    `allowed command did not finish within ${allowedCommandTimeoutMs} ms: process_id=${started.process_id} stdout_tail=${JSON.stringify(String(result.stdout || "").slice(-1_000))} stderr_tail=${JSON.stringify(String(result.stderr || "").slice(-1_000))}`,
+  );
   return result;
 }
 
