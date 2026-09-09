@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { execFile } from "node:child_process";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
+import { isBootstrapSnapshot, readBootstrapSnapshot } from "./lib/bootstrap-snapshot.js";
 import { z } from "zod";
 import { BusyStore } from "./lib/busy-store.js";
 import { viewImage } from "./lib/image-viewer.js";
@@ -13,49 +13,6 @@ import { PROCESS_LIBRARY_UPLOAD_WIDGET_URI, processLibraryUploadContent, process
 const toolProfile = (process.env.MCP_TOOL_PROFILE || "process").trim().toLowerCase();
 if (toolProfile !== "full" && toolProfile !== "process") throw new Error("MCP_TOOL_PROFILE must be full or process");
 const fullToolProfile = toolProfile === "full";
-const BOOTSTRAP_PROCESS_ALIAS = "bootstrap";
-
-function bootstrapScriptPath(): string {
-  const configured = (process.env.MCP_BOOTSTRAP_SCRIPT || "").trim();
-  if (configured) return configured;
-  const home = (process.env.USERPROFILE || "").trim();
-  if (!home) throw new Error("MCP_BOOTSTRAP_SCRIPT is required when USERPROFILE is unavailable");
-  return join(home, "Desktop", "vault", "tools", "stack_atlas.py");
-}
-
-async function readBootstrapSnapshot(maxChars = 32_000): Promise<Record<string, unknown>> {
-  const startedAt = Date.now();
-  const python = (process.env.MCP_BOOTSTRAP_PYTHON || "python").trim() || "python";
-  const script = bootstrapScriptPath();
-  const { stdout, stderr } = await new Promise<{ stdout: string; stderr: string }>((done, fail) => {
-    execFile(
-      python,
-      [script, "bootstrap-glance"],
-      { windowsHide: true, timeout: 10_000, maxBuffer: 64 * 1024, encoding: "utf8" },
-      (error, out, err) => error ? fail(error) : done({ stdout: out, stderr: err }),
-    );
-  });
-  const raw = stdout.replace(/^\uFEFF/, "").trim();
-  const payload = JSON.parse(raw) as Record<string, unknown>;
-  if (payload.schema !== "bootstrap.v1" || typeof payload.generated_at !== "string") {
-    throw new Error("bootstrap-glance returned invalid bootstrap.v1 payload");
-  }
-  const compact = JSON.stringify(payload);
-  if (compact.length > maxChars) throw new Error(`bootstrap.v1 exceeds requested max_chars=${maxChars}`);
-  return {
-    mcp_status: "OK",
-    process_state: "SNAPSHOT",
-    elapsed_ms: Date.now() - startedAt,
-    next_action: "STOP_READING",
-    process_id: BOOTSTRAP_PROCESS_ALIAS,
-    running: false,
-    stdout: compact,
-    stderr: stderr.trim(),
-    generated_at: payload.generated_at,
-    bootstrap_alias: true,
-  };
-}
-
 const processManager = new ProcessManager({
   receiptDirectory: resolve(process.env.MCP_PROCESS_RECEIPT_DIR || ".state/process-receipts"),
 });
@@ -135,8 +92,8 @@ export function createServer(callerId: string): McpServer {
         wait_ms: z.number().int().min(0).max(10_000).optional(),
       }),
     },
-    async ({ process_id, max_chars, wait_ms }) => textResult(process_id === BOOTSTRAP_PROCESS_ALIAS
-      ? await readBootstrapSnapshot(max_chars ?? 32_000)
+    async ({ process_id, max_chars, wait_ms }) => textResult(isBootstrapSnapshot(process_id)
+      ? await readBootstrapSnapshot(max_chars ?? 32_000, process_id)
       : await processManager.readWithWait(process_id, max_chars, wait_ms ?? 2_000), callerId),
   );
 

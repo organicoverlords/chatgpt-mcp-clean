@@ -12,17 +12,11 @@ const temporary = mkdtempSync(externalStateRoot
   : join(tmpdir(), "mcp-minimal-clones-"));
 const sharedReceipts = join(temporary, "shared-process-receipts");
 mkdirSync(sharedReceipts, { recursive: true });
-const bootstrapScript = join(temporary, "bootstrap-snapshot.mjs");
-writeFileSync(bootstrapScript, `import { randomUUID } from "node:crypto";
-const payload = {
-  bootstrap_warning: "TEST_BOOTSTRAP_INTEGRITY",
-  schema: "bootstrap.v1",
-  generated_at: new Date().toISOString(),
-  nonce: randomUUID(),
-  bootstrap_end: { status: "COMPLETE", schema: "bootstrap.v1" },
-};
-process.stdout.write(JSON.stringify(payload));
-`, "utf8");
+const bootstrapSnapshot = join(temporary, "bootstrap.json");
+writeFileSync(bootstrapSnapshot, JSON.stringify({
+  bootstrap_warning: "TEST_BOOTSTRAP_INTEGRITY", schema: "bootstrap.v1", generated_at: new Date().toISOString(),
+  nonce: crypto.randomUUID(), bootstrap_end: { status: "COMPLETE", schema: "bootstrap.v1" }, marker: "AUTHENTICATED_SNAPSHOT",
+}), "utf8");
 const children = [];
 const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 
@@ -72,8 +66,7 @@ function startClone(id, port, extraEnv = {}) {
       MCP_OAUTH_STORE_PATH: join(state, "oauth.json"),
       MCP_TRANSPORT_LOG_PATH: join(state, "transport.jsonl"),
       MCP_PROCESS_RECEIPT_DIR: sharedReceipts,
-      MCP_BOOTSTRAP_PYTHON: process.execPath,
-      MCP_BOOTSTRAP_SCRIPT: bootstrapScript,
+      MCP_BOOTSTRAP_SNAPSHOT_PATH: bootstrapSnapshot,
       ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -206,24 +199,18 @@ try {
     assert.deepEqual(byName.kill_process.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: false });
   }
 
-  const bootstrapReads = [
-    await a1.call("read_output", { process_id: "bootstrap", max_chars: 32_000, wait_ms: 0 }),
-    await a1.call("read_output", { process_id: "bootstrap", max_chars: 32_000, wait_ms: 0 }),
-  ];
-  const bootstrapPayloads = bootstrapReads.map((snapshot) => {
-    assert.equal(snapshot.process_id, "bootstrap");
+  const bootstrapReads = await Promise.all(["bootstrap", "231b7e74-4cc8-43d0-9702-fd6dfa2215b3", "checkup"].map((process_id) =>
+    a1.call("read_output", { process_id, max_chars: 32_000, wait_ms: 0 })));
+  for (const snapshot of bootstrapReads) {
     assert.equal(snapshot.process_state, "SNAPSHOT");
     assert.equal(snapshot.next_action, "STOP_READING");
     assert.equal(snapshot.running, false);
-    assert.equal(snapshot.bootstrap_alias, true);
-    assert.equal(Object.hasOwn(snapshot, "stdout_truncated"), false, JSON.stringify(snapshot));
-    assert.equal(Object.hasOwn(snapshot, "stdout_dropped_from_start"), false, JSON.stringify(snapshot));
+    assert.equal(snapshot.snapshot_alias, true);
     const payload = JSON.parse(snapshot.stdout);
-    assert.equal(payload.schema, "bootstrap.v1");
+    assert.equal(payload.marker, "AUTHENTICATED_SNAPSHOT");
     assert.equal(payload.bootstrap_end?.status, "COMPLETE");
-    return payload;
-  });
-  assert.notEqual(bootstrapPayloads[0].nonce, bootstrapPayloads[1].nonce, "bootstrap alias must execute a fresh snapshot for each read");
+  }
+  assert.equal(new Set(bootstrapReads.map((snapshot) => snapshot.stdout)).size, 1, "materialized aliases must share one producer snapshot");
 
   const started = await a1.call("start_process", { command: "Write-Output 'CLONE_MULTI_CLIENT'; Start-Sleep -Milliseconds 600; Write-Output 'DONE'" });
   assert.ok(started.process_id);
