@@ -197,12 +197,27 @@ async function resolveP3(query: string, rootOverride?: string): Promise<VisualPr
   const index = await readIndex(root, indexPath, MAX_P3_INDEX_BYTES);
   if (!index) return null;
   if (index.schema !== "p3.visual-evidence-index.v1" || !Array.isArray(index.entries)) throw new Error("P3 visual evidence index schema is invalid");
+  const exactRunRequested = index.entries.some((entry: JsonObject) => String(entry.run_id || "").toLowerCase() === query);
+  const queryTerms = (query.match(/[a-z0-9_]+/g) || []).filter(Boolean);
+  const latestRequested = !exactRunRequested && queryTerms.includes("latest");
+  const searchTerms = latestRequested ? queryTerms.filter((term) => term !== "latest") : queryTerms;
+  const semanticQuery = searchTerms.join(" ");
   const candidates = index.entries
     .filter((entry: JsonObject) => String(entry.run_id || "").toLowerCase() === query ||
-      (typeof entry.search_text === "string" && queryMatches(entry.search_text, query)))
+      (latestRequested && searchTerms.length === 0) ||
+      (semanticQuery && typeof entry.search_text === "string" && queryMatches(entry.search_text, semanticQuery)))
     .map((entry: JsonObject) => ({ entry, media: p3Media(entry) }))
     .filter((item: { media: { image: JsonObject | null } }) => !!item.media.image)
-    .sort((a: any, b: any) => p3Rank(b.entry, query) - p3Rank(a.entry, query) || String(b.entry.date || "").localeCompare(String(a.entry.date || "")) || String(a.entry.run_id).localeCompare(String(b.entry.run_id)));
+    .sort((a: any, b: any) => {
+      if (latestRequested) {
+        return String(b.entry.evidence_utc || "").localeCompare(String(a.entry.evidence_utc || "")) ||
+          String(b.entry.date || "").localeCompare(String(a.entry.date || "")) ||
+          String(b.entry.run_id || "").localeCompare(String(a.entry.run_id || ""));
+      }
+      return p3Rank(b.entry, query) - p3Rank(a.entry, query) ||
+        String(b.entry.date || "").localeCompare(String(a.entry.date || "")) ||
+        String(a.entry.run_id).localeCompare(String(b.entry.run_id));
+    });
   const selected = candidates[0];
   if (!selected) return null;
   const { entry, media } = selected;
@@ -220,7 +235,9 @@ async function resolveP3(query: string, rootOverride?: string): Promise<VisualPr
     ? "Independently reviewed P3 visual evidence: PROVEN."
     : state === "REJECTED"
       ? "Independently reviewed P3 visual evidence: REJECTED. Do not present this capture as accepted proof."
-      : "P3 visual capture with independent review NOT_RECORDED. This is not visual acceptance.";
+      : state === "NOT_PROVEN"
+        ? "Independently reviewed P3 visual evidence: NOT_PROVEN. This capture does not establish visual acceptance."
+        : "P3 visual capture with independent review NOT_RECORDED. This is not visual acceptance.";
   const metadata: VisualProofMetadata = {
     schema: "chatgpt.visual-proof-inline.v1",
     query,
