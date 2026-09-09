@@ -102,6 +102,8 @@ assert.match(guardian, /DEGRADED_CANDIDATE_SERVING/);
 assert.match(guardian, /McpV3ProductionReplacementCandidate/);
 assert.match(guardian, /candidate_dist_sha256/);
 assert.match(guardian, /old_dist_sha256/);
+assert.match(guardian, /\$canonicalHealthTimeoutSec = 120/);
+assert.ok((guardian.match(/127\.0\.0\.1:3011\/health[^\n]*\} \$canonicalHealthTimeoutSec/g) ?? []).length >= 2, "forward and rollback canonical health waits must use the extended bounded timeout");
 
 assert.match(recovery, /GateReceiptPath/);
 assert.match(recovery, /vps_edge_ingress/);

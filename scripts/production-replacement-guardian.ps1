@@ -16,6 +16,7 @@ $productionStopped = $false
 $runtimeChanged = $false
 $candidateStarted = $false
 $candidatePid = 0
+$canonicalHealthTimeoutSec = 120
 $oldHead = ''
 $oldBranch = ''
 $oldGeneration = ''
@@ -141,7 +142,7 @@ function Restore-RuntimeAndCanonical {
     $restoredHash = (Get-FileHash -LiteralPath (Join-Path $dist 'index.js') -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($restoredHash -ne $ExpectedDistHash) { throw 'restored runtime dist hash does not match the rollback snapshot' }
     Start-ScheduledTask -TaskName $productionTask
-    $restored = Wait-Health 'http://127.0.0.1:3011/health' { param($h) $h.status -eq 'ok' -and $h.role -eq 'backend' -and [int]$h.port -eq 3011 } 45
+    $restored = Wait-Health 'http://127.0.0.1:3011/health' { param($h) $h.status -eq 'ok' -and $h.role -eq 'backend' -and [int]$h.port -eq 3011 } $canonicalHealthTimeoutSec
     return $restored
 }
 
@@ -235,7 +236,7 @@ try {
 
     Start-ScheduledTask -TaskName $productionTask
     $productionStopped = $false
-    $new = Wait-Health 'http://127.0.0.1:3011/health' { param($h) $h.status -eq 'ok' -and $h.role -eq 'backend' -and [int]$h.port -eq 3011 -and $h.wireguard_candidate -eq $false } 45
+    $new = Wait-Health 'http://127.0.0.1:3011/health' { param($h) $h.status -eq 'ok' -and $h.role -eq 'backend' -and [int]$h.port -eq 3011 -and $h.wireguard_candidate -eq $false } $canonicalHealthTimeoutSec
     $newGeneration = [string]$new.backend_generation
     if ($newGeneration -eq $oldGeneration) { throw 'production task did not create a new backend generation' }
 
