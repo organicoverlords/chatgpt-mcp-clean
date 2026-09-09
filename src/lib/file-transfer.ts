@@ -57,6 +57,26 @@ const ChatgptFileSchema = z.object({
 });
 
 export type ChatgptFileInput = z.infer<typeof ChatgptFileSchema>;
+
+const UploadLocalFileOutputSchema = z.object({
+  direction: z.literal("local_to_chatgpt"),
+  status: z.literal("ready"),
+  file_name: z.string(),
+  mime_type: z.string(),
+  bytes: z.number().int().positive(),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+});
+
+const DownloadChatgptFileOutputSchema = z.object({
+  direction: z.literal("chatgpt_to_local"),
+  status: z.literal("ok"),
+  file_id: z.string(),
+  file_name: z.string(),
+  mime_type: z.string(),
+  destination_path: z.string(),
+  bytes: z.number().int().positive(),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+});
 export type LocalFileTransfer = {
   token: string;
   path: string;
@@ -193,6 +213,9 @@ export async function serveLocalFileTransfer(req: Request, res: ExpressResponse)
     res.setHeader("X-File-Transfer-Encoding", "identity");
     await pipeline(createReadStream(item.path), res);
   }
+  // Capability URLs are single-use after a complete transfer. A failed stream can
+  // be retried until its short TTL expires, but a successful fetch cannot be replayed.
+  localExports.delete(token);
 }
 
 function isPrivateIpv4(address: string): boolean {
@@ -333,6 +356,7 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
       _meta: uploadToolMeta(),
       inputSchema: z.object({ path: z.string().min(1) }),
+      outputSchema: UploadLocalFileOutputSchema,
     },
     async ({ path }) => {
       const item = await prepareLocalFileTransfer(path);
@@ -355,6 +379,7 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
         destination_path: z.string().min(1),
         overwrite: z.boolean().optional(),
       }),
+      outputSchema: DownloadChatgptFileOutputSchema,
     },
     async ({ file, destination_path, overwrite = false }) => {
       const result = await downloadChatgptFile(file, destination_path, overwrite);

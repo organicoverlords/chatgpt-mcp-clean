@@ -64,6 +64,8 @@ const mediaTransfer = await serve(mediaItem, "zstd");
 assert.equal(mediaTransfer.headers.get("content-encoding"), undefined, "already-compressed media must not be zstd wrapped");
 assert.equal(mediaTransfer.headers.get("x-file-transfer-encoding"), "identity");
 assert.equal(mediaTransfer.body.compare(media), 0, "media transfer must preserve exact bytes");
+const replay = await serve(mediaItem, "identity");
+assert.equal(replay.statusCode, 404, "completed upload capability URL must be single-use");
 
 const incoming = randomBytes(1024 * 1024 + 17);
 const destination = join(dir, "received", "generated.glb");
@@ -94,6 +96,9 @@ await client.connect(clientTransport);
 try {
   const listed = await client.listTools();
   assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["download_chatgpt_file", "kill_process", "read_output", "start_process", "upload_local_file"]);
+const listedByName = Object.fromEntries(listed.tools.map((tool) => [tool.name, tool]));
+assert.ok(listedByName.upload_local_file.outputSchema, "upload tool must declare outputSchema for structuredContent");
+assert.ok(listedByName.download_chatgpt_file.outputSchema, "download tool must declare outputSchema for structuredContent");
   const start = listed.tools.find((tool) => tool.name === "start_process");
   const read = listed.tools.find((tool) => tool.name === "read_output");
   const upload = listed.tools.find((tool) => tool.name === "upload_local_file");

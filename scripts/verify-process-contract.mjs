@@ -17,14 +17,14 @@ const server = createServer("contract-verifier");
 registerOptionalVisualProofTools(server, "contract-verifier");
 const actualTools = Object.entries(server._registeredTools)
   .sort(([a], [b]) => a.localeCompare(b))
-  .map(([name, tool]) => ({ name, description: tool.description || "", inputSchema: z.toJSONSchema(tool.inputSchema) }));
+  .map(([name, tool]) => ({ name, description: tool.description || "", inputSchema: z.toJSONSchema(tool.inputSchema), ...(tool.outputSchema ? { outputSchema: z.toJSONSchema(tool.outputSchema) } : {}) }));
 const contractPath = resolve("config/process-tool-contract.json");
 const contractBytes = readFileSync(contractPath);
 const expectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "54947bc56f87639b3f61f5628dbcb44348f8e74b4bc9ac4705fe2b37c0952fa6";
+const acceptedContractSha256 = "8ab45599e6bf650cffdb8252bb74c012a5fa2102ba98f5f5f6854fa47288d771";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(expectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 assert.deepEqual(actualTools, expectedTools, "connector tool contract changed; do not replace a stable connector identity without an explicit contract migration");
