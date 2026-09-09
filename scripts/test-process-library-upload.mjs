@@ -12,9 +12,10 @@ const upload = await processLibraryUploadFromOutput({ stdout: `ok\nCHATGPT_LIBRA
 assert(upload);
 assert.equal(Buffer.from(upload.data_base64, "base64").compare(png), 0, "typed image payload must preserve exact original bytes");
 const content = processLibraryUploadContent(upload);
-assert.equal(content?.type, "image");
-assert.equal(content?.mimeType, "image/png");
-assert.equal(Buffer.from(content.data, "base64").compare(png), 0);
+assert.equal(content?.type, "resource");
+assert.equal(content?.resource?.mimeType, "image/png");
+assert.equal(content?.resource?.uri, "mcp-upload://process/proof.png");
+assert.equal(Buffer.from(content.resource.blob, "base64").compare(png), 0);
 assert.deepEqual(content.annotations.audience, ["assistant", "user"]);
 const meta = processLibraryUploadMetadata(upload);
 assert.equal(meta.file_name, "proof.png");
@@ -31,7 +32,7 @@ assert.equal(processLibraryUploadMetadata(nonImage).data_base64, json.toString("
 
 const widget = processLibraryUploadWidgetHtml();
 assert.match(widget, /result\?\.content/);
-assert.match(widget, /type==='image'/);
+assert.match(widget, /type==='resource'/);
 assert.match(widget, /URL\.createObjectURL\(blob\)/);
 assert.match(widget, /uploadFile\(file,\{library:true\}\)/);
-console.log("process library upload typed-image tests passed");
+console.log("process library upload embedded-resource tests passed");

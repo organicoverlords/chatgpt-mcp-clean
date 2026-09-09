@@ -28,9 +28,12 @@ export type ProcessLibraryUpload = {
 export function processLibraryUploadContent(upload: ProcessLibraryUpload) {
   if (!upload.mime_type.startsWith("image/")) return null;
   return {
-    type: "image" as const,
-    data: upload.data_base64,
-    mimeType: upload.mime_type,
+    type: "resource" as const,
+    resource: {
+      uri: `mcp-upload://process/${encodeURIComponent(upload.file_name)}`,
+      mimeType: upload.mime_type,
+      blob: upload.data_base64,
+    },
     annotations: { audience: ["assistant", "user"] as ("assistant" | "user")[] },
   };
 }
@@ -88,7 +91,7 @@ export function processLibraryUploadWidgetHtml(): string {
 const statusEl=document.getElementById('status'); const imageEl=document.getElementById('image');
 let startedKey='';
 function setStatus(text){statusEl.textContent=text;statusEl.classList.add('on');window.openai?.notifyIntrinsicHeight?.();}
-function payloadFrom(result){const p=result?._meta?.chatgpt_library_upload||null;if(!p)return null;if(p.data_base64)return p;const image=(result?.content||[]).find(x=>x?.type==='image'&&x.data&&x.mimeType);return image?{...p,data_base64:image.data,mime_type:image.mimeType}:p;}
+function payloadFrom(result){const p=result?._meta?.chatgpt_library_upload||null;if(!p)return null;if(p.data_base64)return p;const resource=(result?.content||[]).find(x=>x?.type==='resource'&&x.resource?.blob&&x.resource?.mimeType);return resource?{...p,data_base64:resource.resource.blob,mime_type:resource.resource.mimeType}:p;}
 async function render(result){
  const p=payloadFrom(result); if(!p?.data_base64||!p?.file_name||!p?.mime_type)return;
  const key=p.file_name+':'+p.bytes; if(startedKey===key)return; startedKey=key;
