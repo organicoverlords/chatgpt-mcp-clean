@@ -5,7 +5,11 @@ import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-const temporary = mkdtempSync(join(tmpdir(), "mcp-minimal-clones-"));
+const externalStateRoot = process.env.MCP_TEST_STATE_ROOT?.trim();
+if (externalStateRoot) mkdirSync(resolve(externalStateRoot), { recursive: true });
+const temporary = mkdtempSync(externalStateRoot
+  ? join(resolve(externalStateRoot), "mcp-minimal-clones-")
+  : join(tmpdir(), "mcp-minimal-clones-"));
 const sharedReceipts = join(temporary, "shared-process-receipts");
 mkdirSync(sharedReceipts, { recursive: true });
 const children = [];
@@ -231,7 +235,7 @@ try {
   }
   assert.match(bOutput.stdout, /B_SURVIVED_A/);
 
-  console.log(JSON.stringify({ result: "PASS", tools: expected, independent_clones: 2, independent_oauth_clients: 4, cross_client_reassociation: true, completed_process_cross_clone_read: true, live_process_cross_clone_read: true, live_process_cross_clone_kill: true, clone_b_survived_clone_a_exit: true }));
+  console.log(JSON.stringify({ result: "PASS", tools: expected, state_root_mode: externalStateRoot ? "explicit" : "system-temp", independent_clones: 2, independent_oauth_clients: 4, cross_client_reassociation: true, completed_process_cross_clone_read: true, live_process_cross_clone_read: true, live_process_cross_clone_kill: true, clone_b_survived_clone_a_exit: true }));
 } finally {
   for (const child of children) if (child.exitCode === null) child.kill();
   await sleep(100);
