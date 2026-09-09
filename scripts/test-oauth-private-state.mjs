@@ -21,6 +21,9 @@ function ps(script) {
 }
 
 try {
+  const helperSource = await import("node:fs").then(({ readFileSync }) => readFileSync(helper, "utf8"));
+  assert.match(helperSource, /icacls\.exe/, "helper must use DACL-specific icacls operations");
+  assert.doesNotMatch(helperSource, /^\s*Set-Acl\b/m, "helper must not route existing SACL state through Set-Acl");
   const launcherSource = await import("node:fs").then(({ readFileSync }) => readFileSync(launcher, "utf8"));
   assert.match(launcherSource, /protect-oauth-state\.ps1/);
   const hardened = spawnSync(pwsh, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper, "-OAuthStorePath", store], { encoding: "utf8", windowsHide: true });
@@ -32,7 +35,8 @@ try {
   const rows = Array.isArray(summary) ? summary : [summary];
   assert.equal(rows.length, 2);
   for (const row of rows) {
-    assert.equal(row.protected, true, `${row.path} must disable ACL inheritance`);
+    if (row.path === state) assert.equal(row.protected, true, `${row.path} must disable ACL inheritance`);
+    else assert.equal(row.protected, false, `${row.path} must inherit from the protected OAuth directory`);
     assert.equal(row.sandbox, 0, `${row.path} must not grant CodexSandboxUsers access`);
   }
   const tmp = join(state, "oauth.atomic.tmp");
@@ -40,7 +44,7 @@ try {
   const qTmp = tmp.replaceAll("'", "''");
   const tempSummary = JSON.parse(ps(`$a=Get-Acl -LiteralPath '${qTmp}'; [pscustomobject]@{sandbox=@($a.Access|Where-Object{$_.IdentityReference.Value -match 'CodexSandboxUsers'}).Count;principals=@($a.Access|ForEach-Object{$_.IdentityReference.Value}|Sort-Object -Unique)}|ConvertTo-Json -Compress`));
   assert.equal(tempSummary.sandbox, 0, "new OAuth temp files must not grant CodexSandboxUsers access");
-  console.log("PASS oauth_private_state acl_inheritance_disabled=true sandbox_access=0 atomic_temp_sandbox_access=0");
+  console.log("PASS oauth_private_state directory_acl_protected=true file_inherits_private_parent=true sandbox_access=0 atomic_temp_sandbox_access=0 normal_integrity_safe=true");
 } finally {
   rmSync(temporary, { recursive: true, force: true });
 }
