@@ -8,6 +8,7 @@ const request = readFileSync(new URL("./replace-wireguard-production.ps1", impor
 const guardian = readFileSync(new URL("./production-replacement-guardian.ps1", import.meta.url), "utf8");
 const candidate = readFileSync(new URL("./production-replacement-candidate.ps1", import.meta.url), "utf8");
 const installer = readFileSync(new URL("./install-production-replacement-task.ps1", import.meta.url), "utf8");
+const productionLauncher = readFileSync(new URL("./launch-production.ps1", import.meta.url), "utf8");
 const busyGuard = readFileSync(new URL("./assert-live-busy-claim.ps1", import.meta.url), "utf8");
 const recovery = readFileSync(new URL("./recover-wireguard-production.ps1", import.meta.url), "utf8");
 
@@ -54,6 +55,26 @@ assert.match(guardian, /SUCCEEDED_CANDIDATE_DRAIN_PENDING/);
 assert.match(guardian, /ROLLED_BACK_CANDIDATE_DRAIN_PENDING/);
 assert.match(installer, /ExplicitUserAuthorization/);
 assert.match(installer, /McpV3ProductionReplacementGuardian/);
+assert.match(installer, /PrincipalUserId/);
+assert.match(installer, /PrincipalLogonType/);
+assert.match(installer, /ValidateSet\('Interactive','S4U'\)/);
+assert.match(installer, /MCP_PRODUCTION_REPLACEMENT_TASKS_VALIDATED/);
+assert.match(installer, /mutates_task_scheduler = \$false/);
+assert.match(productionLauncher, /\[string\]\$StateRoot = ''/);
+assert.match(productionLauncher, /if \(-not \$StateRoot\) \{ \$StateRoot = Join-Path \$Root 'minimal-connectors' \}/);
+
+const validateOnlyOutput = execFileSync("pwsh.exe", [
+  "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
+  new URL("./install-production-replacement-task.ps1", import.meta.url).pathname.replace(/^\//, ""),
+  "-ValidateOnly", "-PrincipalUserId", "KONE\\McpServiceProof", "-PrincipalLogonType", "S4U",
+], { encoding: "utf8" }).trim();
+const validateOnly = JSON.parse(validateOnlyOutput);
+assert.equal(validateOnly.status, "MCP_PRODUCTION_REPLACEMENT_TASKS_VALIDATED");
+assert.equal(validateOnly.principal_user_id, "KONE\\McpServiceProof");
+assert.equal(validateOnly.principal_logon_type, "S4U");
+assert.equal(validateOnly.run_level, "Limited");
+assert.equal(validateOnly.mutates_task_scheduler, false);
+assert.deepEqual(validateOnly.task_names.sort(), ["McpV3ProductionReplacementCandidate", "McpV3ProductionReplacementGuardian"]);
 
 for (const required of ["ExplicitUserAuthorization", "IndependentRollbackVerified", "OffPathProofVerified"]) assert.match(request, new RegExp(required));
 assert.match(request, /ExpectedCurrentGeneration/);
