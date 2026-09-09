@@ -41,7 +41,21 @@ assert.match(operators.stdout, /NULL_OK/);
 rejects("$PID = 123", /automatic/);
 rejects("$PID++", /automatic/);
 rejects("$args = @('bad')", /automatic/);
-rejects("foreach ($x in 1) { $x } | Out-Null", /capture/);
+
+const foreachPipelineSubmitted = "foreach ($x in 1,2) { $x } | Measure-Object | Select-Object -ExpandProperty Count";
+const foreachPipeline = await run(foreachPipelineSubmitted, "caller_pwsh_foreach_pipeline_autonormalized");
+assert.equal(foreachPipeline.exit_code, 0, JSON.stringify(foreachPipeline));
+assert.match(foreachPipeline.stdout, /2/);
+assert.match(foreachPipeline.command, /^@\(foreach /);
+assert.equal(foreachPipeline.submitted_command, foreachPipelineSubmitted);
+
+const forPipeline = await run("for ($i=0; $i -lt 2; $i++) { $i } | Measure-Object | Select-Object -ExpandProperty Count", "caller_pwsh_for_pipeline_autonormalized");
+assert.match(forPipeline.stdout, /2/);
+const whilePipeline = await run("$i=0; while ($i -lt 2) { $i; $i++ } | Measure-Object | Select-Object -ExpandProperty Count", "caller_pwsh_while_pipeline_autonormalized");
+assert.match(whilePipeline.stdout, /2/);
+const switchPipeline = await run("switch (1,2) { default { $_ } } | Measure-Object | Select-Object -ExpandProperty Count", "caller_pwsh_switch_pipeline_autonormalized");
+assert.match(switchPipeline.stdout, /2/);
+rejects("if ($true) { Write-Output 'x' } | Out-Null", /capture/);
 rejects("if ($true) { Write-Output 'broken'", /unbalanced/);
 rejects("Get-ChildItem C:\\ -Recurse", /drive[- ]root/);
 rejects("gci -r 'D:\\'", /drive[- ]root/);
@@ -117,4 +131,4 @@ try {
   rmSync(rejectionReceiptDirectory, { recursive: true, force: true });
 }
 
-console.log("PASS powershell_preflight pwsh=7.6.5 ps7_operators=true drive_root_recursion=blocked bounded_recursion=allowed durable_rejections=true");
+console.log("PASS powershell_preflight pwsh=7.6.5 ps7_operators=true loop_pipeline_autonormalization=true drive_root_recursion=blocked bounded_recursion=allowed durable_rejections=true");
