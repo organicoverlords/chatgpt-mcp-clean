@@ -50,6 +50,8 @@ function startClone(id, port, extraEnv = {}) {
       HOST: "127.0.0.1",
       MCP_BACKEND_MODE: "1",
       MCP_TOOL_PROFILE: "process",
+      MCP_VISUAL_PROOF_UI: "0",
+      MCP_VISUAL_PROOF_REVIEW: "0",
       MCP_PUBLIC_ORIGIN: publicOrigin,
       TAILSCALE_OWNER_LOGIN: "owner@example.com",
       MCP_OAUTH_STORE_PATH: join(state, "oauth.json"),
