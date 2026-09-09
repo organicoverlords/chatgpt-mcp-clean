@@ -38,6 +38,8 @@ interface TokenRecord {
   expiresAt: number;
   subject: string;
   supersededAt?: number;
+  supersededReuseCount?: number;
+  successorRefreshDigest?: string;
 }
 interface StoreShape {
   clients: Record<string, OAuthClientInformationFull>;
@@ -155,25 +157,60 @@ export class LocalOAuthProvider implements OAuthServerProvider {
   async exchangeRefreshToken(client: OAuthClientInformationFull, refreshToken: string, scopes?: string[], resource?: URL): Promise<OAuthTokens> {
     this.load();
     this.prune();
+    const now = Date.now();
     const key = digest(refreshToken);
     const rec = this.refresh.get(key);
-    if (!rec || rec.clientId !== client.client_id || rec.expiresAt <= Date.now()) throw new InvalidGrantError("Invalid refresh token");
+    if (!rec || rec.clientId !== client.client_id || rec.expiresAt <= now) throw new InvalidGrantError("Invalid refresh token");
     if (resource && canonical(resource) !== rec.resource) throw new InvalidTargetError("resource mismatch");
     const nextScopes = scopes?.length ? this.validateScopes(scopes) : rec.scopes;
     if (nextScopes.some((s) => !rec.scopes.includes(s))) throw new InvalidScopeError("scope escalation denied");
 
-    // Keep refresh tokens stable. Some connector runtimes can retry an earlier refresh
-    // after a successful exchange; rotating here made those retries fail after the grace window.
+    const publicClient = (client.token_endpoint_auth_method || "none") === "none";
+    if (!publicClient) {
+      rec.scopes = nextScopes;
+      rec.expiresAt = now + REFRESH_TTL_SEC * 1000;
+      delete rec.supersededAt;
+      delete rec.supersededReuseCount;
+      delete rec.successorRefreshDigest;
+      const accessToken = freshToken();
+      this.access.set(digest(accessToken), {
+        clientId: client.client_id, scopes: nextScopes, resource: rec.resource, subject: rec.subject,
+        expiresAt: now + ACCESS_TTL_SEC * 1000,
+      });
+      this.persist();
+      return { access_token: accessToken, token_type: "Bearer", expires_in: ACCESS_TTL_SEC, refresh_token: refreshToken, scope: nextScopes.join(" ") };
+    }
+
+    if (rec.supersededAt !== undefined) {
+      const insideRetryGrace = now - rec.supersededAt <= REFRESH_REUSE_GRACE_MS;
+      const retryAvailable = (rec.supersededReuseCount ?? 0) < 1;
+      const successor = rec.successorRefreshDigest ? this.refresh.get(rec.successorRefreshDigest) : undefined;
+      const familyAlreadyAdvanced = successor?.supersededAt !== undefined;
+      if (!insideRetryGrace || !retryAvailable || familyAlreadyAdvanced) {
+        this.revokeRefreshFamily(key);
+        this.persist();
+        throw new InvalidGrantError("Refresh token replay detected");
+      }
+      rec.supersededReuseCount = (rec.supersededReuseCount ?? 0) + 1;
+      if (rec.successorRefreshDigest) this.refresh.delete(rec.successorRefreshDigest);
+    } else {
+      rec.supersededAt = now;
+      rec.supersededReuseCount = 0;
+      // Retain the hash as a bounded replay-detection tombstone; it is no longer
+      // usable after the short retry grace even though the record remains durable.
+      rec.expiresAt = now + REFRESH_TTL_SEC * 1000;
+    }
+
     rec.scopes = nextScopes;
-    rec.expiresAt = Date.now() + REFRESH_TTL_SEC * 1000;
-    delete rec.supersededAt;
     const accessToken = freshToken();
-    this.access.set(digest(accessToken), {
-      clientId: client.client_id, scopes: nextScopes, resource: rec.resource, subject: rec.subject,
-      expiresAt: Date.now() + ACCESS_TTL_SEC * 1000,
-    });
+    const nextRefreshToken = freshToken();
+    const nextRefreshDigest = digest(nextRefreshToken);
+    const common = { clientId: client.client_id, scopes: nextScopes, resource: rec.resource, subject: rec.subject };
+    this.access.set(digest(accessToken), { ...common, expiresAt: now + ACCESS_TTL_SEC * 1000 });
+    this.refresh.set(nextRefreshDigest, { ...common, expiresAt: now + REFRESH_TTL_SEC * 1000 });
+    rec.successorRefreshDigest = nextRefreshDigest;
     this.persist();
-    return { access_token: accessToken, token_type: "Bearer", expires_in: ACCESS_TTL_SEC, refresh_token: refreshToken, scope: nextScopes.join(" ") };
+    return { access_token: accessToken, token_type: "Bearer", expires_in: ACCESS_TTL_SEC, refresh_token: nextRefreshToken, scope: nextScopes.join(" ") };
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
@@ -268,6 +305,18 @@ export class LocalOAuthProvider implements OAuthServerProvider {
       )?.[0];
       if (!unusedClientId) return;
       this.clients.delete(unusedClientId);
+    }
+  }
+
+  private revokeRefreshFamily(startKey: string): void {
+    const seen = new Set<string>();
+    let key: string | undefined = startKey;
+    while (key && !seen.has(key)) {
+      seen.add(key);
+      const rec = this.refresh.get(key);
+      const next = rec?.successorRefreshDigest;
+      this.refresh.delete(key);
+      key = next;
     }
   }
 
