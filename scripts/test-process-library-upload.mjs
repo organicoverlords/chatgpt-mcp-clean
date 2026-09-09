@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { processLibraryUploadContent, processLibraryUploadFromOutput, processLibraryUploadMetadata, processLibraryUploadResourceContents, processLibraryUploadWidgetHtml, registerProcessLibraryUploadWidget } from "../dist/lib/process-library-upload.js";
+import { processLibraryUploadContent, processLibraryUploadFromOutput, processLibraryUploadMetadata, processLibraryUploadResourceContents, processLibraryUploadWidgetHtml, registerProcessLibraryUploadWidget, PROCESS_LIBRARY_UPLOAD_WIDGET_URI } from "../dist/lib/process-library-upload.js";
 
 const dir = await mkdtemp(join(tmpdir(), "mcp-process-upload-"));
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
@@ -43,7 +43,8 @@ try {
 const meta = processLibraryUploadMetadata(upload);
 assert.equal(meta.file_name, "proof.png");
 assert.equal(meta.bytes, png.length);
-assert.equal(Object.hasOwn(meta, "data_base64"), false, "image bytes must not be duplicated into _meta");
+assert.equal(meta.data_base64, png.toString("base64"), "image bytes must remain available in hidden widget metadata");
+assert.equal(meta.sha256, upload.sha256);
 
 const jsonPath = join(dir, "proof.json");
 const json = Buffer.from("{\"ok\":true}", "utf8");
@@ -53,7 +54,9 @@ assert(nonImage);
 assert.equal(processLibraryUploadContent(nonImage), null);
 assert.equal(processLibraryUploadMetadata(nonImage).data_base64, json.toString("base64"), "non-image Library uploads retain metadata bytes");
 
+assert.equal(PROCESS_LIBRARY_UPLOAD_WIDGET_URI, "ui://process/library-upload-v2.html", "breaking widget changes require a fresh cache-key URI");
 const widget = processLibraryUploadWidgetHtml();
 assert.match(widget, /URL\.createObjectURL\(blob\)/);
 assert.match(widget, /uploadFile\(file,\{library:true\}\)/);
-console.log("process library upload resource-link tests passed");
+assert.match(widget, /imageIds:fileId&&p\.mime_type\.startsWith\('image\/'\)\?\[fileId\]:\[\]/);
+console.log("process library upload widget-v2 metadata tests passed");

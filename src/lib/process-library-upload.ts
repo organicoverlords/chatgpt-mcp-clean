@@ -3,7 +3,7 @@ import { readFile, stat } from "node:fs/promises";
 import { basename, extname, isAbsolute } from "node:path";
 import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-export const PROCESS_LIBRARY_UPLOAD_WIDGET_URI = "ui://process/library-upload-v1.html";
+export const PROCESS_LIBRARY_UPLOAD_WIDGET_URI = "ui://process/library-upload-v2.html";
 export const PROCESS_LIBRARY_UPLOAD_PREFIX = "CHATGPT_LIBRARY_UPLOAD=";
 
 const MAX_LIBRARY_UPLOAD_BYTES = 20 * 1024 * 1024;
@@ -70,8 +70,13 @@ export function processLibraryUploadContent(upload: ProcessLibraryUpload) {
 }
 
 export function processLibraryUploadMetadata(upload: ProcessLibraryUpload) {
-  const metadata = { file_name: upload.file_name, mime_type: upload.mime_type, bytes: upload.bytes };
-  return upload.mime_type.startsWith("image/") ? metadata : { ...metadata, data_base64: upload.data_base64 };
+  return {
+    file_name: upload.file_name,
+    mime_type: upload.mime_type,
+    bytes: upload.bytes,
+    sha256: upload.sha256,
+    data_base64: upload.data_base64,
+  };
 }
 
 export async function processLibraryUploadFromOutput(value: unknown): Promise<ProcessLibraryUpload | null> {
@@ -145,7 +150,7 @@ async function render(result){
   const result=await window.openai.uploadFile(file,{library:true});
   const fileId=result?.fileId||'';
   setStatus('LIBRARY_UPLOAD_OK '+fileId+' '+p.file_name);
-  window.openai?.setWidgetState?.({library_upload:{status:'ok',fileId,fileName:p.file_name,bytes:p.bytes}});
+  window.openai?.setWidgetState?.({modelContent:{library_upload:{status:'ok',fileId,fileName:p.file_name,bytes:p.bytes,sha256:p.sha256||''}},privateContent:{library_upload:{status:'ok',fileId,fileName:p.file_name,bytes:p.bytes,sha256:p.sha256||''}},imageIds:fileId&&p.mime_type.startsWith('image/')?[fileId]:[]});
  }catch(error){setStatus('LIBRARY_UPLOAD_ERROR '+String(error?.message||error));}
 }
 window.addEventListener('message',event=>{
