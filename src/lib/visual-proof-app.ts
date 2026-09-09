@@ -49,6 +49,7 @@ export interface VisualProofMetadata {
   evidence_type: "durable_p3_proof" | "p3_archive" | "showcase" | "preview";
   independent_review_state: string;
   strongest_state: string | null;
+  strongest_state_source?: "library_cache" | null;
   is_runtime_proof: boolean | null;
   capture_mode?: string | null;
   scope: string;
@@ -310,7 +311,7 @@ async function resolveTiny3D(query: string, rootOverride?: string): Promise<Visu
       metadata: {
         schema: "chatgpt.visual-proof-inline.v1", query, source: "tiny3d", identity: assetId,
         title: String(record.display_name || record.source?.name || assetId), date: null, evidence_type: "durable_p3_proof",
-        independent_review_state: state, strongest_state: strongest, is_runtime_proof: proof.states?.P3_RUNTIME_PROVEN === true,
+        independent_review_state: state, strongest_state: strongest, strongest_state_source: "library_cache", is_runtime_proof: proof.states?.P3_RUNTIME_PROVEN === true,
         scope: state === "PROVEN" ? "Hash-verified asset-local durable P3 proof with independent review PROVEN." : "Hash-verified asset-local durable P3 proof; independent review is not recorded as PROVEN.",
         claim: null, gaps: Array.isArray(proof.metadata_gaps) ? proof.metadata_gaps : [],
         image: { role: "durable_reviewed", mime_type: image.mimeType, bytes: image.bytes, sha256: image.sha256, stored_path: raw },
@@ -335,9 +336,9 @@ async function resolveTiny3D(query: string, rootOverride?: string): Promise<Visu
         metadata: {
           schema: "chatgpt.visual-proof-inline.v1", query, source: "tiny3d", identity: assetId,
           title: String(record.display_name || record.source?.name || assetId), date: null, evidence_type: "showcase",
-          independent_review_state: "NOT_RECORDED", strongest_state: strongest, is_runtime_proof: false,
+          independent_review_state: "NOT_RECORDED", strongest_state: strongest, strongest_state_source: "library_cache", is_runtime_proof: false,
           scope: `${String(showcase.proof_scope || "Tiny3D showcase evidence")}; independent visual review NOT_RECORDED and P3 runtime is not implied.`,
-          claim: null, gaps: ["independent_review_not_recorded", ...(showcase.claims?.p3_runtime === "NOT_PROVEN" ? ["p3_runtime_not_proven"] : [])],
+          claim: null, gaps: ["qualification_projection_not_supplied", "independent_review_not_recorded", ...(showcase.claims?.p3_runtime === "NOT_PROVEN" ? ["p3_runtime_not_proven"] : [])],
           image: { role: "showcase_motion_image", mime_type: image.mimeType, bytes: image.bytes, sha256: image.sha256, stored_path: imageItem.path },
           video: video ? { role: "showcase_motion_video", mime_type: video.mimeType, bytes: video.bytes, sha256: video.sha256, stored_path: videoItem.path } : null,
         }, image: image.data, video: video?.data || null,
@@ -352,9 +353,9 @@ async function resolveTiny3D(query: string, rootOverride?: string): Promise<Visu
       metadata: {
         schema: "chatgpt.visual-proof-inline.v1", query, source: "tiny3d", identity: assetId,
         title: String(record.display_name || record.source?.name || assetId), date: null, evidence_type: "preview",
-        independent_review_state: "NOT_RECORDED", strongest_state: strongest, is_runtime_proof: false,
+        independent_review_state: "NOT_RECORDED", strongest_state: strongest, strongest_state_source: "library_cache", is_runtime_proof: false,
         scope: "Verified Tiny3D library preview only; this is not P3 runtime proof or independent visual acceptance.",
-        claim: null, gaps: ["independent_review_not_recorded", "runtime_proof_not_shown"],
+        claim: null, gaps: ["qualification_projection_not_supplied", "independent_review_not_recorded", "runtime_proof_not_shown"],
         image: { role: "library_thumbnail", mime_type: image.mimeType, bytes: image.bytes, sha256: image.sha256, stored_path: thumb.path },
         video: null,
       }, image: image.data, video: null,
