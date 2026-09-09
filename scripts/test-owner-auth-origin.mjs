@@ -93,6 +93,12 @@ server.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
 try {
   try { await waitHealth(origin, port); } catch (error) { throw new Error(`${error instanceof Error ? error.message : String(error)}; server_exit=${server.exitCode}; server_stderr=${stderr.trim()}`); }
 
+  const rfc8414Metadata = await jsonFetch(`${origin}/.well-known/oauth-authorization-server`);
+  assert.equal(rfc8414Metadata.response.status, 200, rfc8414Metadata.text);
+  assert.equal(rfc8414Metadata.body.authorization_endpoint, `${ownerAuthOrigin}/authorize`);
+  assert.equal(rfc8414Metadata.body.token_endpoint, `${publicOrigin}/token`);
+  assert.equal(rfc8414Metadata.body.registration_endpoint, `${publicOrigin}/register`);
+
   const metadata = await jsonFetch(`${origin}/.well-known/openid-configuration`);
   assert.equal(metadata.response.status, 200, metadata.text);
   assert.equal(metadata.body.authorization_endpoint, `${ownerAuthOrigin}/authorize`);
