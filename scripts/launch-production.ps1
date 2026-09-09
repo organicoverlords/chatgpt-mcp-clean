@@ -2,13 +2,16 @@ param(
     [ValidateRange(1024,65535)][int]$Port = 3011,
     [ValidatePattern('^[A-Za-z0-9._-]+$')][string]$InstanceId = 'clone-a',
     [string]$PublicOrigin = 'https://5-61-91-127.sslip.io',
-    [string]$StateRoot = (Join-Path $env:LOCALAPPDATA 'ChatGPTMcpClean\minimal-connectors'),
+    [string]$StateRoot = '',
     [string]$SharedReceiptDirectory = '',
     [string]$OAuthStorePath = '',
     [switch]$SkipBuild
 )
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$Root = [IO.Path]::GetFullPath($Root)
+if (-not $StateRoot) { $StateRoot = Join-Path $Root 'minimal-connectors' }
+$StateRoot = [IO.Path]::GetFullPath($StateRoot)
 $stateParent = Split-Path -Parent $StateRoot
 if (-not $SharedReceiptDirectory) { $SharedReceiptDirectory = Join-Path $StateRoot 'shared-process-receipts' }
 if (-not $OAuthStorePath) { $OAuthStorePath = Join-Path (Join-Path $StateRoot $InstanceId) 'oauth.json' }
