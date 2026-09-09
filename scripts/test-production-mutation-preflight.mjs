@@ -102,6 +102,10 @@ const supportedReplacementRequest = await run("if ($false) { & 'C:\\Users\\Examp
 assert.equal(supportedReplacementRequest.exit_code, 0);
 assert.match(supportedReplacementRequest.stdout, /SUPPORTED_WIREGUARD_REPLACEMENT_REQUEST_ALLOWED/);
 
+const supportedRecoveryRequest = await run("if ($false) { & 'C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\recover-wireguard-production.ps1' }; Write-Output 'SUPPORTED_WIREGUARD_RECOVERY_REQUEST_ALLOWED'");
+assert.equal(supportedRecoveryRequest.exit_code, 0);
+assert.match(supportedRecoveryRequest.stdout, /SUPPORTED_WIREGUARD_RECOVERY_REQUEST_ALLOWED/);
+
 const supportedReplacementInstaller = await run("if ($false) { & 'C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\install-production-replacement-task.ps1' }; Write-Output 'SUPPORTED_REPLACEMENT_TASK_INSTALLER_ALLOWED'");
 assert.equal(supportedReplacementInstaller.exit_code, 0);
 assert.match(supportedReplacementInstaller.stdout, /SUPPORTED_REPLACEMENT_TASK_INSTALLER_ALLOWED/);
