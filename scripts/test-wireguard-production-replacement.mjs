@@ -60,6 +60,10 @@ assert.match(installer, /PrincipalLogonType/);
 assert.match(installer, /ValidateSet\('Interactive','S4U'\)/);
 assert.match(installer, /MCP_PRODUCTION_REPLACEMENT_TASKS_VALIDATED/);
 assert.match(installer, /mutates_task_scheduler = \$false/);
+assert.match(installer, /RepoRoot/);
+assert.match(installer, /EdgeOwnerPath/);
+assert.doesNotMatch(candidate, /env:LOCALAPPDATA/, "candidate task must not derive paths from the service profile");
+assert.doesNotMatch(guardian, /env:LOCALAPPDATA/, "guardian task must not derive paths from the service profile");
 assert.match(productionLauncher, /\[string\]\$StateRoot = ''/);
 assert.match(productionLauncher, /if \(-not \$StateRoot\) \{ \$StateRoot = Join-Path \$Root 'minimal-connectors' \}/);
 
@@ -73,6 +77,8 @@ assert.equal(validateOnly.status, "MCP_PRODUCTION_REPLACEMENT_TASKS_VALIDATED");
 assert.equal(validateOnly.principal_user_id, "KONE\\McpServiceProof");
 assert.equal(validateOnly.principal_logon_type, "S4U");
 assert.equal(validateOnly.run_level, "Limited");
+assert.ok(validateOnly.repo_root.endsWith("issue196-identity-acl"));
+assert.ok(validateOnly.edge_owner_path.endsWith("McpVpsEdge\\provision_edge_extras.py"));
 assert.equal(validateOnly.mutates_task_scheduler, false);
 assert.deepEqual(validateOnly.task_names.sort(), ["McpV3ProductionReplacementCandidate", "McpV3ProductionReplacementGuardian"]);
 

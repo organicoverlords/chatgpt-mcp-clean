@@ -1,5 +1,7 @@
 param(
-    [Parameter(Mandatory=$true)][string]$OAuthStorePath
+    [Parameter(Mandatory=$true)][string]$OAuthStorePath,
+    [string]$AllowedPrincipalUserId = '',
+    [string]$AllowedPrincipalSid = ''
 )
 $ErrorActionPreference = 'Stop'
 
@@ -14,13 +16,27 @@ function Sid-Value([System.Security.Principal.IdentityReference]$Identity) {
     catch { return $Identity.Value }
 }
 
+function Resolve-Sid([string]$UserId) {
+    if (-not $UserId) { return '' }
+    $identity = [System.Security.Principal.NTAccount]::new($UserId)
+    return $identity.Translate([System.Security.Principal.SecurityIdentifier]).Value
+}
+
 $store = [IO.Path]::GetFullPath($OAuthStorePath)
 $directory = Split-Path -Parent $store
 if (-not $directory) { throw 'OAuth store must have a parent directory' }
 New-Item -ItemType Directory -Force -Path $directory | Out-Null
 
 $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+if ($AllowedPrincipalUserId -and $AllowedPrincipalSid) { throw 'choose either AllowedPrincipalUserId or AllowedPrincipalSid' }
+$serviceSid = if ($AllowedPrincipalSid) { [System.Security.Principal.SecurityIdentifier]::new($AllowedPrincipalSid).Value } elseif ($AllowedPrincipalUserId) { Resolve-Sid $AllowedPrincipalUserId } else { '' }
+$sandboxSid = ''
+$sandboxMemberSids = @()
+try { $sandboxSid = Resolve-Sid ("$env:COMPUTERNAME\CodexSandboxUsers") } catch { }
+try { $sandboxMemberSids = @(Get-LocalGroupMember -Group 'CodexSandboxUsers' -ErrorAction Stop | ForEach-Object { $_.SID.Value }) } catch { }
+if ($serviceSid -and (($sandboxSid -and $serviceSid -eq $sandboxSid) -or $serviceSid -in $sandboxMemberSids)) { throw 'CodexSandboxUsers cannot be an allowed MCP execution principal' }
 $allowedSids = @($currentSid, 'S-1-5-18', 'S-1-5-32-544')
+if ($serviceSid -and $serviceSid -notin $allowedSids) { $allowedSids += $serviceSid }
 
 # Change only the DACL. Set-Acl on an existing directory can carry its SACL/audit
 # section back to Windows and require SeSecurityPrivilege, which the normal-integrity
@@ -41,6 +57,9 @@ $grants = @(
     '*S-1-5-18:(OI)(CI)(F)',
     '*S-1-5-32-544:(OI)(CI)(F)'
 )
+if ($serviceSid -and $serviceSid -notin @($currentSid, 'S-1-5-18', 'S-1-5-32-544')) {
+    $grants += "*$serviceSid`:(OI)(CI)(M)"
+}
 Invoke-Icacls (@($directory, '/grant:r') + $grants)
 
 # The protected directory is the durable boundary. Let the current OAuth file inherit
@@ -66,4 +85,4 @@ if (Test-Path -LiteralPath $store -PathType Leaf) {
     }
 }
 
-Write-Output "OAUTH_STATE_ACL_OK directory=$directory"
+Write-Output "OAUTH_STATE_ACL_OK directory=$directory allowed_principal_sid=$serviceSid"

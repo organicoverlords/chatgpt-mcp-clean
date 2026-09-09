@@ -1,12 +1,19 @@
 param(
-    [string]$RequestPath = (Join-Path $env:LOCALAPPDATA 'ChatGPTMcpClean\.state\production-replacement\request.json')
+    [string]$RequestPath = '',
+    [string]$RepoRoot = '',
+    [string]$EdgeOwnerPath = ''
 )
 $ErrorActionPreference = 'Stop'
+if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent $PSScriptRoot }
+$RepoRoot = [IO.Path]::GetFullPath($RepoRoot)
+if (-not $RequestPath) { $RequestPath = Join-Path $RepoRoot '.state\production-replacement\request.json' }
+if (-not $EdgeOwnerPath) { $EdgeOwnerPath = Join-Path (Split-Path -Parent $RepoRoot) 'McpVpsEdge\provision_edge_extras.py' }
+$EdgeOwnerPath = [IO.Path]::GetFullPath($EdgeOwnerPath)
 $ProgressPreference = 'SilentlyContinue'
 $productionTask = 'McpV3Production3011'
 $candidateTask = 'McpV3ProductionReplacementCandidate'
-$edgeOwner = Join-Path $env:LOCALAPPDATA 'McpVpsEdge\provision_edge_extras.py'
-$busyGuard = Join-Path $PSScriptRoot 'assert-live-busy-claim.ps1'
+$edgeOwner = $EdgeOwnerPath
+$busyGuard = Join-Path $RepoRoot 'scripts\assert-live-busy-claim.ps1'
 $publicOrigin = 'https://5-61-91-127.sslip.io'
 $publicHost = '5-61-91-127.sslip.io'
 $wireGuardHost = '10.203.0.2'

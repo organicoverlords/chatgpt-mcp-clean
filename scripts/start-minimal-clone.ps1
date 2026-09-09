@@ -40,7 +40,7 @@ Set-McpRuntimePriority
 $originUri = [uri]$PublicOrigin
 $publicSlug = $originUri.AbsolutePath.Trim('/')
 $expectedOAuthStore = if ($publicSlug) { Join-Path (Join-Path $StateRoot $publicSlug) 'oauth.json' } else { '' }
-$canonicalStateRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'ChatGPTMcpClean\minimal-connectors'))
+$canonicalStateRoot = [IO.Path]::GetFullPath((Join-Path $Root 'minimal-connectors'))
 $resolvedStateRoot = [IO.Path]::GetFullPath($StateRoot)
 if ($WireGuardCandidate -and $Port -eq 3011) { throw 'WireGuard candidate must use an alternate port; canonical 3011 stays owned by the production listener' }
 if ($resolvedStateRoot.Equals($canonicalStateRoot,[StringComparison]::OrdinalIgnoreCase)) {
