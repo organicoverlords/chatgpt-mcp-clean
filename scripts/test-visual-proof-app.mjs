@@ -72,6 +72,8 @@ const android=await resolveVisualProof("android",{source:"tiny3d",tiny3dRoot:t3d
 assert.equal(android.metadata.identity,assetId);
 assert.equal(android.metadata.evidence_type,"showcase");
 assert.equal(android.metadata.strongest_state,"TINY3D_VERIFIED");
+assert.equal(android.metadata.strongest_state_source,"library_cache");
+assert.ok(android.metadata.gaps.includes("qualification_projection_not_supplied"));
 assert.equal(android.metadata.is_runtime_proof,false);
 assert.equal(android.metadata.independent_review_state,"NOT_RECORDED");
 assert.deepEqual(android.image,gif);
