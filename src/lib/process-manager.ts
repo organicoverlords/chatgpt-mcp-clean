@@ -51,6 +51,8 @@ type CompletedProcessReceipt = {
   execution_outcome?: "success" | "nonzero_exit" | "signaled" | "error" | "unknown";
   command: string;
   command_truncated?: true;
+  submitted_command?: string;
+  submitted_command_truncated?: true;
   cwd: string;
   stdout: string;
   stderr: string;
@@ -151,6 +153,7 @@ type ProcessState = {
   callerId: string;
   ownerContext: TelemetryContext;
   command: string;
+  submittedCommand?: string;
   cwd: string;
   launching: boolean;
   terminalObserved: boolean;
@@ -448,6 +451,52 @@ function mcpProductionMutationError(command: string, code: string): string | und
   if (terminatesProcess && identifiesServingMcp) return productionIngressError;
 
   return undefined;
+}
+
+type PowerShellCommandNormalization = { command: string; changed: boolean };
+
+function normalizePowerShellControlStatementPipelines(command: string): PowerShellCommandNormalization {
+  const code = powershellCodeMask(command);
+  const stack: Array<{ char: string; controlStart?: number; autoNormalize?: boolean }> = [];
+  const closing: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
+  const insertions: Array<{ index: number; text: string }> = [];
+  for (let index = 0; index < code.length; index += 1) {
+    const char = code[index]!;
+    if (char === "(" || char === "[" || char === "{") {
+      let controlStart: number | undefined;
+      let autoNormalize = false;
+      if (char === "{") {
+        const beforeStart = Math.max(0, index - 500);
+        const before = code.slice(beforeStart, index);
+        const match = /(?:^|[;}\n])\s*(?:foreach|for|while|switch)\s*\([^{}]*\)\s*$/i.exec(before);
+        if (match) {
+          const keywordOffset = match[0].search(/\b(?:foreach|for|while|switch)\b/i);
+          if (keywordOffset >= 0) {
+            controlStart = beforeStart + (match.index ?? 0) + keywordOffset;
+            autoNormalize = true;
+          }
+        }
+      }
+      stack.push({ char, controlStart, autoNormalize });
+      continue;
+    }
+    if (char !== ")" && char !== "]" && char !== "}") continue;
+    const top = stack.pop();
+    if (!top || top.char !== closing[char]) return { command, changed: false };
+    if (char === "}" && top.autoNormalize && top.controlStart !== undefined) {
+      let next = index + 1;
+      while (next < code.length && /\s/.test(code[next]!)) next += 1;
+      if (code[next] === "|" && code[next + 1] !== "|") {
+        insertions.push({ index: top.controlStart, text: "@(" }, { index: index + 1, text: ")" });
+      }
+    }
+  }
+  if (stack.length > 0 || insertions.length === 0) return { command, changed: false };
+  let normalized = command;
+  for (const insertion of insertions.sort((left, right) => right.index - left.index)) {
+    normalized = `${normalized.slice(0, insertion.index)}${insertion.text}${normalized.slice(insertion.index)}`;
+  }
+  return { command: normalized, changed: normalized !== command };
 }
 
 function powershellPreflightError(command: string): string | undefined {
@@ -1041,6 +1090,7 @@ export class ProcessManager {
       ...audit,
       command,
       ...(state.command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}),
+      ...(state.submittedCommand !== undefined ? { submitted_command: state.submittedCommand.slice(0, MAX_COMMAND_REPORT_CHARS), ...(state.submittedCommand.length > MAX_COMMAND_REPORT_CHARS ? { submitted_command_truncated: true as const } : {}) } : {}),
       cwd: state.cwd,
       stdout: stdout.text,
       stderr: stderr.text,
@@ -1100,7 +1150,7 @@ export class ProcessManager {
     const stdout = state.stdout.tail(MAX_CAPTURE_CHARS, MAX_CAPTURE_CHARS);
     const stderr = state.stderr.tail(MAX_CAPTURE_CHARS, MAX_CAPTURE_CHARS);
     const audit = processOutputAudit(stdout.text, stderr.text, stdout.truncated, stderr.truncated, exitCode, signal, state.error, state.ownerContext.request_id);
-    const receipt: CompletedProcessReceipt = { version: 1, process_id: state.id, pid: state.pid, caller_id: state.callerId, ...audit, command, ...(state.command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}), cwd: state.cwd, stdout: stdout.text, stderr: stderr.text, ...(stdout.truncated ? { stdout_truncated: true as const } : {}), ...(stderr.truncated ? { stderr_truncated: true as const } : {}), exit_code: exitCode, signal, started_at: state.startedAt, finished_at: finishedAt, ...(state.error ? { error: state.error } : {}) };
+    const receipt: CompletedProcessReceipt = { version: 1, process_id: state.id, pid: state.pid, caller_id: state.callerId, ...audit, command, ...(state.command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}), ...(state.submittedCommand !== undefined ? { submitted_command: state.submittedCommand.slice(0, MAX_COMMAND_REPORT_CHARS), ...(state.submittedCommand.length > MAX_COMMAND_REPORT_CHARS ? { submitted_command_truncated: true as const } : {}) } : {}), cwd: state.cwd, stdout: stdout.text, stderr: stderr.text, ...(stdout.truncated ? { stdout_truncated: true as const } : {}), ...(stderr.truncated ? { stderr_truncated: true as const } : {}), exit_code: exitCode, signal, started_at: state.startedAt, finished_at: finishedAt, ...(state.error ? { error: state.error } : {}) };
     const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
     try {
       await writeFileAsync(temporaryPath, JSON.stringify(receipt), { encoding: "utf8", flag: "wx" });
@@ -1118,7 +1168,7 @@ export class ProcessManager {
     const observerCallerId = observer.caller_id ?? "caller_unknown";
     emitTelemetry({ event: "process_receipt_read", process_id: receipt.process_id, pid: receipt.pid, owner_caller_id: receipt.caller_id, caller_id: observerCallerId }, observer);
     const audit = processOutputAudit(receipt.stdout, receipt.stderr, Boolean(receipt.stdout_truncated), Boolean(receipt.stderr_truncated), receipt.exit_code, receipt.signal, receipt.error, receipt.request_id);
-    const legacy = { ...processResponseState(receipt.started_at, false, receipt.finished_at), process_id: receipt.process_id, pid: receipt.pid, ...audit, command: receipt.command, ...(receipt.command_truncated ? { command_truncated: true } : {}), cwd: receipt.cwd, running: false, stdout: receipt.stdout.slice(-limit), stderr: receipt.stderr.slice(-limit), exit_code: receipt.exit_code, signal: receipt.signal, started_at: receipt.started_at, finished_at: receipt.finished_at, ...(receipt.stdout_truncated || receipt.stdout.length > limit ? { stdout_truncated: true } : {}), ...(receipt.stderr_truncated || receipt.stderr.length > limit ? { stderr_truncated: true } : {}), ...(receipt.error ? { error: receipt.error } : {}) };
+    const legacy = { ...processResponseState(receipt.started_at, false, receipt.finished_at), process_id: receipt.process_id, pid: receipt.pid, ...audit, command: receipt.command, ...(receipt.command_truncated ? { command_truncated: true } : {}), ...(receipt.submitted_command !== undefined ? { submitted_command: receipt.submitted_command, ...(receipt.submitted_command_truncated ? { submitted_command_truncated: true } : {}) } : {}), cwd: receipt.cwd, running: false, stdout: receipt.stdout.slice(-limit), stderr: receipt.stderr.slice(-limit), exit_code: receipt.exit_code, signal: receipt.signal, started_at: receipt.started_at, finished_at: receipt.finished_at, ...(receipt.stdout_truncated || receipt.stdout.length > limit ? { stdout_truncated: true } : {}), ...(receipt.stderr_truncated || receipt.stderr.length > limit ? { stderr_truncated: true } : {}), ...(receipt.error ? { error: receipt.error } : {}) };
     const cursorExists = this.outputCursors.has(this.cursorKey(receipt.process_id, observerCallerId));
     const needsPaging = cursorExists || receipt.stdout.length + receipt.stderr.length > limit;
     return needsPaging ? this.pageOutput(legacy, receipt.stdout, receipt.stderr, observerCallerId, Boolean(receipt.stdout_truncated), Boolean(receipt.stderr_truncated), limit) : legacy;
@@ -1216,7 +1266,9 @@ export class ProcessManager {
 
   start(command: string, workingDirectory?: string, callerId = "caller_unknown"): { mcp_status: "OK"; process_state: "RUNNING" | "COMPLETED"; elapsed_ms: number; next_action: "READ_SAME_PROCESS_ID" | "STOP_READING"; process_id: string; pid: number; cwd: string; running: boolean; launching?: boolean } {
     this.pruneCompleted();
-    const preflightError = powershellPreflightError(command);
+    const normalization = normalizePowerShellControlStatementPipelines(command);
+    const effectiveCommand = normalization.command;
+    const preflightError = powershellPreflightError(effectiveCommand);
     if (preflightError) {
       const rejectionId = randomUUID();
       void this.persistPreflightRejectionAsync(rejectionId, command, workingDirectory, callerId, preflightError);
@@ -1224,7 +1276,7 @@ export class ProcessManager {
       throw new Error(`start_process_preflight_failed: ${preflightError}`);
     }
     const cwd = normalizedCwd(workingDirectory);
-    const duplicate = [...this.processes.values()].find((state) => state.exitCode === null && state.callerId === callerId && state.cwd === cwd && state.command === command);
+    const duplicate = [...this.processes.values()].find((state) => state.exitCode === null && state.callerId === callerId && state.cwd === cwd && state.command === effectiveCommand);
     if (duplicate) {
       emitTelemetry({ event: "process_reused", process_id: duplicate.id, pid: duplicate.pid, owner_caller_id: duplicate.callerId });
       return { ...processResponseState(duplicate.startedAt, true), process_id: duplicate.id, pid: duplicate.pid, cwd: duplicate.cwd, running: true, ...(duplicate.launching ? { launching: true } : {}) } as const;
@@ -1236,14 +1288,15 @@ export class ProcessManager {
     const ownerContext = currentTelemetryContext();
     if (sharedLauncherFailure) throw new Error(`process_launcher_unavailable: ${sharedLauncherFailure}`);
     const state: ProcessState = {
-      id: randomUUID(), pid: 0, callerId, ownerContext, command, cwd,
+      id: randomUUID(), pid: 0, callerId, ownerContext, command: effectiveCommand, ...(normalization.changed ? { submittedCommand: command } : {}), cwd,
       launching: true, terminalObserved: false, resolveDone, killRequested: false,
       stdout: new BoundedCapture(), stderr: new BoundedCapture(), startedAt: new Date().toISOString(), exitCode: null,
       done, revision: 0, lastReadRevisionByCaller: new Map<string, number>(), waiters: new Set<() => void>(),
     };
     this.processes.set(state.id, state);
     sharedLauncherHandlers.set(state.id, (message) => this.handleLauncherMessage(message));
-    this.launcherWorker.postMessage({ type: "launch", requestId: state.id, command, cwd });
+    this.launcherWorker.postMessage({ type: "launch", requestId: state.id, command: effectiveCommand, cwd });
+    if (normalization.changed) emitTelemetry({ event: "process_command_normalized", process_id: state.id, rewrite: "control_statement_pipeline_capture" }, state.ownerContext);
     emitTelemetry({ event: "process_launch_queued", process_id: state.id, owner_caller_id: state.callerId, cwd: state.cwd, started_at: state.startedAt }, state.ownerContext);
     return { ...processResponseState(state.startedAt, true), process_id: state.id, pid: 0, cwd: state.cwd, running: true, launching: true } as const;
   }
@@ -1302,6 +1355,7 @@ export class ProcessManager {
       pid: state.pid,
       command,
       ...((state.command.length > MAX_COMMAND_REPORT_CHARS) ? { command_truncated: true } : {}),
+      ...(state.submittedCommand !== undefined ? { submitted_command: state.submittedCommand.slice(0, MAX_COMMAND_REPORT_CHARS), ...(state.submittedCommand.length > MAX_COMMAND_REPORT_CHARS ? { submitted_command_truncated: true } : {}) } : {}),
       cwd: state.cwd,
       running: state.exitCode === null,
       ...(state.launching ? { launching: true } : {}),
