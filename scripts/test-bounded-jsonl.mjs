@@ -43,6 +43,13 @@ try {
   const allStressRecords = allSegments(stressPath).flatMap(jsonLines).filter((row) => row.event === "stress");
   assert.deepEqual(allStressRecords.map((row) => row.sequence).sort((a, b) => a - b), Array.from({ length: 90 }, (_, i) => i), "later rotations must preserve all earlier and later records");
 
+  const flushPath = join(root, "flush.jsonl");
+  const delayed = new BoundedJsonlWriter(flushPath, { maxBytes: 10_000, maxAgeMs: 60_000, batchDelayMs: 10_000 });
+  for (let sequence = 0; sequence < 25; sequence += 1) delayed.writeJson({ event: "flush", sequence });
+  await delayed.flush();
+  assert.deepEqual(jsonLines(flushPath).map((row) => row.sequence), Array.from({ length: 25 }, (_, i) => i), "flush must persist a queued batch without waiting for the timer");
+  await delayed.close();
+
   const agedPath = join(root, "aged.jsonl");
   writeFileSync(agedPath, `${JSON.stringify({ event: "before-restart" })}\n`, "utf8");
   const old = new Date(Date.now() - 10_000);
