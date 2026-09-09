@@ -1,7 +1,11 @@
 param(
-    [string]$RequestPath = (Join-Path $env:LOCALAPPDATA 'ChatGPTMcpClean\.state\production-replacement\request.json')
+    [string]$RequestPath = '',
+    [string]$RepoRoot = ''
 )
 $ErrorActionPreference = 'Stop'
+if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent $PSScriptRoot }
+$RepoRoot = [IO.Path]::GetFullPath($RepoRoot)
+if (-not $RequestPath) { $RequestPath = Join-Path $RepoRoot '.state\production-replacement\request.json' }
 if (-not (Test-Path -LiteralPath $RequestPath -PathType Leaf)) { throw "replacement request not found: $RequestPath" }
 $request = Get-Content -LiteralPath $RequestPath -Raw | ConvertFrom-Json
 if ([int]$request.version -ne 1) { throw 'unsupported replacement request version' }
@@ -14,7 +18,7 @@ if ($LASTEXITCODE -ne 0 -or $head -ne $expected) { throw "candidate root HEAD mi
 $dirty = @(& git.exe -C $root status --porcelain=v1 --untracked-files=no)
 if ($LASTEXITCODE -ne 0 -or $dirty.Count -gt 0) { throw 'candidate root must have no tracked modifications' }
 if (-not (Test-Path -LiteralPath (Join-Path $root 'dist\index.js') -PathType Leaf)) { throw 'candidate build is missing dist/index.js' }
-$repo = Join-Path $env:LOCALAPPDATA 'ChatGPTMcpClean'
+$repo = $RepoRoot
 $envFile = Join-Path $repo '.env'
 if (Test-Path -LiteralPath $envFile) {
     foreach ($line in Get-Content -LiteralPath $envFile) {

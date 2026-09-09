@@ -1,6 +1,6 @@
 ﻿#!/usr/bin/env node
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -10,6 +10,8 @@ const stableStore = join(temporary, "clone-a", "oauth.json");
 mkdirSync(join(temporary, "clone-a"), { recursive: true });
 writeFileSync(stableStore, "{}", "utf8");
 const script = resolve("scripts/start-minimal-clone.ps1");
+const scriptSource = readFileSync(script, "utf8");
+assert.match(scriptSource, /canonicalStateRoot = \[IO\.Path\]::GetFullPath\(\(Join-Path \$Root 'minimal-connectors'\)\)/, "canonical state guard must follow the explicit repo root, not the runtime account profile");
 function preflight(instanceId = "clone-a-next", extra = []) {
   return spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-InstanceId", instanceId, "-Port", "3021", "-PublicOrigin", "https://example.test/clone-a", "-StateRoot", temporary, "-ValidateOnly", ...extra], { encoding: "utf8", windowsHide: true });
 }
