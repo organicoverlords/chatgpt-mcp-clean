@@ -347,6 +347,28 @@ function swarmRouteDecisionIsolationError(command: string, code: string): string
   return undefined;
 }
 
+const PROTECTED_CONTROL_PLANE_TERMINATION_ERROR = "protected MCP/Commander control-plane termination is blocked; preserve serving and recovery paths and use the documented gated recovery path";
+
+function isProtectedControlPlaneProcessCommand(command: string): boolean {
+  const protectedScript = String.raw`(?:Start-DesktopCommanderFallbackHidden|keepalive|home-direct-supervisor|home-direct-caddy-supervisor|launch-production|start-vps-native-tunnels)\.ps1`;
+  const invokesProtectedScript = [
+    new RegExp(String.raw`(?:^|[;\r\n])\s*[.&]\s*['"]?[^'";|\r\n]*[\\/]${protectedScript}`, "i"),
+    new RegExp(String.raw`\b(?:powershell|pwsh)(?:\.exe)?\b[^;\r\n]*?(?:-File\s+)?['"]?[^'";|\r\n]*[\\/]${protectedScript}`, "i"),
+    new RegExp(String.raw`(?:^|[;\r\n])\s*(?:[A-Za-z]:[\\/])?[^\s;'"|]*[\\/]${protectedScript}`, "i"),
+    new RegExp(String.raw`(?:^|[;\r\n])\s*[.&]\s*['\"]?${protectedScript}\b`, "i"),
+    new RegExp(String.raw`\b(?:powershell|pwsh)(?:\.exe)?\b[^;\r\n]*?-File\s+['\"]?${protectedScript}\b`, "i"),
+  ].some((pattern) => pattern.test(command));
+  const invokesDesktopCommander = /\bnpx(?:\.cmd|\.exe)?\b[^;\r\n]*@wonderwhy-er[\\/]desktop-commander(?:@[A-Za-z0-9._-]+)?\b[^;\r\n]*\bremote\b/i.test(command)
+    || /\bnode(?:\.exe)?\b[^;\r\n]*@wonderwhy-er[\\/]desktop-commander[\\/]dist[\\/]index\.js\b/i.test(command);
+  const invokesCanonicalClone = /(?:^|[\\/])scripts[\\/]start-minimal-clone\.ps1\b/i.test(command)
+    && /(?:^|\s)-Port\s+3011\b/i.test(command)
+    && !/(?:^|\s)-ValidateOnly\b/i.test(command);
+  const invokesCanonicalServingRuntime = /\b(?:dist[\\/](?:index|front-door)\.js|src[\\/](?:index|front-door)\.ts)\b/i.test(command)
+    && /(?:\bPORT\s*=\s*['"]?3011\b|\bFRONT_DOOR_PORT\s*=\s*['"]?3003\b|127\.0\.0\.1:(?:3011|3003)\b|10\.203\.0\.2:3011\b)/i.test(command);
+  const invokesMcpTunnel = /McpVpsEdge/i.test(command)
+    && /(?:vps_mcp_reverse_tunnel|start-tunnel\.ps1|start-vps-native-tunnels\.ps1)/i.test(command);
+  return invokesProtectedScript || invokesDesktopCommander || invokesCanonicalClone || invokesCanonicalServingRuntime || invokesMcpTunnel;
+}
 function mcpProductionMutationError(command: string, code: string): string | undefined {
   const productionIngressError = "direct MCP production ingress mutation is blocked; use the documented redundant replacement/recovery scripts and prove the replacement off-path before changing serving production";
 
@@ -481,9 +503,16 @@ function mcpProductionMutationError(command: string, code: string): string | und
     && !/(?:^|\s)-ValidateOnly\b/i.test(command);
   if (invokesCanonicalCloneHelper) return productionIngressError;
 
-  const terminatesProcess = /\b(?:Stop-Process|taskkill(?:\.exe)?|kill-process)\b/i.test(code);
+  const terminatesProcess = /\b(?:Stop-Process|taskkill(?:\.exe)?|kill-process)\b/i.test(code)
+    || (/\b(?:Invoke-CimMethod|Invoke-WmiMethod)\b/i.test(code) && /\bTerminate\b/i.test(command))
+    || /\bwmic(?:\.exe)?\b[^\r\n;]*\bprocess\b[^\r\n;]*\bcall\s+terminate\b/i.test(command);
   const identifiesServingMcp = /(?:127\.0\.0\.1:(?:3011|3003)\/health|10\.203\.0\.2:3011|McpV3Production3011|ChatGPTMcpMinimal|dist[\\/]front-door\.js|dist[\\/]index\.js)/i.test(command);
+  const identifiesOtherProtectedControlPlane = /(?:McpVpsEdgeTunnel|Start-DesktopCommanderFallbackHidden\.ps1|@wonderwhy-er[\\/]desktop-commander|desktop-commander[\\/]dist[\\/]index\.js|home-direct-(?:caddy-)?supervisor\.ps1|keepalive\.ps1|launch-production\.ps1|start-vps-native-tunnels\.ps1|vps_mcp_reverse_tunnel)/i.test(command);
+  const selectsSharedControlHostByImage = /\bGet-Process\b[^\r\n;]*(?:\bnode(?:\.exe)?\b|\bpowershell(?:\.exe)?\b|\bpwsh(?:\.exe)?\b|\bpython(?:\.exe)?\b)/i.test(command)
+    || /\bStop-Process\b[^\r\n;]*-Name\s+['"]?(?:node|powershell|pwsh|python)(?:\.exe)?['"]?\b/i.test(command)
+    || /\btaskkill(?:\.exe)?\b[^\r\n;]*\/IM\s+['"]?(?:node|powershell|pwsh|python)(?:\.exe)?['"]?\b/i.test(command);
   if (terminatesProcess && identifiesServingMcp) return productionIngressError;
+  if (terminatesProcess && (identifiesOtherProtectedControlPlane || selectsSharedControlHostByImage)) return PROTECTED_CONTROL_PLANE_TERMINATION_ERROR;
 
   return undefined;
 }
@@ -1479,6 +1508,17 @@ export class ProcessManager {
         };
       }
       return await this.requestRemoteControl(processId, "kill", observer);
+    }
+    if (state.exitCode === null && isProtectedControlPlaneProcessCommand(state.command)) {
+      emitTelemetry({
+        event: "process_kill_rejected",
+        process_id: state.id,
+        pid: state.pid,
+        owner_caller_id: state.callerId,
+        caller_id: observer.caller_id ?? "caller_unknown",
+        reason: "protected_control_plane",
+      }, observer);
+      throw new Error(PROTECTED_CONTROL_PLANE_TERMINATION_ERROR);
     }
     if (state.exitCode !== null) {
       emitTelemetry({
