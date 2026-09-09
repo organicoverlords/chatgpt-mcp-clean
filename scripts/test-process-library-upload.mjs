@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runInNewContext } from "node:vm";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -59,4 +60,41 @@ const widget = processLibraryUploadWidgetHtml();
 assert.match(widget, /URL\.createObjectURL\(blob\)/);
 assert.match(widget, /uploadFile\(file,\{library:true\}\)/);
 assert.match(widget, /imageIds:fileId&&p\.mime_type\.startsWith\('image\/'\)\?\[fileId\]:\[\]/);
+
+const uploadedBytes = [];
+const uploadOptions = [];
+const widgetStates = [];
+const parent = { postMessage() {} };
+const elements = {
+  status: { textContent: "", classList: { add() {} } },
+  image: { src: "", classList: { add() {} } },
+};
+const window = {
+  parent,
+  openai: {
+    toolResponseMetadata: { mcp_tool_result: { _meta: { chatgpt_library_upload: meta } } },
+    notifyIntrinsicHeight() {},
+    async uploadFile(file, options) {
+      uploadOptions.push(options);
+      uploadedBytes.push(Buffer.from(await file.arrayBuffer()));
+      return { fileId: "file_widget_exact" };
+    },
+    setWidgetState(state) { widgetStates.push(state); },
+  },
+  addEventListener() {},
+};
+runInNewContext(widget.match(/<script>([\s\S]*?)<\/script>/)[1], {
+  window,
+  document: { getElementById: (id) => elements[id] },
+  atob, Uint8Array, Blob, File,
+  URL: { createObjectURL: () => "blob:test" },
+});
+await new Promise((resolve) => setImmediate(resolve));
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(uploadedBytes.length, 1, "widget must upload the metadata-backed image exactly once");
+assert.equal(uploadOptions[0]?.library, true, "widget must request Library persistence");
+assert.equal(uploadedBytes[0].compare(png), 0, "widget uploadFile payload must preserve exact original bytes");
+assert.equal(widgetStates.at(-1)?.imageIds?.length, 1, "widget must publish exactly one uploaded image id");
+assert.equal(widgetStates.at(-1)?.imageIds?.[0], "file_widget_exact", "widget must publish uploaded image id for follow-up model context");
+
 console.log("process library upload widget-v2 metadata tests passed");
