@@ -63,6 +63,13 @@ if (!publicOrigin.pathname.endsWith("/")) publicOrigin.pathname += "/";
 const publicBasePath = publicOrigin.pathname === "/" ? "" : publicOrigin.pathname.replace(/\/$/, "");
 const publicAllowedHosts = new Set([publicOrigin.host.toLowerCase()]);
 if (!publicOrigin.port) publicAllowedHosts.add(`${publicOrigin.hostname.toLowerCase()}:443`);
+const allowedMcpOrigins = new Set([
+  publicOrigin.origin,
+  `http://127.0.0.1:${PORT}`,
+  `http://localhost:${PORT}`,
+  `http://${frontDoorHost}`,
+]);
+if (approvedWireGuardCandidateBind) allowedMcpOrigins.add(`http://${wireGuardHost}:${PORT}`);
 const publicUrl = (path: string): URL => new URL(path.replace(/^\/+/, ""), publicOrigin);
 const resource = publicUrl("mcp");
 const oauth = new LocalOAuthProvider(resource, OWNER, STORE);
@@ -95,6 +102,7 @@ async function handleStateless(req: Request, res: Response, body: unknown): Prom
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
     allowedHosts: [`127.0.0.1:${PORT}`, `localhost:${PORT}`, frontDoorHost, ...publicAllowedHosts],
+    allowedOrigins: [...allowedMcpOrigins],
     enableDnsRebindingProtection: true,
   });
   let cleaned = false;
@@ -226,6 +234,11 @@ app.use("/mcp", (req, res, next) => {
   const host = (req.header("host") || "").toLowerCase();
   if (!allowedMcpHosts.has(host)) {
     res.status(403).send("Invalid Host header");
+    return;
+  }
+  const origin = req.header("origin");
+  if (origin && !allowedMcpOrigins.has(origin)) {
+    res.status(403).send("Invalid Origin header");
     return;
   }
   next();
