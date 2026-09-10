@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdir as mkdirAsync, readFile as readFileAsync, readdir as readdirAsync, rename as renameAsync, stat as statAsync, unlink as unlinkAsync, writeFile as writeFileAsync } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
+import { freemem, totalmem } from "node:os";
 import { Worker } from "node:worker_threads";
 import { currentTelemetryContext, emitTelemetry, withTelemetryContext, type TelemetryContext } from "./transport-telemetry.js";
 
@@ -32,11 +33,18 @@ const CONTROL_KILL_TIMEOUT_MS = TASKKILL_TIMEOUT_MS + KILL_SETTLE_MS + CONTROL_H
 const CONTROL_RETENTION_MS = COMPLETED_RETENTION_MS;
 const CONTROL_PRUNE_INTERVAL_MS = 60_000;
 
+type HostMemorySample = {
+  freeBytes: number;
+  totalBytes: number;
+};
+
 type ProcessManagerOptions = {
   maxLivePerCaller?: number;
   maxLiveTotal?: number;
   maxCompletedProcesses?: number;
   receiptDirectory?: string;
+  minFreeMemoryPct?: number;
+  memoryProbe?: () => HostMemorySample;
 };
 
 type CompletedProcessReceipt = {
@@ -813,6 +821,8 @@ export class ProcessManager {
   private readonly maxLivePerCaller: number;
   private readonly maxLiveTotal: number;
   private readonly maxCompletedProcesses: number;
+  private readonly minFreeMemoryPct?: number;
+  private readonly memoryProbe: () => HostMemorySample;
   private readonly receiptDirectory?: string;
   private readonly hostAdmissionDirectory?: string;
   private readonly hostAdmissionSlots = new Map<string, string>();
@@ -832,6 +842,11 @@ export class ProcessManager {
       throw new Error(`maxLiveTotal must be an integer between 1 and ${MAX_CONFIGURED_LIVE_TOTAL}`);
     }
     this.maxCompletedProcesses = options.maxCompletedProcesses ?? MAX_COMPLETED_PROCESSES;
+    this.minFreeMemoryPct = options.minFreeMemoryPct;
+    if (this.minFreeMemoryPct !== undefined && (!Number.isFinite(this.minFreeMemoryPct) || this.minFreeMemoryPct < 1 || this.minFreeMemoryPct > 50)) {
+      throw new Error("minFreeMemoryPct must be a finite number between 1 and 50");
+    }
+    this.memoryProbe = options.memoryProbe ?? (() => ({ freeBytes: freemem(), totalBytes: totalmem() }));
     this.launcherWorker = sharedPowerShellWorker();
     this.receiptDirectory = options.receiptDirectory ? resolve(options.receiptDirectory) : undefined;
     if (this.receiptDirectory) {
@@ -893,6 +908,43 @@ export class ProcessManager {
     } catch {
       return false;
     }
+  }
+
+  private assertHostMemoryHeadroom(callerId: string, ownerContext: TelemetryContext): void {
+    if (this.minFreeMemoryPct === undefined) return;
+    let sample: HostMemorySample;
+    try {
+      sample = this.memoryProbe();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      emitTelemetry({ event: "process_host_memory_probe_error", owner_caller_id: callerId, error_message: message }, ownerContext);
+      throw new Error(`start_process_host_memory_probe_unavailable: ${message}`);
+    }
+    const freeBytes = Number(sample.freeBytes);
+    const totalBytes = Number(sample.totalBytes);
+    if (!Number.isFinite(freeBytes) || !Number.isFinite(totalBytes) || freeBytes < 0 || totalBytes <= 0 || freeBytes > totalBytes) {
+      emitTelemetry({
+        event: "process_host_memory_probe_error",
+        owner_caller_id: callerId,
+        system_free_memory_bytes: Number.isFinite(freeBytes) ? freeBytes : null,
+        system_total_memory_bytes: Number.isFinite(totalBytes) ? totalBytes : null,
+        error_message: "invalid physical-memory sample",
+      }, ownerContext);
+      throw new Error("start_process_host_memory_probe_unavailable: invalid physical-memory sample");
+    }
+    const freePct = 100 * freeBytes / totalBytes;
+    if (freePct >= this.minFreeMemoryPct) return;
+    const roundedFreePct = Math.round(freePct * 10) / 10;
+    emitTelemetry({
+      event: "process_host_memory_pressure_rejected",
+      owner_caller_id: callerId,
+      system_free_memory_bytes: freeBytes,
+      system_total_memory_bytes: totalBytes,
+      system_free_memory_pct: roundedFreePct,
+      min_free_memory_pct: this.minFreeMemoryPct,
+      live_process_count: this.liveProcessCount(),
+    }, ownerContext);
+    throw new Error(`start_process_host_memory_pressure_limited: shared MCP host has ${roundedFreePct.toFixed(1)}% free physical memory; minimum=${this.minFreeMemoryPct}%; use read_output/kill_process on existing work and retry after memory pressure clears`);
   }
 
   private rejectHostAdmission(callerId: string, ownerContext: TelemetryContext, liveCount: number): never {
@@ -1551,6 +1603,8 @@ export class ProcessManager {
   }
 
   start(command: string, workingDirectory?: string, callerId = "caller_unknown"): { mcp_status: "OK"; process_state: "RUNNING" | "COMPLETED"; elapsed_ms: number; next_action: "READ_SAME_PROCESS_ID" | "STOP_READING"; process_id: string; pid: number; cwd: string; running: boolean; launching?: boolean } {
+    const ownerContext = currentTelemetryContext();
+    this.assertHostMemoryHeadroom(callerId, ownerContext);
     this.pruneCompleted();
     const normalization = normalizePowerShellControlStatementPipelines(command);
     const effectiveCommand = normalization.command;
@@ -1569,7 +1623,6 @@ export class ProcessManager {
     }
     const liveForCaller = [...this.processes.values()].filter((state) => state.exitCode === null && state.callerId === callerId);
     if (liveForCaller.length >= this.maxLivePerCaller) throw new Error(`start_process_concurrency_limited: caller already has ${liveForCaller.length} live processes; active_process_ids=${liveForCaller.map((state) => state.id).join(",")}`);
-    const ownerContext = currentTelemetryContext();
     if (sharedLauncherFailure) throw new Error(`process_launcher_unavailable: ${sharedLauncherFailure}`);
     const processId = randomUUID();
     const startedAt = new Date().toISOString();
@@ -1603,6 +1656,7 @@ export class ProcessManager {
     callerId = "caller_unknown",
     waitMs = 750,
   ): Promise<Record<string, unknown>> {
+    this.assertHostMemoryHeadroom(callerId, currentTelemetryContext());
     const cwd = await boundedValidatedCwd(workingDirectory);
     const started = this.start(command, cwd, callerId);
     const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
