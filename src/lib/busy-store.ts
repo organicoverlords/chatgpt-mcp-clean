@@ -1,5 +1,5 @@
 import { closeSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, normalize, resolve } from "node:path";
 
 export type BusyClaim = {
   actor: string;
@@ -38,6 +38,18 @@ function isAutoPrunableScope(scope: string): boolean {
   return scope.startsWith("session:") || scope.startsWith("process:");
 }
 
+function canonicalScope(scope: string): string {
+  const value = scope.trim();
+  if (!value) throw new Error("scope must not be empty");
+  return isAbsolute(value) ? (process.platform === "win32" ? normalize(value).toLowerCase() : normalize(value)) : value;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
 export class BusyStore {
   private readonly claims = new Map<string, BusyClaim>();
   private passthrough: Record<string, unknown> = {};
@@ -55,10 +67,12 @@ export class BusyStore {
   async claim(actor: string, scope: string): Promise<{ ok: true; claim: BusyClaim } | { ok: false; reason: string; claim: BusyClaim }> {
     return this.withLock(() => {
       this.refresh();
-      const current = this.claims.get(scope);
+      const canonical = canonicalScope(scope);
+      const current = this.claims.get(canonical);
       if (current && current.actor !== actor) return { ok: false as const, reason: "scope_already_claimed", claim: current };
-      const claim = { actor, scope, timestamp: new Date().toISOString() };
-      this.claims.set(scope, claim);
+      const claim = { actor, scope: canonical, timestamp: new Date().toISOString() };
+      this.claims.set(canonical, claim);
+      this.upsertCompatibilityJob(claim);
       this.persist();
       return { ok: true as const, claim };
     });
@@ -76,10 +90,12 @@ export class BusyStore {
   async release(actor: string, scope: string): Promise<{ ok: true; released: BusyClaim } | { ok: false; reason: string; claim?: BusyClaim }> {
     return this.withLock(() => {
       this.refresh();
-      const current = this.claims.get(scope);
+      const canonical = canonicalScope(scope);
+      const current = this.claims.get(canonical);
       if (!current) return { ok: false as const, reason: "scope_not_claimed" };
       if (current.actor !== actor) return { ok: false as const, reason: "claim_belongs_to_another_actor", claim: current };
-      this.claims.delete(scope);
+      this.claims.delete(canonical);
+      this.removeCoordinatorJob(canonical);
       this.persist();
       return { ok: true as const, released: current };
     });
@@ -175,12 +191,65 @@ export class BusyStore {
     for (const claim of parsed.claims) {
       if (!claim || typeof claim.actor !== "string" || typeof claim.scope !== "string" || typeof claim.timestamp !== "string") continue;
       if (!Number.isFinite(Date.parse(claim.timestamp))) continue;
-      next.set(claim.scope, claim);
+      const scope = canonicalScope(claim.scope);
+      const normalized = { ...claim, scope };
+      const previous = next.get(scope);
+      if (previous && previous.actor !== normalized.actor) {
+        throw new Error(`conflicting BUSY claims canonicalize to one scope: ${scope}`);
+      }
+      if (!previous || normalized.timestamp > previous.timestamp) next.set(scope, normalized);
     }
     this.claims.clear();
     for (const [scope, claim] of next) this.claims.set(scope, claim);
     const { claims: _claims, ...passthrough } = parsed;
     this.passthrough = passthrough;
+  }
+
+  private coordinatorJobs(): Record<string, unknown> {
+    let coordinator = asRecord(this.passthrough.coordinator);
+    if (!coordinator) {
+      coordinator = {};
+      this.passthrough.coordinator = coordinator;
+    }
+    if (typeof coordinator.version !== "number") coordinator.version = 1;
+    let jobs = asRecord(coordinator.jobs);
+    if (!jobs) {
+      jobs = {};
+      coordinator.jobs = jobs;
+    }
+    return jobs;
+  }
+
+  private upsertCompatibilityJob(claim: BusyClaim): void {
+    const jobs = this.coordinatorJobs();
+    const previousKey = Object.keys(jobs).find((key) => canonicalScope(key) === claim.scope);
+    const previous = asRecord(jobs[previousKey || claim.scope]);
+    if (previousKey && previousKey !== claim.scope) delete jobs[previousKey];
+    const sameOwner = previous?.owner === claim.actor;
+    const leaseExpiresAt = sameOwner && (typeof previous?.lease_expires_at === "string" || previous?.lease_expires_at === null)
+      ? previous.lease_expires_at
+      : null;
+    const checkpoint = typeof previous?.checkpoint === "string" ? previous.checkpoint : null;
+    jobs[claim.scope] = {
+      ...(previous || {}),
+      job_id: claim.scope,
+      scope: claim.scope,
+      state: "active",
+      owner: claim.actor,
+      lease_expires_at: leaseExpiresAt,
+      claim_timestamp: claim.timestamp,
+      checkpoint,
+      updated_at: claim.timestamp,
+    };
+  }
+
+  private removeCoordinatorJob(scope: string): void {
+    const coordinator = asRecord(this.passthrough.coordinator);
+    const jobs = coordinator ? asRecord(coordinator.jobs) : null;
+    if (!jobs) return;
+    for (const key of Object.keys(jobs)) {
+      if (canonicalScope(key) === scope) delete jobs[key];
+    }
   }
 
   private persist(): void {
@@ -222,6 +291,7 @@ export class BusyStore {
       // them. Only scopes that opt into lifecycle ownership with session:/process: may expire.
       if (isAutoPrunableScope(scope) && now - Date.parse(claim.timestamp) > STALE_AFTER_MS && !this.hasLiveReference(scope)) {
         this.claims.delete(scope);
+        this.removeCoordinatorJob(scope);
         changed = true;
       }
     }

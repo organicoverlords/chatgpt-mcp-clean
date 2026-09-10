@@ -9,7 +9,7 @@
 //
 // Usage: node scripts/concurrency-busy.mjs [workers]
 
-import { fork, spawn } from "node:child_process";
+import { fork, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -111,16 +111,46 @@ rmSync(`${STORE}.lock`, { force: true });
 console.log(`\ntest 5 - long-lived task claims persist; ephemeral lifecycle claims expire`);
 resetStore();
 const oldTimestamp = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-writeFileSync(STORE, JSON.stringify({ claims: [
-  { actor: "long-worker", scope: "task:long-running-integration", timestamp: oldTimestamp },
-  { actor: "old-session", scope: "session:gone-session", timestamp: oldTimestamp },
-  { actor: "old-process", scope: "process:00000000-0000-0000-0000-000000000000", timestamp: oldTimestamp },
-] }, null, 2) + "\n", "utf8");
+writeFileSync(STORE, JSON.stringify({
+  coordinator: {
+    version: 1,
+    jobs: {
+      "session:gone-session": {
+        job_id: "session:gone-session",
+        scope: "session:gone-session",
+        state: "active",
+        owner: "old-session",
+        lease_expires_at: null,
+        claim_timestamp: oldTimestamp,
+        checkpoint: null,
+        updated_at: oldTimestamp,
+      },
+      "process:00000000-0000-0000-0000-000000000000": {
+        job_id: "process:00000000-0000-0000-0000-000000000000",
+        scope: "process:00000000-0000-0000-0000-000000000000",
+        state: "active",
+        owner: "old-process",
+        lease_expires_at: null,
+        claim_timestamp: oldTimestamp,
+        checkpoint: null,
+        updated_at: oldTimestamp,
+      },
+    },
+  },
+  claims: [
+    { actor: "long-worker", scope: "task:long-running-integration", timestamp: oldTimestamp },
+    { actor: "old-session", scope: "session:gone-session", timestamp: oldTimestamp },
+    { actor: "old-process", scope: "process:00000000-0000-0000-0000-000000000000", timestamp: oldTimestamp },
+  ],
+}, null, 2) + "\n", "utf8");
 const durabilityStore = new BusyStore(() => false, STORE);
 const durableClaims = await durabilityStore.list();
 check(durableClaims.some((claim) => claim.scope === "task:long-running-integration"), "ordinary task claim survives >5 minutes", JSON.stringify(durableClaims));
 check(!durableClaims.some((claim) => claim.scope === "session:gone-session"), "dead session claim is pruned", JSON.stringify(durableClaims));
 check(!durableClaims.some((claim) => claim.scope.startsWith("process:")), "dead process claim is pruned", JSON.stringify(durableClaims));
+const durableRaw = JSON.parse(readFileSync(STORE, "utf8"));
+check(!durableRaw.coordinator?.jobs?.["session:gone-session"], "dead session metadata is pruned with its claim", JSON.stringify(durableRaw));
+check(!durableRaw.coordinator?.jobs?.["process:00000000-0000-0000-0000-000000000000"], "dead process metadata is pruned with its claim", JSON.stringify(durableRaw));
 rmSync(STORE, { force: true });
 
 // Test 6: top-level coordinator metadata survives legacy BUSY mutations. This is the
@@ -139,10 +169,76 @@ compatibilityRaw = JSON.parse(readFileSync(STORE, "utf8"));
 check(compatibilityRaw.coordinator?.jobs?.alpha?.state === "blocked", "coordinator metadata survives release", JSON.stringify(compatibilityRaw));
 rmSync(STORE, { force: true });
 
-// Test 7: Windows readers may allow read/write but deny delete sharing. In that
+// Test 7: the full-profile compatibility writer must produce coordinator-managed
+// metadata so the standalone coordinator does not see new claims as legacy-only.
+console.log(`\ntest 7 - compatibility claims interoperate with standalone coordinator metadata`);
+resetStore();
+const interopStore = new BusyStore(() => false, STORE);
+const interopClaim = await interopStore.claim("ChatGPT:compat-interop", "task:compat-interop");
+let interopRaw = JSON.parse(readFileSync(STORE, "utf8"));
+const interopJob = interopRaw.coordinator?.jobs?.["task:compat-interop"];
+check(interopClaim.ok, "compatibility claim succeeds", JSON.stringify(interopClaim));
+check(interopJob?.state === "active" && interopJob?.owner === "ChatGPT:compat-interop", "compatibility claim writes active coordinator metadata", JSON.stringify(interopRaw));
+check(interopJob?.lease_expires_at === null, "new compatibility task claim remains durable until explicit release/recovery", JSON.stringify(interopJob));
+check(interopJob?.claim_timestamp === interopClaim.claim?.timestamp, "coordinator metadata binds the exact compatibility claim timestamp", JSON.stringify(interopJob));
+
+const pythonExe = process.env.PYTHON || (process.platform === "win32" ? "python" : "python3");
+const coordinatorPath = resolve(ROOT, "stack/busy/busy.py");
+const standalone = spawnSync(pythonExe, [coordinatorPath, "--store", STORE, "snapshot", "--limit", "32"], { encoding: "utf8" });
+check(standalone.status === 0, "standalone coordinator reads compatibility claim", `${standalone.status}: ${standalone.stderr}`);
+let standaloneSnapshot = {};
+try { standaloneSnapshot = JSON.parse(standalone.stdout || "{}"); } catch {}
+check(standaloneSnapshot.counts?.legacy_only_claims === 0, "compatibility claim is not legacy-only", JSON.stringify(standaloneSnapshot));
+check(standaloneSnapshot.counts?.active === 1 && standaloneSnapshot.counts?.claims === 1, "standalone coordinator sees one managed active claim", JSON.stringify(standaloneSnapshot));
+
+const interopRelease = await interopStore.release("ChatGPT:compat-interop", "task:compat-interop");
+check(interopRelease.ok, "compatibility release succeeds", JSON.stringify(interopRelease));
+interopRaw = JSON.parse(readFileSync(STORE, "utf8"));
+check(!interopRaw.coordinator?.jobs?.["task:compat-interop"], "compatibility release removes matching coordinator metadata", JSON.stringify(interopRaw));
+const standaloneAfterRelease = spawnSync(pythonExe, [coordinatorPath, "--store", STORE, "snapshot", "--limit", "32"], { encoding: "utf8" });
+let standaloneReleasedSnapshot = {};
+try { standaloneReleasedSnapshot = JSON.parse(standaloneAfterRelease.stdout || "{}"); } catch {}
+check(standaloneAfterRelease.status === 0 && standaloneReleasedSnapshot.counts?.active === 0 && standaloneReleasedSnapshot.counts?.claims === 0, "standalone coordinator sees clean state after compatibility release", `${standaloneAfterRelease.status}: ${standaloneAfterRelease.stderr} ${standaloneAfterRelease.stdout}`);
+rmSync(STORE, { force: true });
+
+// Test 8: historical Windows absolute-path spellings must be recoverable through the
+// canonical coordinator path. This is the exact regression that left legacy-only claims
+// visible in snapshots but unreachable by inspect/recover.
+if (process.platform === "win32") {
+  console.log(`\ntest 8 - mixed-case legacy Windows scopes remain exactly recoverable`);
+  resetStore();
+  const legacyActor = "ChatGPT:legacy-case-recover";
+  const legacyTimestamp = "2026-09-07T00:13:34.755Z";
+  const legacyScope = resolve(ROOT, ".state/Legacy-Case-Recover.txt");
+  const legacyStoredScope = legacyScope.toUpperCase();
+  const legacyLookupScope = legacyScope.toLowerCase();
+  writeFileSync(STORE, JSON.stringify({
+    coordinator: { version: 1, jobs: {}, operations: {} },
+    claims: [{ actor: legacyActor, scope: legacyStoredScope, timestamp: legacyTimestamp }],
+  }, null, 2) + "\n", "utf8");
+  const legacyBefore = spawnSync(pythonExe, [coordinatorPath, "--store", STORE, "snapshot", "--limit", "32"], { encoding: "utf8" });
+  let legacyBeforeSnapshot = {};
+  try { legacyBeforeSnapshot = JSON.parse(legacyBefore.stdout || "{}"); } catch {}
+  check(legacyBefore.status === 0 && legacyBeforeSnapshot.counts?.legacy_only_claims === 1, "historical raw claim is visible as one legacy-only claim", `${legacyBefore.status}: ${legacyBefore.stderr} ${legacyBefore.stdout}`);
+  const legacyRecover = spawnSync(pythonExe, [
+    coordinatorPath, "--store", STORE, "recover", legacyActor, legacyLookupScope,
+    "--expected-claim-timestamp", legacyTimestamp,
+    "--operation-id", "test-legacy-case-recover",
+  ], { encoding: "utf8" });
+  let legacyRecoverResult = {};
+  try { legacyRecoverResult = JSON.parse(legacyRecover.stdout || "{}"); } catch {}
+  check(legacyRecover.status === 0 && legacyRecoverResult.ok === true, "mixed-case legacy claim is recoverable through canonical path", `${legacyRecover.status}: ${legacyRecover.stderr} ${legacyRecover.stdout}`);
+  const legacyAfter = spawnSync(pythonExe, [coordinatorPath, "--store", STORE, "snapshot", "--limit", "32"], { encoding: "utf8" });
+  let legacyAfterSnapshot = {};
+  try { legacyAfterSnapshot = JSON.parse(legacyAfter.stdout || "{}"); } catch {}
+  check(legacyAfter.status === 0 && legacyAfterSnapshot.counts?.claims === 0 && legacyAfterSnapshot.counts?.legacy_only_claims === 0, "legacy case-alias recovery leaves no phantom claim", `${legacyAfter.status}: ${legacyAfter.stderr} ${legacyAfter.stdout}`);
+  rmSync(STORE, { force: true });
+}
+
+// Test 9: Windows readers may allow read/write but deny delete sharing. In that
 // state rename/replace fails even though an in-place write is legal.
 if (process.platform === "win32") {
-  console.log(`\ntest 7 - Windows reader without delete sharing does not block claim/release`);
+  console.log(`\ntest 9 - Windows reader without delete sharing does not block claim/release`);
   resetStore();
   const ps = [
     "$p=$env:BUSY_TEST_STORE",
