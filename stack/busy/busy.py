@@ -13,7 +13,8 @@ REPLACE_TIMEOUT_S = 0.5
 REPLACE_RETRY_S = 0.01
 TEMP_STALE_S = 60.0
 MAX_SWEEP_TEMP_ITEMS = 32
-DEFAULT_LEASE_S = 3600
+DEFAULT_LEASE_S = 240
+MAX_LEASE_S = 240
 MAX_OPERATIONS = 512
 
 
@@ -36,6 +37,22 @@ def iso(dt: datetime | None = None) -> str:
 
 def parse_iso(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def capped_lease_seconds(value: int) -> int:
+    # BUSY is collision avoidance only. A heartbeat can prove ownership for at
+    # most four more minutes; callers cannot extend a lock beyond that horizon.
+    return max(1, min(int(value), MAX_LEASE_S))
+
+
+def capped_lease_expiry(claim_timestamp: str, raw_lease: object = None) -> str:
+    cap = parse_iso(claim_timestamp) + timedelta(seconds=MAX_LEASE_S)
+    if isinstance(raw_lease, str):
+        try:
+            return iso(min(parse_iso(raw_lease), cap))
+        except Exception:
+            pass
+    return iso(cap)
 
 
 def canonical_scope(scope: str) -> str:
@@ -198,10 +215,9 @@ def job_for(state: dict, scope: str):
 
 
 def normalize_jobs(state: dict) -> bool:
-    """Migrate legacy queue/checkpoint records into live ownership metadata only."""
+    """Normalize BUSY lease metadata without inferring any work lifecycle state."""
     jobs = state["coordinator"]["jobs"]
-    claims = {claim["scope"]: claim for claim in state["claims"]}
-    normalized: dict[str, dict] = {}
+    raw_jobs: dict[str, dict] = {}
     known = {"job_id", "scope", "state", "owner", "lease_expires_at", "claim_timestamp", "checkpoint", "updated_at"}
     for raw_scope, raw_job in jobs.items():
         if not isinstance(raw_job, dict):
@@ -210,9 +226,12 @@ def normalize_jobs(state: dict) -> bool:
             scope = canonical_scope(str(raw_job.get("scope") or raw_scope))
         except ValueError:
             continue
-        claim = claims.get(scope)
-        if claim is None:
-            continue
+        raw_jobs[scope] = raw_job
+
+    normalized: dict[str, dict] = {}
+    for claim in state["claims"]:
+        scope = claim["scope"]
+        raw_job = raw_jobs.get(scope, {})
         checkpoint = raw_job.get("checkpoint") if isinstance(raw_job.get("checkpoint"), str) else None
         extra = {key: value for key, value in raw_job.items() if key not in known}
         normalized[scope] = {
@@ -220,7 +239,7 @@ def normalize_jobs(state: dict) -> bool:
             "scope": scope,
             "state": "active",
             "owner": claim["actor"],
-            "lease_expires_at": raw_job.get("lease_expires_at") if isinstance(raw_job.get("lease_expires_at"), str) else None,
+            "lease_expires_at": capped_lease_expiry(claim["timestamp"], raw_job.get("lease_expires_at")),
             "claim_timestamp": claim["timestamp"],
             "checkpoint": checkpoint,
             "updated_at": claim["timestamp"],
@@ -229,7 +248,6 @@ def normalize_jobs(state: dict) -> bool:
     changed = normalized != jobs
     state["coordinator"]["jobs"] = normalized
     return changed
-
 
 
 def compact_job(job: dict) -> dict:
@@ -411,13 +429,6 @@ def sweep_expired(state: dict) -> tuple[list[dict], bool]:
             continue
         current = claim_for(state, scope)
         if current and current.get("actor") == owner:
-            expected_timestamp = job.get("claim_timestamp")
-            if isinstance(expected_timestamp, str) and current.get("timestamp") != expected_timestamp:
-                job["claim_timestamp"] = current.get("timestamp")
-                job["lease_expires_at"] = None
-                job["updated_at"] = current.get("timestamp")
-                changed = True
-                continue
             state["claims"] = [claim for claim in state["claims"] if claim.get("scope") != scope]
         checkpoint = job.get("checkpoint") if isinstance(job.get("checkpoint"), str) else None
         remove_scope_metadata(state, scope)
@@ -492,6 +503,8 @@ def operate(store: Path, command: str, actor: str | None = None, raw_scope: str 
             raise ValueError("actor required")
         if command in {"claim", "heartbeat"}:
             actor = validate_claim_actor(actor)
+        if command in {"claim", "heartbeat"}:
+            lease_seconds = capped_lease_seconds(lease_seconds)
         signature = {"command": command, "scope": scope, "actor": actor}
         if command in {"claim", "heartbeat"}:
             signature["lease_seconds"] = lease_seconds

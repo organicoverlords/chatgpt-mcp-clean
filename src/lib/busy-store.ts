@@ -7,7 +7,7 @@ export type BusyClaim = {
   timestamp: string;
 };
 
-const STALE_AFTER_MS = 5 * 60 * 1000;
+const COLLISION_LEASE_MS = 4 * 60 * 1000;
 
 // Lock tuning. The timeout is deliberately short: a claim that cannot get the lock must
 // fail fast with a clear error, never block a tool call. Waiting is the failure mode we
@@ -34,9 +34,6 @@ function isLockContentionError(error: unknown): boolean {
   return code === "EEXIST" || code === "EACCES" || code === "EPERM";
 }
 
-function isAutoPrunableScope(scope: string): boolean {
-  return scope.startsWith("session:") || scope.startsWith("process:");
-}
 
 function canonicalScope(scope: string): string {
   const value = scope.trim();
@@ -56,7 +53,7 @@ export class BusyStore {
   private readonly storePath: string;
 
   constructor(
-    private readonly hasLiveReference: (scope: string) => boolean,
+    _hasLiveReference: (scope: string) => boolean,
     storePath = process.env.MCP_BUSY_STORE_PATH || ".state/busy-claims.json",
   ) {
     this.storePath = resolve(storePath);
@@ -225,10 +222,7 @@ export class BusyStore {
     const previousKey = Object.keys(jobs).find((key) => canonicalScope(key) === claim.scope);
     const previous = asRecord(jobs[previousKey || claim.scope]);
     if (previousKey && previousKey !== claim.scope) delete jobs[previousKey];
-    const sameOwner = previous?.owner === claim.actor;
-    const leaseExpiresAt = sameOwner && (typeof previous?.lease_expires_at === "string" || previous?.lease_expires_at === null)
-      ? previous.lease_expires_at
-      : null;
+    const leaseExpiresAt = new Date(Date.parse(claim.timestamp) + COLLISION_LEASE_MS).toISOString();
     const checkpoint = typeof previous?.checkpoint === "string" ? previous.checkpoint : null;
     jobs[claim.scope] = {
       ...(previous || {}),
@@ -286,10 +280,9 @@ export class BusyStore {
     const now = Date.now();
     let changed = false;
     for (const [scope, claim] of this.claims) {
-      // Ordinary task scopes are durable coordination state and must survive long runs,
-      // tool-context rollovers, and listener reconnects until their actor explicitly releases
-      // them. Only scopes that opt into lifecycle ownership with session:/process: may expire.
-      if (isAutoPrunableScope(scope) && now - Date.parse(claim.timestamp) > STALE_AFTER_MS && !this.hasLiveReference(scope)) {
+      // BUSY owns only the collision lock. Expiry drops only BUSY's claim/lease metadata;
+      // worktrees, branches, reports, issues, and all continuation state live elsewhere.
+      if (now - Date.parse(claim.timestamp) >= COLLISION_LEASE_MS) {
         this.claims.delete(scope);
         this.removeCoordinatorJob(scope);
         changed = true;
