@@ -2,6 +2,8 @@ param(
     [string]$CaddyPath = (Join-Path $env:LOCALAPPDATA 'Caddy\mcp-home-test\caddy.exe'),
     [string]$RuntimeConfigPath = (Join-Path $env:LOCALAPPDATA 'Caddy\mcp-home-test\Caddyfile'),
     [string]$CanonicalConfigPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'config\home-direct.Caddyfile'),
+    [string]$MainPublicHost = '91-159-12-133.sslip.io',
+    [ValidateRange(1024,65535)][int]$MainBackendPort = 3022,
     [ValidateRange(1024,65535)][int]$Port = 8443,
     [ValidateRange(5,300)][int]$PollSeconds = 15,
     [switch]$Once
@@ -23,8 +25,42 @@ function Test-CaddyHealthy {
     return @($listeners | Where-Object { [int]$_.OwningProcess -eq [int]$process.ProcessId }).Count -gt 0
 }
 
+function Get-CaddySiteBlock([string]$ConfigText, [string]$HostName) {
+    $lines = @($ConfigText -split "`r?`n")
+    $capturing = $false
+    $depth = 0
+    $buffer = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in $lines) {
+        if (-not $capturing) {
+            if ($line.Trim() -ne "$HostName {") { continue }
+            $capturing = $true
+        }
+        [void]$buffer.Add($line)
+        $depth += [regex]::Matches($line, '\{').Count
+        $depth -= [regex]::Matches($line, '\}').Count
+        if ($capturing -and $depth -eq 0) { break }
+    }
+    if (-not $capturing -or $depth -ne 0) { return $null }
+    return ($buffer -join "`n")
+}
+
+function Assert-CaddyConfigContract([string]$Path) {
+    $config = Get-Content -LiteralPath $Path -Raw
+    if ($config -match '(?i)header_up|tailscale-user-login|tailscale-funnel-request') {
+        throw 'Canonical home-direct Caddy config must not inject trust headers'
+    }
+    $mainBlock = Get-CaddySiteBlock -ConfigText $config -HostName $MainPublicHost
+    if (-not $mainBlock) { throw "Canonical home-direct Caddy config is missing main host block: $MainPublicHost" }
+    $upstreams = @([regex]::Matches($mainBlock, '(?im)^\s*reverse_proxy\s+([^\s#]+)') | ForEach-Object { $_.Groups[1].Value })
+    $expected = "127.0.0.1:$MainBackendPort"
+    if ($upstreams.Count -eq 0 -or @($upstreams | Where-Object { $_ -ne $expected }).Count -gt 0) {
+        throw "Canonical main host $MainPublicHost must proxy exclusively to $expected"
+    }
+}
+
 function Sync-CaddyConfig {
     if (-not (Test-Path -LiteralPath $CanonicalConfigPath -PathType Leaf)) { throw "Canonical Caddy config is missing: $CanonicalConfigPath" }
+    Assert-CaddyConfigContract $CanonicalConfigPath
     $runtimeDirectory = Split-Path -Parent $RuntimeConfigPath
     if ($runtimeDirectory) { New-Item -ItemType Directory -Force -Path $runtimeDirectory | Out-Null }
     $needsSync = -not (Test-Path -LiteralPath $RuntimeConfigPath -PathType Leaf)
