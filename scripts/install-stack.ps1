@@ -139,7 +139,7 @@ $caddySpec = Get-Content -LiteralPath $caddySpecPath -Raw | ConvertFrom-Json
 if ([string]$caddySpec.sha256 -notmatch '^[0-9a-f]{64}$') { throw 'invalid pinned Caddy SHA-256' }
 
 $actions = @(
-    "install MCP runtime on loopback 127.0.0.1:$Port with exactly three process tools",
+    "install MCP runtime on loopback 127.0.0.1:$Port with exactly five connector tools",
     "install local Caddy $($caddySpec.version) on TCP $CaddyHttpsPort for $($origin.Host)",
     'use local-edge owner authorization; no VPS, WireGuard, or Tailscale owner-auth path',
     "install standalone BusyCoordinator into $BusyRoot",
@@ -151,7 +151,7 @@ $actions = @(
     $(if ($NoStart -or $NoAutostart) { 'do not start MCP/Caddy now' } else { 'start MCP and local Caddy now' })
 )
 if ($Plan) {
-    [ordered]@{ ok=$true; plan_only=$true; topology='local-home-direct'; tool_count=3; library_delivery='metadata/resource widget'; source_commit=$sourceCommit; actions=$actions; no_mutation=$true } | ConvertTo-Json -Depth 4
+    [ordered]@{ ok=$true; plan_only=$true; topology='local-home-direct'; tool_count=5; library_delivery='explicit file tools'; source_commit=$sourceCommit; actions=$actions; no_mutation=$true } | ConvertTo-Json -Depth 4
     exit 0
 }
 
@@ -170,7 +170,7 @@ try {
         & npm.cmd run build --silent
         if ($LASTEXITCODE -ne 0) { throw 'MCP build failed' }
         & node.exe scripts/verify-process-contract.mjs
-        if ($LASTEXITCODE -ne 0) { throw 'three-tool MCP process contract verification failed' }
+        if ($LASTEXITCODE -ne 0) { throw 'five-tool MCP connector contract verification failed' }
         & npm.cmd prune --omit=dev --silent
         if ($LASTEXITCODE -ne 0) { throw 'npm production prune failed' }
     } finally { Pop-Location }
@@ -247,8 +247,8 @@ $config = [ordered]@{
     owner_auth_mode = 'local-edge'
     owner_login = $OwnerLogin
     tool_profile = 'process'
-    tool_count = 3
-    library_delivery = 'metadata/resource widget'
+    tool_count = 5
+    library_delivery = 'explicit file tools'
     caddy_exe = $caddyExe
     caddy_config = $caddyFile
     caddy_https_port = $CaddyHttpsPort
@@ -268,7 +268,7 @@ if ($NoAutostart) {
     $principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
     $mcpArgs = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}"' -f (Join-Path $InstallRoot 'mcp\scripts\start-stack.ps1'),$configPath
-    Register-ScheduledTask -TaskName $TaskName -Action (New-ScheduledTaskAction -Execute $pwsh -Argument $mcpArgs -WorkingDirectory (Join-Path $InstallRoot 'mcp')) -Trigger $trigger -Principal $principal -Settings $settings -Description 'Local ChatGPT MCP three-tool backend' -Force | Out-Null
+    Register-ScheduledTask -TaskName $TaskName -Action (New-ScheduledTaskAction -Execute $pwsh -Argument $mcpArgs -WorkingDirectory (Join-Path $InstallRoot 'mcp')) -Trigger $trigger -Principal $principal -Settings $settings -Description 'Local ChatGPT MCP five-tool backend' -Force | Out-Null
     $caddyArgs = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}"' -f (Join-Path $InstallRoot 'mcp\scripts\start-stack-caddy.ps1'),$configPath
     Register-ScheduledTask -TaskName $CaddyTaskName -Action (New-ScheduledTaskAction -Execute $pwsh -Argument $caddyArgs -WorkingDirectory $caddyRoot) -Trigger $trigger -Principal $principal -Settings $settings -Description 'Local ChatGPT MCP HTTPS Caddy edge' -Force | Out-Null
     & (Join-Path $RulesRoot 'Install-AgentRulesCheckoutSyncTask.ps1') -TaskName $RulesSyncTaskName -IntervalMinutes 1
@@ -288,8 +288,8 @@ $doctor = Join-Path $InstallRoot 'mcp\scripts\stack-doctor.ps1'
 & $doctor -ConfigPath $configPath
 if ($LASTEXITCODE -ne 0) { throw 'stack doctor reported an installation failure' }
 [ordered]@{
-    ok=$true; topology='local-home-direct'; tool_count=3; tools=@('start_process','read_output','kill_process')
-    library_delivery='metadata/resource widget (not a tool)'; source_commit=$sourceCommit; install_root=$InstallRoot
+    ok=$true; topology='local-home-direct'; tool_count=5; tools=@('start_process','read_output','kill_process','upload_local_file','download_chatgpt_file')
+    library_delivery='explicit file tools'; source_commit=$sourceCommit; install_root=$InstallRoot
     config_path=$configPath; mcp_url=$mcpUrl; local_health=("http://127.0.0.1:{0}/health" -f $Port); local_https_port=$CaddyHttpsPort
     busy_command=(Join-Path $BusyRoot 'busy-python.cmd'); rules_root=$RulesRoot; plan_only_profile=$planProfile
     agent_entrypoints=[bool]$WithAgentEntrypoints; autostart=(-not $NoAutostart)
