@@ -20,6 +20,12 @@ const MAX_COMPLETED_PROCESSES = 64;
 const TASKKILL_TIMEOUT_MS = 5_000;
 const KILL_SETTLE_MS = 1_000;
 const DEFAULT_MAX_LIVE_PER_CALLER = 5;
+// One PowerShell tool call can own a shell plus descendants/conhost. Bound the shared
+// MCP host fan-out separately from the per-caller limit so many callers/clones cannot
+// multiply five live roots into a machine-wide process storm.
+const DEFAULT_MAX_LIVE_TOTAL = 12;
+const MAX_CONFIGURED_LIVE_TOTAL = 32;
+const HOST_ADMISSION_DIRECTORY = ".host-admission";
 const CONTROL_POLL_MS = 100;
 const CONTROL_HANDOFF_OVERHEAD_MS = 1_500;
 const CONTROL_KILL_TIMEOUT_MS = TASKKILL_TIMEOUT_MS + KILL_SETTLE_MS + CONTROL_HANDOFF_OVERHEAD_MS;
@@ -28,6 +34,7 @@ const CONTROL_PRUNE_INTERVAL_MS = 60_000;
 
 type ProcessManagerOptions = {
   maxLivePerCaller?: number;
+  maxLiveTotal?: number;
   maxCompletedProcesses?: number;
   receiptDirectory?: string;
 };
@@ -146,6 +153,14 @@ class BoundedCapture {
 }
 
 type OutputCursor = { stdout: number; stderr: number };
+
+type HostAdmissionRecord = {
+  version: 1;
+  process_id: string;
+  manager_pid: number;
+  child_pid: number | null;
+  claimed_at: string;
+};
 
 type ProcessState = {
   id: string;
@@ -704,8 +719,11 @@ export class ProcessManager {
   private readonly processes = new Map<string, ProcessState>();
   private readonly outputCursors = new Map<string, OutputCursor>();
   private readonly maxLivePerCaller: number;
+  private readonly maxLiveTotal: number;
   private readonly maxCompletedProcesses: number;
   private readonly receiptDirectory?: string;
+  private readonly hostAdmissionDirectory?: string;
+  private readonly hostAdmissionSlots = new Map<string, string>();
   private readonly receiptArchiveDirectory?: string;
   private readonly controlRequestDirectory?: string;
   private readonly controlResponseDirectory?: string;
@@ -717,11 +735,17 @@ export class ProcessManager {
 
   constructor(options: ProcessManagerOptions = {}) {
     this.maxLivePerCaller = options.maxLivePerCaller ?? DEFAULT_MAX_LIVE_PER_CALLER;
+    this.maxLiveTotal = options.maxLiveTotal ?? DEFAULT_MAX_LIVE_TOTAL;
+    if (!Number.isInteger(this.maxLiveTotal) || this.maxLiveTotal < 1 || this.maxLiveTotal > MAX_CONFIGURED_LIVE_TOTAL) {
+      throw new Error(`maxLiveTotal must be an integer between 1 and ${MAX_CONFIGURED_LIVE_TOTAL}`);
+    }
     this.maxCompletedProcesses = options.maxCompletedProcesses ?? MAX_COMPLETED_PROCESSES;
     this.launcherWorker = sharedPowerShellWorker();
     this.receiptDirectory = options.receiptDirectory ? resolve(options.receiptDirectory) : undefined;
     if (this.receiptDirectory) {
       mkdirSync(this.receiptDirectory, { recursive: true });
+      this.hostAdmissionDirectory = join(this.receiptDirectory, HOST_ADMISSION_DIRECTORY);
+      mkdirSync(this.hostAdmissionDirectory, { recursive: true });
       this.receiptArchiveDirectory = join(this.receiptDirectory, "archive");
       mkdirSync(this.receiptArchiveDirectory, { recursive: true });
       this.controlRequestDirectory = join(this.receiptDirectory, ".control", "requests");
@@ -735,6 +759,110 @@ export class ProcessManager {
     }
   }
 
+  private pidIsAlive(pid: number): boolean {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    if (pid === process.pid) return true;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      // EPERM means the PID exists but this process cannot signal it. Unknown probe
+      // failures are also treated as live so admission fails closed instead of
+      // reclaiming another backend's slot.
+      return (error as NodeJS.ErrnoException).code !== "ESRCH";
+    }
+  }
+
+  private readHostAdmissionRecord(path: string): HostAdmissionRecord | undefined {
+    try {
+      const record = JSON.parse(readFileSync(path, "utf8")) as Partial<HostAdmissionRecord>;
+      if (
+        record.version !== 1 ||
+        typeof record.process_id !== "string" ||
+        !Number.isInteger(record.manager_pid) || Number(record.manager_pid) <= 0 ||
+        (record.child_pid !== null && (!Number.isInteger(record.child_pid) || Number(record.child_pid) <= 0)) ||
+        typeof record.claimed_at !== "string"
+      ) return undefined;
+      return record as HostAdmissionRecord;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private tryReclaimStaleHostAdmissionSlot(path: string): boolean {
+    const record = this.readHostAdmissionRecord(path);
+    if (!record) return false;
+    if (this.pidIsAlive(record.manager_pid)) return false;
+    if (record.child_pid !== null && this.pidIsAlive(record.child_pid)) return false;
+    try {
+      unlinkSync(path);
+      emitTelemetry({ event: "process_host_admission_stale_slot_reclaimed", process_id: record.process_id, manager_pid: record.manager_pid, child_pid: record.child_pid });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private rejectHostAdmission(callerId: string, ownerContext: TelemetryContext, liveCount: number): never {
+    emitTelemetry({
+      event: "process_host_concurrency_rejected",
+      owner_caller_id: callerId,
+      live_process_count: liveCount,
+      max_live_processes: this.maxLiveTotal,
+    }, ownerContext);
+    throw new Error(`start_process_host_concurrency_limited: shared MCP host already has ${liveCount} live process slots; max=${this.maxLiveTotal}; use read_output/kill_process on existing work before starting more`);
+  }
+
+  private claimHostAdmissionSlot(processId: string, callerId: string, claimedAt: string, ownerContext: TelemetryContext): void {
+    if (!this.hostAdmissionDirectory) {
+      const liveCount = this.liveProcessCount();
+      if (liveCount >= this.maxLiveTotal) this.rejectHostAdmission(callerId, ownerContext, liveCount);
+      return;
+    }
+
+    const record: HostAdmissionRecord = { version: 1, process_id: processId, manager_pid: process.pid, child_pid: null, claimed_at: claimedAt };
+    for (let index = 0; index < this.maxLiveTotal; index += 1) {
+      const path = join(this.hostAdmissionDirectory, `${index}.json`);
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          writeFileSync(path, JSON.stringify(record), { encoding: "utf8", flag: "wx" });
+          this.hostAdmissionSlots.set(processId, path);
+          return;
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code !== "EEXIST") {
+            emitTelemetry({ event: "process_host_admission_error", owner_caller_id: callerId, error_message: error instanceof Error ? error.message : String(error) }, ownerContext);
+            throw new Error(`start_process_host_admission_unavailable: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          if (attempt === 0 && this.tryReclaimStaleHostAdmissionSlot(path)) continue;
+          break;
+        }
+      }
+    }
+    this.rejectHostAdmission(callerId, ownerContext, this.maxLiveTotal);
+  }
+
+  private updateHostAdmissionChildPid(processId: string, childPid: number): void {
+    const path = this.hostAdmissionSlots.get(processId);
+    if (!path) return;
+    const record = this.readHostAdmissionRecord(path);
+    if (!record || record.process_id !== processId || record.manager_pid !== process.pid) return;
+    try {
+      writeFileSync(path, JSON.stringify({ ...record, child_pid: childPid }), { encoding: "utf8", flag: "w" });
+    } catch (error) {
+      emitTelemetry({ event: "process_host_admission_update_error", process_id: processId, child_pid: childPid, error_message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  private releaseHostAdmissionSlot(processId: string): void {
+    const path = this.hostAdmissionSlots.get(processId);
+    if (!path) return;
+    this.hostAdmissionSlots.delete(processId);
+    const record = this.readHostAdmissionRecord(path);
+    if (!record || record.process_id !== processId || record.manager_pid !== process.pid) return;
+    try { unlinkSync(path); } catch { /* a concurrent stale-slot cleanup may already have removed it */ }
+  }
+
   private observeTerminal(state: ProcessState, code: number | null, signal: NodeJS.Signals | null): void {
     if (state.terminalObserved) return;
     state.terminalObserved = true;
@@ -746,6 +874,7 @@ export class ProcessManager {
     if (signal) state.signal = signal;
     state.finishedAt = finishedAt;
     state.launching = false;
+    this.releaseHostAdmissionSlot(state.id);
     this.markProcessChanged(state);
     emitTelemetry({ event: "process_exit_observed", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, exit_code: state.exitCode, signal: state.signal ?? null, started_at: state.startedAt, finished_at: state.finishedAt }, state.ownerContext);
     sharedLauncherHandlers.delete(state.id);
@@ -760,6 +889,7 @@ export class ProcessManager {
     if (message.type === "started" && Number.isInteger(message.pid) && message.pid > 0) {
       state.pid = message.pid;
       state.launching = false;
+      this.updateHostAdmissionChildPid(state.id, state.pid);
       emitTelemetry({ event: "process_started", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, cwd: state.cwd, started_at: state.startedAt }, state.ownerContext);
       if (state.killRequested) this.launcherWorker.postMessage({ type: "kill", requestId: state.id });
       return;
@@ -1347,19 +1477,29 @@ export class ProcessManager {
     }
     const liveForCaller = [...this.processes.values()].filter((state) => state.exitCode === null && state.callerId === callerId);
     if (liveForCaller.length >= this.maxLivePerCaller) throw new Error(`start_process_concurrency_limited: caller already has ${liveForCaller.length} live processes; active_process_ids=${liveForCaller.map((state) => state.id).join(",")}`);
-    let resolveDone!: () => void;
-    const done = new Promise<void>((resolve) => { resolveDone = resolve; });
     const ownerContext = currentTelemetryContext();
     if (sharedLauncherFailure) throw new Error(`process_launcher_unavailable: ${sharedLauncherFailure}`);
+    const processId = randomUUID();
+    const startedAt = new Date().toISOString();
+    this.claimHostAdmissionSlot(processId, callerId, startedAt, ownerContext);
+    let resolveDone!: () => void;
+    const done = new Promise<void>((resolve) => { resolveDone = resolve; });
     const state: ProcessState = {
-      id: randomUUID(), pid: 0, callerId, ownerContext, command: effectiveCommand, ...(normalization.changed ? { submittedCommand: command } : {}), cwd,
+      id: processId, pid: 0, callerId, ownerContext, command: effectiveCommand, ...(normalization.changed ? { submittedCommand: command } : {}), cwd,
       launching: true, terminalObserved: false, resolveDone, killRequested: false,
-      stdout: new BoundedCapture(), stderr: new BoundedCapture(), startedAt: new Date().toISOString(), exitCode: null,
+      stdout: new BoundedCapture(), stderr: new BoundedCapture(), startedAt, exitCode: null,
       done, revision: 0, lastReadRevisionByCaller: new Map<string, number>(), waiters: new Set<() => void>(),
     };
     this.processes.set(state.id, state);
     sharedLauncherHandlers.set(state.id, (message) => this.handleLauncherMessage(message));
-    this.launcherWorker.postMessage({ type: "launch", requestId: state.id, command: effectiveCommand, cwd });
+    try {
+      this.launcherWorker.postMessage({ type: "launch", requestId: state.id, command: effectiveCommand, cwd });
+    } catch (error) {
+      sharedLauncherHandlers.delete(state.id);
+      this.processes.delete(state.id);
+      this.releaseHostAdmissionSlot(state.id);
+      throw error;
+    }
     if (normalization.changed) emitTelemetry({ event: "process_command_normalized", process_id: state.id, rewrite: "control_statement_pipeline_capture" }, state.ownerContext);
     emitTelemetry({ event: "process_launch_queued", process_id: state.id, owner_caller_id: state.callerId, cwd: state.cwd, started_at: state.startedAt }, state.ownerContext);
     return { ...processResponseState(state.startedAt, true), process_id: state.id, pid: 0, cwd: state.cwd, running: true, launching: true } as const;
