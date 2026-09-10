@@ -77,6 +77,35 @@ try {
   for (const process of liveProcesses) await concurrencyManager.kill(process.process_id).catch(() => undefined);
 }
 
+assert.throws(() => new ProcessManager({ maxLiveTotal: 0 }), /maxLiveTotal must be an integer between 1 and 32/);
+assert.throws(() => new ProcessManager({ maxLiveTotal: 33 }), /maxLiveTotal must be an integer between 1 and 32/);
+
+const hostAdmissionDirectory = mkdtempSync(join(tmpdir(), "mcp-host-admission-"));
+const hostAdmissionProcesses = [];
+try {
+  const firstManager = new ProcessManager({ receiptDirectory: hostAdmissionDirectory, maxLiveTotal: 2 });
+  const secondManager = new ProcessManager({ receiptDirectory: hostAdmissionDirectory, maxLiveTotal: 2 });
+  hostAdmissionProcesses.push(firstManager.start("Start-Sleep -Seconds 10 # host slot one", undefined, "caller_host_slot_one"));
+  hostAdmissionProcesses.push(secondManager.start("Start-Sleep -Seconds 10 # host slot two", undefined, "caller_host_slot_two"));
+  assert.throws(
+    () => firstManager.start("Start-Sleep -Seconds 10 # host slot blocked", undefined, "caller_host_slot_three"),
+    /start_process_host_concurrency_limited/,
+    "distinct callers and ProcessManager instances sharing one receipt root must not bypass the host cap",
+  );
+  await firstManager.kill(hostAdmissionProcesses[0].process_id);
+  const replacement = secondManager.start("Start-Sleep -Seconds 10 # host slot replacement", undefined, "caller_host_slot_three");
+  hostAdmissionProcesses.push(replacement);
+  assert.equal(replacement.running, true, "host admission capacity must return after an owned process exits");
+} finally {
+  const cleanupManagers = [
+    new ProcessManager({ receiptDirectory: hostAdmissionDirectory, maxLiveTotal: 2 }),
+  ];
+  for (const process of hostAdmissionProcesses) {
+    for (const manager of cleanupManagers) await manager.kill(process.process_id).catch(() => undefined);
+  }
+  rmSync(hostAdmissionDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}
+
 const drainStatusManager = new ProcessManager();
 let drainStatusProcess;
 try {
@@ -293,4 +322,4 @@ try {
 } finally {
   rmSync(receiptChurnDirectory, { recursive: true, force: true });
 }
-console.log("PASS process guard enforces duplicate reuse, live concurrency, protected control-plane kill refusal, restart receipts, cross-clone control, fast-start collapse, compact no-change waits, nonblocking zero-wait, and bounded-wait behavior, and time-based receipt retention");
+console.log("PASS process guard enforces duplicate reuse, per-caller and shared-host live concurrency, protected control-plane kill refusal, restart receipts, cross-clone control, fast-start collapse, compact no-change waits, nonblocking zero-wait, and bounded-wait behavior, and time-based receipt retention");
