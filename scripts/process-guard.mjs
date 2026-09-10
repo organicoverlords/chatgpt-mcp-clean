@@ -60,7 +60,7 @@ const liveProcesses = [];
 let concurrencyRejection;
 let otherCallerProcess;
 try {
-  for (let index = 1; index <= 6; index += 1) {
+  for (let index = 1; index <= 5; index += 1) {
     try {
       liveProcesses.push(concurrencyManager.start(`Start-Sleep -Seconds 5 # ${index}`, undefined, "caller_concurrency_test"));
     } catch (error) {
@@ -68,7 +68,7 @@ try {
       break;
     }
   }
-  assert.ok(concurrencyRejection instanceof Error, "a sixth simultaneous process from one caller must be rejected");
+  assert.ok(concurrencyRejection instanceof Error, "a fifth simultaneous process from one caller must be rejected");
   assert.match(concurrencyRejection.message, /start_process_concurrency_limited/);
   otherCallerProcess = concurrencyManager.start("Start-Sleep -Seconds 5 # other caller", undefined, "caller_concurrency_test_other");
   assert.equal(otherCallerProcess.running, true, "one caller's live-process cap must not block another caller");
@@ -80,69 +80,34 @@ try {
 assert.throws(() => new ProcessManager({ maxLiveTotal: 0 }), /maxLiveTotal must be an integer between 1 and 80/);
 assert.doesNotThrow(() => new ProcessManager({ maxLiveTotal: 80 }), "explicit 80-process shared-host ceiling must be supported");
 assert.throws(() => new ProcessManager({ maxLiveTotal: 81 }), /maxLiveTotal must be an integer between 1 and 80/);
-assert.throws(() => new ProcessManager({ minFreeMemoryPct: 0 }), /minFreeMemoryPct must be a finite number between 1 and 50/);
-assert.throws(() => new ProcessManager({ minFreeMemoryPct: 51 }), /minFreeMemoryPct must be a finite number between 1 and 50/);
-assert.throws(() => new ProcessManager({ minFreeMemoryPct: Number.NaN }), /minFreeMemoryPct must be a finite number between 1 and 50/);
 
-let memorySample = { freeBytes: 8_000, totalBytes: 10_000 };
-const memoryPressureManager = new ProcessManager({ minFreeMemoryPct: 10, memoryProbe: () => memorySample });
-let memoryPressureProcess;
-let memoryPressureReplacement;
+const uncappedDefaultDirectory = mkdtempSync(join(tmpdir(), "mcp-uncapped-default-"));
 try {
-  memoryPressureProcess = memoryPressureManager.start("Start-Sleep -Seconds 10 # memory pressure existing", undefined, "caller_memory_pressure_existing");
-  memorySample = { freeBytes: 500, totalBytes: 10_000 };
-  const existingState = memoryPressureManager.read(memoryPressureProcess.process_id);
-  assert.equal(existingState.running, true, "read_output semantics must remain available while new starts are memory-gated");
-  assert.throws(
-    () => memoryPressureManager.start("Start-Sleep -Seconds 10 # memory pressure blocked", undefined, "caller_memory_pressure_blocked"),
-    /start_process_host_memory_pressure_limited: shared MCP host has 5\.0% free physical memory; minimum=10%; use read_output\/kill_process/,
-    "a new direct start must fail before launch under severe physical-memory pressure",
-  );
-  await assert.rejects(
-    memoryPressureManager.startWithWait("Write-Output 'SHOULD_NOT_START'", join(tmpdir(), "missing-memory-pressure-cwd"), "caller_memory_pressure_wait", 0),
-    /start_process_host_memory_pressure_limited/,
-    "startWithWait must memory-gate before even validating a potentially cold working-directory path",
-  );
-  await memoryPressureManager.kill(memoryPressureProcess.process_id);
-  memoryPressureProcess = undefined;
-  memorySample = { freeBytes: 1_500, totalBytes: 10_000 };
-  memoryPressureReplacement = memoryPressureManager.start("Write-Output 'MEMORY_PRESSURE_RECOVERED'", undefined, "caller_memory_pressure_recovered");
-  const recovered = await waitForExit(memoryPressureManager, memoryPressureReplacement.process_id);
-  assert.match(recovered.stdout, /MEMORY_PRESSURE_RECOVERED/, "new launches must recover automatically when free memory rises above the threshold");
+  new ProcessManager({ receiptDirectory: uncappedDefaultDirectory });
+  assert.equal(existsSync(join(uncappedDefaultDirectory, ".host-admission")), false, "default ProcessManager must not create shared-host admission slots");
 } finally {
-  if (memoryPressureProcess) await memoryPressureManager.kill(memoryPressureProcess.process_id).catch(() => undefined);
-  if (memoryPressureReplacement) await memoryPressureManager.kill(memoryPressureReplacement.process_id).catch(() => undefined);
+  rmSync(uncappedDefaultDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
-
-const invalidMemoryProbeManager = new ProcessManager({ minFreeMemoryPct: 10, memoryProbe: () => ({ freeBytes: Number.NaN, totalBytes: 10_000 }) });
-assert.throws(
-  () => invalidMemoryProbeManager.start("Write-Output 'SHOULD_NOT_START'", undefined, "caller_memory_probe_invalid"),
-  /start_process_host_memory_probe_unavailable: invalid physical-memory sample/,
-  "invalid memory telemetry must fail closed rather than silently disabling admission protection",
-);
-
 const hostAdmissionDirectory = mkdtempSync(join(tmpdir(), "mcp-host-admission-"));
 const hostAdmissionProcesses = [];
 try {
   const firstManager = new ProcessManager({ receiptDirectory: hostAdmissionDirectory, maxLiveTotal: 2 });
   const secondManager = new ProcessManager({ receiptDirectory: hostAdmissionDirectory, maxLiveTotal: 2 });
-  hostAdmissionProcesses.push(firstManager.start("Start-Sleep -Seconds 10 # host slot one", undefined, "caller_host_slot_one"));
-  hostAdmissionProcesses.push(secondManager.start("Start-Sleep -Seconds 10 # host slot two", undefined, "caller_host_slot_two"));
+  const firstHostProcess = firstManager.start("Start-Sleep -Seconds 10 # host slot one", undefined, "caller_host_slot_one");
+  const secondHostProcess = secondManager.start("Start-Sleep -Seconds 10 # host slot two", undefined, "caller_host_slot_two");
+  hostAdmissionProcesses.push({ manager: firstManager, process: firstHostProcess }, { manager: secondManager, process: secondHostProcess });
   assert.throws(
     () => firstManager.start("Start-Sleep -Seconds 10 # host slot blocked", undefined, "caller_host_slot_three"),
     /start_process_host_concurrency_limited/,
     "distinct callers and ProcessManager instances sharing one receipt root must not bypass the host cap",
   );
-  await firstManager.kill(hostAdmissionProcesses[0].process_id);
+  await firstManager.kill(firstHostProcess.process_id);
   const replacement = secondManager.start("Start-Sleep -Seconds 10 # host slot replacement", undefined, "caller_host_slot_three");
-  hostAdmissionProcesses.push(replacement);
+  hostAdmissionProcesses.push({ manager: secondManager, process: replacement });
   assert.equal(replacement.running, true, "host admission capacity must return after an owned process exits");
 } finally {
-  const cleanupManagers = [
-    new ProcessManager({ receiptDirectory: hostAdmissionDirectory, maxLiveTotal: 2 }),
-  ];
-  for (const process of hostAdmissionProcesses) {
-    for (const manager of cleanupManagers) await manager.kill(process.process_id).catch(() => undefined);
+  for (const item of hostAdmissionProcesses) {
+    await item.manager.kill(item.process.process_id).catch(() => undefined);
   }
   rmSync(hostAdmissionDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
@@ -385,4 +350,4 @@ try {
 } finally {
   rmSync(eightySlotDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
-console.log("PASS process guard enforces duplicate reuse, per-caller and shared-host live concurrency, low-memory start admission, protected control-plane kill refusal, restart receipts, cross-clone control, fast-start collapse, compact no-change waits, nonblocking zero-wait, and bounded-wait behavior, and time-based receipt retention");
+console.log("PASS process guard enforces duplicate reuse, per-caller live concurrency, uncapped shared-host defaults with optional explicit host caps, protected control-plane kill refusal, restart receipts, cross-clone control, fast-start collapse, compact no-change waits, nonblocking zero-wait, and bounded-wait behavior, and time-based receipt retention");

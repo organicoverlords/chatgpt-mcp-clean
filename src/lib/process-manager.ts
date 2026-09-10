@@ -2,7 +2,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdir as mkdirAsync, readFile as readFileAsync, readdir as readdirAsync, rename as renameAsync, stat as statAsync, unlink as unlinkAsync, writeFile as writeFileAsync } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
-import { freemem, totalmem } from "node:os";
 import { Worker } from "node:worker_threads";
 import { currentTelemetryContext, emitTelemetry, withTelemetryContext, type TelemetryContext } from "./transport-telemetry.js";
 
@@ -20,11 +19,8 @@ const RECEIPT_ARCHIVE_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 const MAX_COMPLETED_PROCESSES = 64;
 const TASKKILL_TIMEOUT_MS = 5_000;
 const KILL_SETTLE_MS = 1_000;
-const DEFAULT_MAX_LIVE_PER_CALLER = 5;
-// One PowerShell tool call can own a shell plus descendants/conhost. Bound the shared
-// MCP host fan-out separately from the per-caller limit so many callers/clones cannot
-// multiply five live roots into a machine-wide process storm.
-const DEFAULT_MAX_LIVE_TOTAL = 12;
+const DEFAULT_MAX_LIVE_PER_CALLER = 4;
+// Shared-host concurrency is opt-in only; normal isolation is per caller/GPT.
 const MAX_CONFIGURED_LIVE_TOTAL = 80;
 const HOST_ADMISSION_DIRECTORY = ".host-admission";
 const CONTROL_POLL_MS = 100;
@@ -33,18 +29,11 @@ const CONTROL_KILL_TIMEOUT_MS = TASKKILL_TIMEOUT_MS + KILL_SETTLE_MS + CONTROL_H
 const CONTROL_RETENTION_MS = COMPLETED_RETENTION_MS;
 const CONTROL_PRUNE_INTERVAL_MS = 60_000;
 
-type HostMemorySample = {
-  freeBytes: number;
-  totalBytes: number;
-};
-
 type ProcessManagerOptions = {
   maxLivePerCaller?: number;
   maxLiveTotal?: number;
   maxCompletedProcesses?: number;
   receiptDirectory?: string;
-  minFreeMemoryPct?: number;
-  memoryProbe?: () => HostMemorySample;
 };
 
 type CompletedProcessReceipt = {
@@ -819,10 +808,8 @@ export class ProcessManager {
   private readonly processes = new Map<string, ProcessState>();
   private readonly outputCursors = new Map<string, OutputCursor>();
   private readonly maxLivePerCaller: number;
-  private readonly maxLiveTotal: number;
+  private readonly maxLiveTotal?: number;
   private readonly maxCompletedProcesses: number;
-  private readonly minFreeMemoryPct?: number;
-  private readonly memoryProbe: () => HostMemorySample;
   private readonly receiptDirectory?: string;
   private readonly hostAdmissionDirectory?: string;
   private readonly hostAdmissionSlots = new Map<string, string>();
@@ -837,22 +824,19 @@ export class ProcessManager {
 
   constructor(options: ProcessManagerOptions = {}) {
     this.maxLivePerCaller = options.maxLivePerCaller ?? DEFAULT_MAX_LIVE_PER_CALLER;
-    this.maxLiveTotal = options.maxLiveTotal ?? DEFAULT_MAX_LIVE_TOTAL;
-    if (!Number.isInteger(this.maxLiveTotal) || this.maxLiveTotal < 1 || this.maxLiveTotal > MAX_CONFIGURED_LIVE_TOTAL) {
+    this.maxLiveTotal = options.maxLiveTotal;
+    if (this.maxLiveTotal !== undefined && (!Number.isInteger(this.maxLiveTotal) || this.maxLiveTotal < 1 || this.maxLiveTotal > MAX_CONFIGURED_LIVE_TOTAL)) {
       throw new Error(`maxLiveTotal must be an integer between 1 and ${MAX_CONFIGURED_LIVE_TOTAL}`);
     }
     this.maxCompletedProcesses = options.maxCompletedProcesses ?? MAX_COMPLETED_PROCESSES;
-    this.minFreeMemoryPct = options.minFreeMemoryPct;
-    if (this.minFreeMemoryPct !== undefined && (!Number.isFinite(this.minFreeMemoryPct) || this.minFreeMemoryPct < 1 || this.minFreeMemoryPct > 50)) {
-      throw new Error("minFreeMemoryPct must be a finite number between 1 and 50");
-    }
-    this.memoryProbe = options.memoryProbe ?? (() => ({ freeBytes: freemem(), totalBytes: totalmem() }));
     this.launcherWorker = sharedPowerShellWorker();
     this.receiptDirectory = options.receiptDirectory ? resolve(options.receiptDirectory) : undefined;
     if (this.receiptDirectory) {
       mkdirSync(this.receiptDirectory, { recursive: true });
-      this.hostAdmissionDirectory = join(this.receiptDirectory, HOST_ADMISSION_DIRECTORY);
-      mkdirSync(this.hostAdmissionDirectory, { recursive: true });
+      if (this.maxLiveTotal !== undefined) {
+        this.hostAdmissionDirectory = join(this.receiptDirectory, HOST_ADMISSION_DIRECTORY);
+        mkdirSync(this.hostAdmissionDirectory, { recursive: true });
+      }
       this.receiptArchiveDirectory = join(this.receiptDirectory, "archive");
       mkdirSync(this.receiptArchiveDirectory, { recursive: true });
       this.controlRequestDirectory = join(this.receiptDirectory, ".control", "requests");
@@ -910,62 +894,27 @@ export class ProcessManager {
     }
   }
 
-  private assertHostMemoryHeadroom(callerId: string, ownerContext: TelemetryContext): void {
-    if (this.minFreeMemoryPct === undefined) return;
-    let sample: HostMemorySample;
-    try {
-      sample = this.memoryProbe();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      emitTelemetry({ event: "process_host_memory_probe_error", owner_caller_id: callerId, error_message: message }, ownerContext);
-      throw new Error(`start_process_host_memory_probe_unavailable: ${message}`);
-    }
-    const freeBytes = Number(sample.freeBytes);
-    const totalBytes = Number(sample.totalBytes);
-    if (!Number.isFinite(freeBytes) || !Number.isFinite(totalBytes) || freeBytes < 0 || totalBytes <= 0 || freeBytes > totalBytes) {
-      emitTelemetry({
-        event: "process_host_memory_probe_error",
-        owner_caller_id: callerId,
-        system_free_memory_bytes: Number.isFinite(freeBytes) ? freeBytes : null,
-        system_total_memory_bytes: Number.isFinite(totalBytes) ? totalBytes : null,
-        error_message: "invalid physical-memory sample",
-      }, ownerContext);
-      throw new Error("start_process_host_memory_probe_unavailable: invalid physical-memory sample");
-    }
-    const freePct = 100 * freeBytes / totalBytes;
-    if (freePct >= this.minFreeMemoryPct) return;
-    const roundedFreePct = Math.round(freePct * 10) / 10;
-    emitTelemetry({
-      event: "process_host_memory_pressure_rejected",
-      owner_caller_id: callerId,
-      system_free_memory_bytes: freeBytes,
-      system_total_memory_bytes: totalBytes,
-      system_free_memory_pct: roundedFreePct,
-      min_free_memory_pct: this.minFreeMemoryPct,
-      live_process_count: this.liveProcessCount(),
-    }, ownerContext);
-    throw new Error(`start_process_host_memory_pressure_limited: shared MCP host has ${roundedFreePct.toFixed(1)}% free physical memory; minimum=${this.minFreeMemoryPct}%; use read_output/kill_process on existing work and retry after memory pressure clears`);
-  }
-
-  private rejectHostAdmission(callerId: string, ownerContext: TelemetryContext, liveCount: number): never {
+  private rejectHostAdmission(callerId: string, ownerContext: TelemetryContext, liveCount: number, maxLiveTotal: number): never {
     emitTelemetry({
       event: "process_host_concurrency_rejected",
       owner_caller_id: callerId,
       live_process_count: liveCount,
-      max_live_processes: this.maxLiveTotal,
+      max_live_processes: maxLiveTotal,
     }, ownerContext);
-    throw new Error(`start_process_host_concurrency_limited: shared MCP host already has ${liveCount} live process slots; max=${this.maxLiveTotal}; use read_output/kill_process on existing work before starting more`);
+    throw new Error(`start_process_host_concurrency_limited: shared MCP host already has ${liveCount} live process slots; max=${maxLiveTotal}; use read_output/kill_process on existing work before starting more`);
   }
 
   private claimHostAdmissionSlot(processId: string, callerId: string, claimedAt: string, ownerContext: TelemetryContext): void {
+    const maxLiveTotal = this.maxLiveTotal;
+    if (maxLiveTotal === undefined) return;
     if (!this.hostAdmissionDirectory) {
       const liveCount = this.liveProcessCount();
-      if (liveCount >= this.maxLiveTotal) this.rejectHostAdmission(callerId, ownerContext, liveCount);
+      if (liveCount >= maxLiveTotal) this.rejectHostAdmission(callerId, ownerContext, liveCount, maxLiveTotal);
       return;
     }
 
     const record: HostAdmissionRecord = { version: 1, process_id: processId, manager_pid: process.pid, child_pid: null, claimed_at: claimedAt };
-    for (let index = 0; index < this.maxLiveTotal; index += 1) {
+    for (let index = 0; index < maxLiveTotal; index += 1) {
       const path = join(this.hostAdmissionDirectory, `${index}.json`);
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
@@ -983,7 +932,7 @@ export class ProcessManager {
         }
       }
     }
-    this.rejectHostAdmission(callerId, ownerContext, this.maxLiveTotal);
+    this.rejectHostAdmission(callerId, ownerContext, maxLiveTotal, maxLiveTotal);
   }
 
   private updateHostAdmissionChildPid(processId: string, childPid: number): void {
@@ -1603,8 +1552,6 @@ export class ProcessManager {
   }
 
   start(command: string, workingDirectory?: string, callerId = "caller_unknown"): { mcp_status: "OK"; process_state: "RUNNING" | "COMPLETED"; elapsed_ms: number; next_action: "READ_SAME_PROCESS_ID" | "STOP_READING"; process_id: string; pid: number; cwd: string; running: boolean; launching?: boolean } {
-    const ownerContext = currentTelemetryContext();
-    this.assertHostMemoryHeadroom(callerId, ownerContext);
     this.pruneCompleted();
     const normalization = normalizePowerShellControlStatementPipelines(command);
     const effectiveCommand = normalization.command;
@@ -1623,6 +1570,7 @@ export class ProcessManager {
     }
     const liveForCaller = [...this.processes.values()].filter((state) => state.exitCode === null && state.callerId === callerId);
     if (liveForCaller.length >= this.maxLivePerCaller) throw new Error(`start_process_concurrency_limited: caller already has ${liveForCaller.length} live processes; active_process_ids=${liveForCaller.map((state) => state.id).join(",")}`);
+    const ownerContext = currentTelemetryContext();
     if (sharedLauncherFailure) throw new Error(`process_launcher_unavailable: ${sharedLauncherFailure}`);
     const processId = randomUUID();
     const startedAt = new Date().toISOString();
@@ -1656,7 +1604,6 @@ export class ProcessManager {
     callerId = "caller_unknown",
     waitMs = 750,
   ): Promise<Record<string, unknown>> {
-    this.assertHostMemoryHeadroom(callerId, currentTelemetryContext());
     const cwd = await boundedValidatedCwd(workingDirectory);
     const started = this.start(command, cwd, callerId);
     const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
