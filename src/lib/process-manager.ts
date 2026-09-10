@@ -302,6 +302,94 @@ function driveRootRecursiveScanError(command: string, code: string): string | un
   return undefined;
 }
 
+function hasUnescapedPowerShellExpansion(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] !== "$" || !/[A-Za-z0-9_?^$({]/.test(value[index + 1] || "")) continue;
+    let backticks = 0;
+    for (let cursor = index - 1; cursor >= 0 && value[cursor] === "`"; cursor -= 1) backticks += 1;
+    if (backticks % 2 === 0) return true;
+  }
+  return false;
+}
+
+function nestedPowerShellCommandExpansionError(command: string, code: string): string | undefined {
+  const shellPattern = /\b(?:powershell|pwsh)(?:\.exe)?\b/gi;
+  for (const shell of code.matchAll(shellPattern)) {
+    const shellStart = shell.index ?? 0;
+    const boundaryOffset = code.slice(shellStart).search(/[;\r\n]/);
+    const segmentEnd = boundaryOffset < 0 ? command.length : shellStart + boundaryOffset;
+    const visibleSegment = code.slice(shellStart, segmentEnd);
+    const commandOption = /-(?:Command)\b/i.exec(visibleSegment);
+    if (!commandOption) continue;
+    const optionEnd = shellStart + commandOption.index + commandOption[0].length;
+    let payloadStart = optionEnd;
+    while (payloadStart < segmentEnd && /\s/.test(command[payloadStart]!)) payloadStart += 1;
+    if (command[payloadStart] !== '"') continue;
+    const payload = command.slice(payloadStart + 1, segmentEnd);
+    if (hasUnescapedPowerShellExpansion(payload)) {
+      return "nested powershell/pwsh -Command double-quoted payload contains parent-expandable $ syntax; use C:\\Users\\Lauri\\.agents\\Invoke-LiteralScript.ps1 to transport the child script literally";
+    }
+  }
+  return undefined;
+}
+
+function vaultRootMentioned(rawSegment: string): boolean {
+  const userProfile = (process.env.USERPROFILE || "").trim();
+  const roots = [
+    ...(userProfile ? [join(userProfile, "Desktop", "vault")] : []),
+    String.raw`$env:USERPROFILE\Desktop\vault`,
+    String.raw`%USERPROFILE%\Desktop\vault`,
+  ].map((value) => value.replaceAll("/", "\\").toLowerCase());
+  const normalized = rawSegment.replaceAll("/", "\\").toLowerCase();
+  const delimiter = (char: string | undefined) => !char || /[\s,;)|"'`=]/.test(char);
+  for (const root of roots) {
+    let offset = 0;
+    while (offset < normalized.length) {
+      const index = normalized.indexOf(root, offset);
+      if (index < 0) break;
+      const before = index > 0 ? normalized[index - 1] : undefined;
+      const afterIndex = index + root.length;
+      const after = normalized[afterIndex];
+      const exactBoundary = delimiter(before) && (delimiter(after) || (after === "\\" && (delimiter(normalized[afterIndex + 1]) || normalized[afterIndex + 1] === "*")));
+      if (exactBoundary) return true;
+      offset = index + root.length;
+    }
+  }
+  return false;
+}
+
+function vaultRootRecursiveScanError(command: string, code: string): string | undefined {
+  const boundaries = [...code.matchAll(/[;\r\n]/g)].map((match) => match.index ?? 0);
+  const starts = [0, ...boundaries.map((index) => index + 1)];
+  const ends = [...boundaries, command.length];
+  for (let segmentIndex = 0; segmentIndex < starts.length; segmentIndex += 1) {
+    const start = starts[segmentIndex]!;
+    const end = ends[segmentIndex]!;
+    const rawSegment = command.slice(start, end);
+    const codeSegment = code.slice(start, end);
+    if (!vaultRootMentioned(rawSegment)) continue;
+    if (/\b(?:Get-ChildItem|gci|dir|ls)\b/i.test(codeSegment) && /-(?:Recurse|r)\b/i.test(codeSegment)) {
+      return "recursive enumeration from the Vault root is blocked; use memory_bank.py/indexed lookup, an exact path, or an explicit Vault subdirectory";
+    }
+    if (/\b(?:rg|rg\.exe|ripgrep|fd|fd\.exe)\b/i.test(codeSegment)) {
+      return "recursive native search from the Vault root is blocked; use memory_bank.py/indexed lookup, an exact path, or an explicit Vault subdirectory";
+    }
+    if (/\bwhere(?:\.exe)?\b/i.test(codeSegment) && /\/R\b/i.test(codeSegment)) {
+      return "recursive native search from the Vault root is blocked; use memory_bank.py/indexed lookup, an exact path, or an explicit Vault subdirectory";
+    }
+    if (/\bfindstr(?:\.exe)?\b/i.test(codeSegment) && /\/S\b/i.test(codeSegment)) {
+      return "recursive native search from the Vault root is blocked; use memory_bank.py/indexed lookup, an exact path, or an explicit Vault subdirectory";
+    }
+    if (/\bcmd(?:\.exe)?\b/i.test(codeSegment) && /\bdir\b/i.test(codeSegment) && /\/S\b/i.test(codeSegment)) {
+      return "recursive native enumeration from the Vault root is blocked; use memory_bank.py/indexed lookup, an exact path, or an explicit Vault subdirectory";
+    }
+    if (/\btree(?:\.com|\.exe)?\b/i.test(codeSegment)) {
+      return "Vault root tree enumeration is blocked; use memory_bank.py/indexed lookup, an exact path, or an explicit Vault subdirectory";
+    }
+  }
+  return undefined;
+}
+
 function p3BuildSlotWaitError(command: string, code: string): string | undefined {
   const invokesP3Build = /\bInvoke-P3(?:HotSource)?Build\.ps1\b/i.test(command);
   const waitProcess = /\bWait-Process\b/i.test(code);
@@ -580,8 +668,12 @@ function normalizePowerShellControlStatementPipelines(command: string): PowerShe
 
 function powershellPreflightError(command: string): string | undefined {
   const code = powershellCodeMask(command);
+  const nestedCommandError = nestedPowerShellCommandExpansionError(command, code);
+  if (nestedCommandError) return nestedCommandError;
   const rootScanError = driveRootRecursiveScanError(command, code);
   if (rootScanError) return rootScanError;
+  const vaultScanError = vaultRootRecursiveScanError(command, code);
+  if (vaultScanError) return vaultScanError;
   const p3BuildWaitError = p3BuildSlotWaitError(command, code);
   if (p3BuildWaitError) return p3BuildWaitError;
   const swarmRouteError = swarmRouteDecisionIsolationError(command, code);
