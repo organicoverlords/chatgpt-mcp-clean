@@ -60,7 +60,7 @@ const liveProcesses = [];
 let concurrencyRejection;
 let otherCallerProcess;
 try {
-  for (let index = 1; index <= 6; index += 1) {
+  for (let index = 1; index <= 5; index += 1) {
     try {
       liveProcesses.push(concurrencyManager.start(`Start-Sleep -Seconds 5 # ${index}`, undefined, "caller_concurrency_test"));
     } catch (error) {
@@ -68,7 +68,7 @@ try {
       break;
     }
   }
-  assert.ok(concurrencyRejection instanceof Error, "a sixth simultaneous process from one caller must be rejected");
+  assert.ok(concurrencyRejection instanceof Error, "a fifth simultaneous process from one caller must be rejected");
   assert.match(concurrencyRejection.message, /start_process_concurrency_limited/);
   otherCallerProcess = concurrencyManager.start("Start-Sleep -Seconds 5 # other caller", undefined, "caller_concurrency_test_other");
   assert.equal(otherCallerProcess.running, true, "one caller's live-process cap must not block another caller");
