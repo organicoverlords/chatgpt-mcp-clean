@@ -299,6 +299,92 @@ function driveRootRecursiveScanError(command: string, code: string): string | un
   return undefined;
 }
 
+function tempRootMentioned(rawSegment: string): boolean {
+  const roots = [
+    process.env.TEMP || "",
+    process.env.TMP || "",
+    process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "Temp") : "",
+    String.raw`$env:TEMP`,
+    String.raw`$env:TMP`,
+    String.raw`$env:LOCALAPPDATA\Temp`,
+    String.raw`%TEMP%`,
+    String.raw`%TMP%`,
+    String.raw`%LOCALAPPDATA%\Temp`,
+  ].filter(Boolean).map((value) => value.replaceAll("/", "\\").toLowerCase());
+  const normalized = rawSegment.replaceAll("/", "\\").toLowerCase();
+  const delimiter = (char: string | undefined) => !char || /[\s,;)|"'`=]/.test(char);
+  for (const root of new Set(roots)) {
+    let offset = 0;
+    while (offset < normalized.length) {
+      const index = normalized.indexOf(root, offset);
+      if (index < 0) break;
+      const before = index > 0 ? normalized[index - 1] : undefined;
+      const afterIndex = index + root.length;
+      const after = normalized[afterIndex];
+      const exactBoundary = delimiter(before) && (delimiter(after) || (after === "\\" && (delimiter(normalized[afterIndex + 1]) || normalized[afterIndex + 1] === "*")));
+      if (exactBoundary) return true;
+      offset = index + root.length;
+    }
+  }
+  return false;
+}
+
+function tempRootRecursiveScanError(command: string, code: string): string | undefined {
+  const boundaries = [...code.matchAll(/[;\r\n]/g)].map((match) => match.index ?? 0);
+  const starts = [0, ...boundaries.map((index) => index + 1)];
+  const ends = [...boundaries, command.length];
+  const tempEnumerationVariables = new Set<string>();
+
+  for (let segmentIndex = 0; segmentIndex < starts.length; segmentIndex += 1) {
+    const start = starts[segmentIndex]!;
+    const end = ends[segmentIndex]!;
+    const rawSegment = command.slice(start, end);
+    const codeSegment = code.slice(start, end);
+    if (!tempRootMentioned(rawSegment)) continue;
+
+    const producer = /\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:Get-ChildItem|gci|dir|ls)\b/i.exec(codeSegment);
+    if (producer) tempEnumerationVariables.add(producer[1]!.toLowerCase());
+
+    if (/\b(?:Get-ChildItem|gci|dir|ls)\b/i.test(codeSegment) && /-(?:Recurse|r)\b/i.test(codeSegment)) {
+      return "recursive enumeration from the Temp root is blocked; use one explicit Temp subdirectory";
+    }
+    if (/\b(?:rg|rg\.exe|ripgrep|fd|fd\.exe)\b/i.test(codeSegment)) {
+      return "recursive native search from the Temp root is blocked; use one explicit Temp subdirectory";
+    }
+    if (/\bwhere(?:\.exe)?\b/i.test(codeSegment) && /\/R\b/i.test(codeSegment)) {
+      return "recursive native search from the Temp root is blocked; use one explicit Temp subdirectory";
+    }
+    if (/\bfindstr(?:\.exe)?\b/i.test(codeSegment) && /\/S\b/i.test(codeSegment)) {
+      return "recursive native search from the Temp root is blocked; use one explicit Temp subdirectory";
+    }
+    if (/\bcmd(?:\.exe)?\b/i.test(codeSegment) && /\bdir\b/i.test(codeSegment) && /\/S\b/i.test(codeSegment)) {
+      return "recursive native enumeration from the Temp root is blocked; use one explicit Temp subdirectory";
+    }
+    if (/\btree(?:\.com|\.exe)?\b/i.test(codeSegment)) {
+      return "Temp-root tree enumeration is blocked; use one explicit Temp subdirectory";
+    }
+  }
+
+  // A broad root enumeration can be cheap at launch yet explode into many expensive
+  // recursive walks in a foreach body. This exact pattern drove the 2026-09-10
+  // paging/stall incident, so reject it before the first child is admitted.
+  for (const producerVariable of tempEnumerationVariables) {
+    const loop = new RegExp(`\\bforeach\\s*\\(\\s*\\$([A-Za-z_][A-Za-z0-9_]*)\\s+in\\s+\\$${producerVariable}\\b`, "gi");
+    for (const match of code.matchAll(loop)) {
+      const itemVariable = String(match[1] || "");
+      if (!itemVariable) continue;
+      const itemReference = `\\$${itemVariable}(?:\\.FullName)?\\b`;
+      const recurseAfterItem = new RegExp(`\\b(?:Get-ChildItem|gci|dir|ls)\\b[^}]{0,1200}${itemReference}[^}]{0,1200}-(?:Recurse|r)\\b`, "i");
+      const recurseBeforeItem = new RegExp(`\\b(?:Get-ChildItem|gci|dir|ls)\\b[^}]{0,1200}-(?:Recurse|r)\\b[^}]{0,1200}${itemReference}`, "i");
+      const loopRemainder = code.slice(match.index ?? 0);
+      if (recurseAfterItem.test(loopRemainder) || recurseBeforeItem.test(loopRemainder)) {
+        return "recursive Temp-root fan-out is blocked; enumerate or recurse one explicit Temp subdirectory at a time";
+      }
+    }
+  }
+  return undefined;
+}
+
 function hasUnescapedPowerShellExpansion(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
     if (value[index] !== "$" || !/[A-Za-z0-9_?^$({]/.test(value[index + 1] || "")) continue;
@@ -671,6 +757,8 @@ function powershellPreflightError(command: string): string | undefined {
   if (rootScanError) return rootScanError;
   const vaultScanError = vaultRootRecursiveScanError(command, code);
   if (vaultScanError) return vaultScanError;
+  const tempScanError = tempRootRecursiveScanError(command, code);
+  if (tempScanError) return tempScanError;
   const p3BuildWaitError = p3BuildSlotWaitError(command, code);
   if (p3BuildWaitError) return p3BuildWaitError;
   const swarmRouteError = swarmRouteDecisionIsolationError(command, code);
