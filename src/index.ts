@@ -11,6 +11,7 @@ import { callerId } from "./lib/caller-id.js";
 import { BoundedJsonlWriter } from "./lib/bounded-jsonl.js";
 import { LocalOAuthProvider } from "./lib/local-oauth-provider.js";
 import { observeSocket, sessionFingerprint, setTelemetrySink, withTelemetryContext } from "./lib/transport-telemetry.js";
+import { startStallWatchdog } from "./lib/stall-watchdog.js";
 import { createResponseByteCounter } from "./lib/response-bytes.js";
 import { createServer, processRuntimeStatus } from "./server.js";
 import { registerOptionalVisualProofTools } from "./lib/visual-proof-registration.js";
@@ -91,6 +92,16 @@ const transportLogWriter = new BoundedJsonlWriter(transportLogPath, {
 });
 let activeRequests = 0;
 let totalRequests = 0;
+const stallWatchdog = startStallWatchdog({
+  transportLogPath,
+  logPath: process.env.MCP_STALL_LOG_PATH,
+  serverPid: process.pid,
+  backendGeneration: backendGeneration ?? null,
+  runtimeIdentity,
+  getActiveRequests: () => activeRequests,
+  getTotalRequests: () => totalRequests,
+  onError: (error) => transportLog({ event: "stall_watchdog_error", error_message: error.message }),
+});
 
 function transportLog(event: Record<string, unknown>): void {
   transportLogWriter.writeJson({ at: new Date().toISOString(), server_pid: process.pid, ...event });
@@ -290,7 +301,7 @@ httpServer.on("error", (error) => transportLog({ event: "http_server_error", err
 
 const stop = (signal: "SIGINT" | "SIGTERM") => {
   transportLog({ event: "process_signal", signal });
-  httpServer.close(() => { void transportLogWriter.close().finally(() => process.exit(0)); });
+  httpServer.close(() => { void Promise.all([transportLogWriter.close(), stallWatchdog.close()]).finally(() => process.exit(0)); });
   setTimeout(() => process.exit(1), 5_000).unref();
 };
 process.on("SIGINT", () => stop("SIGINT"));
