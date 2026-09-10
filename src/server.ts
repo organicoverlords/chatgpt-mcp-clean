@@ -14,9 +14,11 @@ const toolProfile = (process.env.MCP_TOOL_PROFILE || "process").trim().toLowerCa
 if (toolProfile !== "full" && toolProfile !== "process") throw new Error("MCP_TOOL_PROFILE must be full or process");
 const fullToolProfile = toolProfile === "full";
 const configuredMaxLiveProcesses = Number(process.env.MCP_MAX_LIVE_PROCESSES || 12);
+const configuredMinFreeMemoryPct = Number(process.env.MCP_MIN_FREE_MEMORY_PCT || 10);
 const processManager = new ProcessManager({
   receiptDirectory: resolve(process.env.MCP_PROCESS_RECEIPT_DIR || ".state/process-receipts"),
   maxLiveTotal: configuredMaxLiveProcesses,
+  minFreeMemoryPct: configuredMinFreeMemoryPct,
 });
 const liveSessions = new Set<string>();
 const busyStore = fullToolProfile ? new BusyStore((scope) => {
