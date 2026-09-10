@@ -56,6 +56,10 @@ assert.equal(zstd.headers.get("x-file-transfer-encoding"), "zstd-1");
 assert.ok(zstd.body.length < text.length / 10, "zstd should materially shrink compressible transfer bytes");
 assert.equal(zstdDecompressSync(zstd.body).compare(text), 0, "zstd transfer must decode to exact original bytes");
 
+const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z7WQAAAAASUVORK5CYII=", "base64");
+const pngPath = join(dir, "original.png");
+await writeFile(pngPath, png);
+
 const media = randomBytes(256 * 1024);
 const mediaPath = join(dir, "proof.mp4");
 await writeFile(mediaPath, media);
@@ -112,6 +116,19 @@ assert.ok(listedByName.download_chatgpt_file.outputSchema, "download tool must d
   assert.deepEqual(fileSchema?.required, ["download_url", "file_id"]);
   assert.deepEqual(Object.keys(fileSchema?.properties || {}).sort(), ["download_url", "file_id", "file_name", "mime_type"]);
 
+  const imageUpload = await client.callTool({ name: "upload_local_file", arguments: { path: pngPath } });
+  const imageLink = imageUpload.content.find((entry) => entry.type === "resource_link");
+  assert.ok(imageLink, "image upload must return a same-turn resource_link for native vision");
+  assert.equal(imageLink.mimeType, "image/png");
+  assert.equal(imageLink.size, png.length, "image resource_link must describe the exact original byte count");
+  const originalResource = await client.readResource({ uri: imageLink.uri });
+  const originalBlob = originalResource.contents[0]?.blob;
+  assert.ok(originalBlob, "image resource must expose original bytes");
+  assert.equal(Buffer.from(originalBlob, "base64").compare(png), 0, "model vision resource must be byte-for-byte the original image, not a thumbnail");
+
+  const textUpload = await client.callTool({ name: "upload_local_file", arguments: { path: textPath } });
+  assert.equal(textUpload.content.some((entry) => entry.type === "resource_link"), false, "non-image uploads must not add image resource content");
+
   const resource = await client.readResource({ uri: FILE_TRANSFER_WIDGET_URI });
   const meta = resource.contents[0]?._meta;
   assert.deepEqual(meta?.ui?.csp?.connectDomains, ["https://mcp.example.test"]);
@@ -122,8 +139,11 @@ assert.ok(listedByName.download_chatgpt_file.outputSchema, "download tool must d
 }
 
 const widget = fileTransferWidgetHtml();
+assert.match(widget, /<img id="image" class="image"/);
+assert.match(widget, /imageEl\.src=URL\.createObjectURL\(blob\)/, "widget must render an inline preview from the exact fetched image bytes");
+assert.match(widget, /const file=new File\(\[blob\],p\.file_name/, "Library upload must reuse the same exact bytes shown in the preview");
 assert.match(widget, /uploadFile\(file,\{library:true\}\)/);
 assert.match(widget, /crypto\.subtle\.digest\('SHA-256',data\)/);
 assert.doesNotMatch(widget, /getFileDownloadUrl|callTool\(/, "download path should not need a widget round trip");
 
-console.log("PASS lossless file transfer: raw bytes, zstd, native file params, isolated upload widget");
+console.log("PASS lossless file transfer: exact original image vision resource, inline preview, raw bytes, zstd, native file params");
