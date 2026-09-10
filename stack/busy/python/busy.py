@@ -122,11 +122,23 @@ def load_state(store: Path) -> dict:
         raise RuntimeError(f"cannot safely read BUSY store: {store}: {exc}") from exc
     if not isinstance(data, dict) or not isinstance(data.get("claims"), list):
         raise RuntimeError("invalid BUSY store shape")
-    claims = []
+    claims_by_scope: dict[str, dict] = {}
     for claim in data["claims"]:
-        if isinstance(claim, dict) and all(isinstance(claim.get(k), str) for k in ("actor", "scope", "timestamp")):
-            claims.append({"actor": claim["actor"], "scope": claim["scope"], "timestamp": claim["timestamp"]})
-    data["claims"] = claims
+        if not (isinstance(claim, dict) and all(isinstance(claim.get(k), str) for k in ("actor", "scope", "timestamp"))):
+            continue
+        scope = canonical_scope(claim["scope"])
+        normalized = {"actor": claim["actor"], "scope": scope, "timestamp": claim["timestamp"]}
+        previous = claims_by_scope.get(scope)
+        if previous is None:
+            claims_by_scope[scope] = normalized
+            continue
+        if previous["actor"] != normalized["actor"]:
+            raise RuntimeError(f"conflicting BUSY claims canonicalize to one scope: {scope}")
+        # Same-owner aliases represent one exact mutation resource. Preserve the
+        # newest receipt so compatibility writers cannot resurrect an older spelling.
+        if normalized["timestamp"] > previous["timestamp"]:
+            claims_by_scope[scope] = normalized
+    data["claims"] = list(claims_by_scope.values())
     coord = data.get("coordinator")
     if not isinstance(coord, dict):
         coord = {}
