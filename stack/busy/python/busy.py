@@ -13,7 +13,8 @@ REPLACE_TIMEOUT_S = 0.5
 REPLACE_RETRY_S = 0.01
 TEMP_STALE_S = 60.0
 MAX_SWEEP_TEMP_ITEMS = 32
-DEFAULT_LEASE_S = 3600
+DEFAULT_LEASE_S = 240
+MAX_LEASE_S = 240
 MAX_OPERATIONS = 512
 
 
@@ -38,17 +39,45 @@ def parse_iso(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def capped_lease_seconds(value: int) -> int:
+    # BUSY is collision avoidance only. A heartbeat can prove ownership for at
+    # most four more minutes; callers cannot extend a lock beyond that horizon.
+    return max(1, min(int(value), MAX_LEASE_S))
+
+
+def capped_lease_expiry(claim_timestamp: str, raw_lease: object = None) -> str:
+    cap = parse_iso(claim_timestamp) + timedelta(seconds=MAX_LEASE_S)
+    if isinstance(raw_lease, str):
+        try:
+            return iso(min(parse_iso(raw_lease), cap))
+        except Exception:
+            pass
+    return iso(cap)
+
+
+REPO_SCOPE_ALIASES = {
+    "regression-research": "regression-research",
+    "organicoverlords/regression-research": "regression-research",
+    "agents": "agents",
+    "organicoverlords/agents": "agents",
+}
+
+
 def canonical_scope(scope: str) -> str:
     value = scope.strip()
     if not value:
         raise ValueError("scope must not be empty")
-    # Busy scopes are often logical identifiers and must remain opaque. For an
-    # explicitly absolute filesystem scope, however, Windows spelling aliases
-    # (case, separator style, and `.` segments) name the same mutation resource
-    # and therefore must collide atomically. Keep this lexical: claims may name
-    # files that do not exist yet, so never require filesystem resolution.
+    # Absolute filesystem aliases name one exact mutation resource even when the
+    # file does not exist yet. Keep this lexical and independent of filesystem IO.
     if os.path.isabs(value):
         return os.path.normcase(os.path.normpath(value))
+
+    # Keep arbitrary logical scopes opaque. Normalize only known repository
+    # identities so short and owner-qualified spellings share one collision key.
+    repo, separator, suffix = value.partition(":")
+    canonical_repo = REPO_SCOPE_ALIASES.get(repo.casefold())
+    if canonical_repo is not None:
+        return canonical_repo + (separator + suffix if separator else "")
     return value
 
 
@@ -122,11 +151,23 @@ def load_state(store: Path) -> dict:
         raise RuntimeError(f"cannot safely read BUSY store: {store}: {exc}") from exc
     if not isinstance(data, dict) or not isinstance(data.get("claims"), list):
         raise RuntimeError("invalid BUSY store shape")
-    claims = []
+    claims_by_scope: dict[str, dict] = {}
     for claim in data["claims"]:
-        if isinstance(claim, dict) and all(isinstance(claim.get(k), str) for k in ("actor", "scope", "timestamp")):
-            claims.append({"actor": claim["actor"], "scope": claim["scope"], "timestamp": claim["timestamp"]})
-    data["claims"] = claims
+        if not (isinstance(claim, dict) and all(isinstance(claim.get(k), str) for k in ("actor", "scope", "timestamp"))):
+            continue
+        scope = canonical_scope(claim["scope"])
+        normalized = {"actor": claim["actor"], "scope": scope, "timestamp": claim["timestamp"]}
+        previous = claims_by_scope.get(scope)
+        if previous is None:
+            claims_by_scope[scope] = normalized
+            continue
+        if previous["actor"] != normalized["actor"]:
+            raise RuntimeError(f"conflicting BUSY claims canonicalize to one scope: {scope}")
+        # Same-owner aliases represent one exact mutation resource. Preserve the
+        # newest receipt so compatibility writers cannot resurrect an older spelling.
+        if normalized["timestamp"] > previous["timestamp"]:
+            claims_by_scope[scope] = normalized
+    data["claims"] = list(claims_by_scope.values())
     coord = data.get("coordinator")
     if not isinstance(coord, dict):
         coord = {}
@@ -186,10 +227,9 @@ def job_for(state: dict, scope: str):
 
 
 def normalize_jobs(state: dict) -> bool:
-    """Migrate legacy queue/checkpoint records into live ownership metadata only."""
+    """Normalize BUSY lease metadata without inferring any work lifecycle state."""
     jobs = state["coordinator"]["jobs"]
-    claims = {claim["scope"]: claim for claim in state["claims"]}
-    normalized: dict[str, dict] = {}
+    raw_jobs: dict[str, dict] = {}
     known = {"job_id", "scope", "state", "owner", "lease_expires_at", "claim_timestamp", "checkpoint", "updated_at"}
     for raw_scope, raw_job in jobs.items():
         if not isinstance(raw_job, dict):
@@ -198,9 +238,12 @@ def normalize_jobs(state: dict) -> bool:
             scope = canonical_scope(str(raw_job.get("scope") or raw_scope))
         except ValueError:
             continue
-        claim = claims.get(scope)
-        if claim is None:
-            continue
+        raw_jobs[scope] = raw_job
+
+    normalized: dict[str, dict] = {}
+    for claim in state["claims"]:
+        scope = claim["scope"]
+        raw_job = raw_jobs.get(scope, {})
         checkpoint = raw_job.get("checkpoint") if isinstance(raw_job.get("checkpoint"), str) else None
         extra = {key: value for key, value in raw_job.items() if key not in known}
         normalized[scope] = {
@@ -208,7 +251,7 @@ def normalize_jobs(state: dict) -> bool:
             "scope": scope,
             "state": "active",
             "owner": claim["actor"],
-            "lease_expires_at": raw_job.get("lease_expires_at") if isinstance(raw_job.get("lease_expires_at"), str) else None,
+            "lease_expires_at": capped_lease_expiry(claim["timestamp"], raw_job.get("lease_expires_at")),
             "claim_timestamp": claim["timestamp"],
             "checkpoint": checkpoint,
             "updated_at": claim["timestamp"],
@@ -217,7 +260,6 @@ def normalize_jobs(state: dict) -> bool:
     changed = normalized != jobs
     state["coordinator"]["jobs"] = normalized
     return changed
-
 
 
 def compact_job(job: dict) -> dict:
@@ -399,13 +441,6 @@ def sweep_expired(state: dict) -> tuple[list[dict], bool]:
             continue
         current = claim_for(state, scope)
         if current and current.get("actor") == owner:
-            expected_timestamp = job.get("claim_timestamp")
-            if isinstance(expected_timestamp, str) and current.get("timestamp") != expected_timestamp:
-                job["claim_timestamp"] = current.get("timestamp")
-                job["lease_expires_at"] = None
-                job["updated_at"] = current.get("timestamp")
-                changed = True
-                continue
             state["claims"] = [claim for claim in state["claims"] if claim.get("scope") != scope]
         checkpoint = job.get("checkpoint") if isinstance(job.get("checkpoint"), str) else None
         remove_scope_metadata(state, scope)
@@ -480,6 +515,8 @@ def operate(store: Path, command: str, actor: str | None = None, raw_scope: str 
             raise ValueError("actor required")
         if command in {"claim", "heartbeat"}:
             actor = validate_claim_actor(actor)
+        if command in {"claim", "heartbeat"}:
+            lease_seconds = capped_lease_seconds(lease_seconds)
         signature = {"command": command, "scope": scope, "actor": actor}
         if command in {"claim", "heartbeat"}:
             signature["lease_seconds"] = lease_seconds

@@ -9,7 +9,7 @@
 //
 // Usage: node scripts/concurrency-busy.mjs [workers]
 
-import { fork, spawn } from "node:child_process";
+import { fork, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -106,21 +106,34 @@ check(r4[0]?.errorName === "BusyStoreLockError", "claim reported the named lock 
 check(ms4 < 5000, `failed fast in ${ms4}ms (no hang)`, `took ${ms4}ms`);
 rmSync(`${STORE}.lock`, { force: true });
 
-// Test 5: arbitrary task scopes survive the five-minute stale window. Only scopes that
-// explicitly opt into session:/process: lifecycle ownership may be auto-pruned.
-console.log(`\ntest 5 - long-lived task claims persist; ephemeral lifecycle claims expire`);
+// Test 5: BUSY is only a four-minute collision lease. Expiry removes BUSY state only;
+// unrelated continuation metadata must remain untouched for the next worker.
+console.log(`\ntest 5 - collision leases expire after four minutes without cleaning continuation state`);
 resetStore();
 const oldTimestamp = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-writeFileSync(STORE, JSON.stringify({ claims: [
-  { actor: "long-worker", scope: "task:long-running-integration", timestamp: oldTimestamp },
-  { actor: "old-session", scope: "session:gone-session", timestamp: oldTimestamp },
-  { actor: "old-process", scope: "process:00000000-0000-0000-0000-000000000000", timestamp: oldTimestamp },
-] }, null, 2) + "\n", "utf8");
-const durabilityStore = new BusyStore(() => false, STORE);
+writeFileSync(STORE, JSON.stringify({
+  version: 2,
+  continuation: { branch: "chatgpt/keep-work", worker_report: "keep-report.md", issue: 236 },
+  coordinator: {
+    version: 1,
+    jobs: {
+      "task:old-managed": {
+        job_id: "task:old-managed", scope: "task:old-managed", state: "active", owner: "old-managed",
+        lease_expires_at: null, claim_timestamp: oldTimestamp, checkpoint: "must not own recovery", updated_at: oldTimestamp,
+      },
+    },
+  },
+  claims: [
+    { actor: "old-legacy", scope: "task:old-legacy", timestamp: oldTimestamp },
+    { actor: "old-managed", scope: "task:old-managed", timestamp: oldTimestamp },
+  ],
+}, null, 2) + "\n", "utf8");
+const durabilityStore = new BusyStore(() => true, STORE);
 const durableClaims = await durabilityStore.list();
-check(durableClaims.some((claim) => claim.scope === "task:long-running-integration"), "ordinary task claim survives >5 minutes", JSON.stringify(durableClaims));
-check(!durableClaims.some((claim) => claim.scope === "session:gone-session"), "dead session claim is pruned", JSON.stringify(durableClaims));
-check(!durableClaims.some((claim) => claim.scope.startsWith("process:")), "dead process claim is pruned", JSON.stringify(durableClaims));
+check(durableClaims.length === 0, "all collision claims expire after four minutes without heartbeat", JSON.stringify(durableClaims));
+const durableRaw = JSON.parse(readFileSync(STORE, "utf8"));
+check(Object.keys(durableRaw.coordinator?.jobs || {}).length === 0, "expired BUSY lease metadata is removed", JSON.stringify(durableRaw));
+check(durableRaw.continuation?.branch === "chatgpt/keep-work" && durableRaw.continuation?.worker_report === "keep-report.md" && durableRaw.continuation?.issue === 236, "BUSY expiry does not clean or rewrite continuation state", JSON.stringify(durableRaw));
 rmSync(STORE, { force: true });
 
 // Test 6: top-level coordinator metadata survives legacy BUSY mutations. This is the
@@ -139,10 +152,170 @@ compatibilityRaw = JSON.parse(readFileSync(STORE, "utf8"));
 check(compatibilityRaw.coordinator?.jobs?.alpha?.state === "blocked", "coordinator metadata survives release", JSON.stringify(compatibilityRaw));
 rmSync(STORE, { force: true });
 
-// Test 7: Windows readers may allow read/write but deny delete sharing. In that
+// Test 7: the full-profile compatibility writer must produce coordinator-managed
+// metadata so the standalone coordinator does not see new claims as legacy-only.
+console.log(`\ntest 7 - compatibility claims interoperate with standalone coordinator metadata`);
+resetStore();
+const interopStore = new BusyStore(() => false, STORE);
+const interopClaim = await interopStore.claim("ChatGPT:compat-interop", "task:compat-interop");
+let interopRaw = JSON.parse(readFileSync(STORE, "utf8"));
+const interopJob = interopRaw.coordinator?.jobs?.["task:compat-interop"];
+check(interopClaim.ok, "compatibility claim succeeds", JSON.stringify(interopClaim));
+check(interopJob?.state === "active" && interopJob?.owner === "ChatGPT:compat-interop", "compatibility claim writes active coordinator metadata", JSON.stringify(interopRaw));
+const interopLeaseMs = Date.parse(interopJob?.lease_expires_at || "") - Date.parse(interopClaim.claim?.timestamp || "");
+check(interopLeaseMs > 0 && interopLeaseMs <= 4 * 60 * 1000, "compatibility claim lease is capped at four minutes", JSON.stringify(interopJob));
+check(interopJob?.claim_timestamp === interopClaim.claim?.timestamp, "coordinator metadata binds the exact compatibility claim timestamp", JSON.stringify(interopJob));
+
+const pythonExe = process.env.PYTHON || (process.platform === "win32" ? "python" : "python3");
+const coordinatorPath = resolve(ROOT, "stack/busy/busy.py");
+const standalone = spawnSync(pythonExe, [coordinatorPath, "--store", STORE, "snapshot", "--limit", "32"], { encoding: "utf8" });
+check(standalone.status === 0, "standalone coordinator reads compatibility claim", `${standalone.status}: ${standalone.stderr}`);
+let standaloneSnapshot = {};
+try { standaloneSnapshot = JSON.parse(standalone.stdout || "{}"); } catch {}
+check(standaloneSnapshot.counts?.legacy_only_claims === 0, "compatibility claim is not legacy-only", JSON.stringify(standaloneSnapshot));
+check(standaloneSnapshot.counts?.active === 1 && standaloneSnapshot.counts?.claims === 1, "standalone coordinator sees one managed active claim", JSON.stringify(standaloneSnapshot));
+
+const interopRelease = await interopStore.release("ChatGPT:compat-interop", "task:compat-interop");
+check(interopRelease.ok, "compatibility release succeeds", JSON.stringify(interopRelease));
+interopRaw = JSON.parse(readFileSync(STORE, "utf8"));
+check(!interopRaw.coordinator?.jobs?.["task:compat-interop"], "compatibility release removes matching coordinator metadata", JSON.stringify(interopRaw));
+const standaloneAfterRelease = spawnSync(pythonExe, [coordinatorPath, "--store", STORE, "snapshot", "--limit", "32"], { encoding: "utf8" });
+let standaloneReleasedSnapshot = {};
+try { standaloneReleasedSnapshot = JSON.parse(standaloneAfterRelease.stdout || "{}"); } catch {}
+check(standaloneAfterRelease.status === 0 && standaloneReleasedSnapshot.counts?.active === 0 && standaloneReleasedSnapshot.counts?.claims === 0, "standalone coordinator sees clean state after compatibility release", `${standaloneAfterRelease.status}: ${standaloneAfterRelease.stderr} ${standaloneAfterRelease.stdout}`);
+rmSync(STORE, { force: true });
+
+// Test 8: the standalone coordinator caps requested leases at four minutes and migrates
+// legacy raw claims into the same collision-only lease model.
+console.log(`\ntest 8 - standalone heartbeat horizon is capped at four minutes`);
+resetStore();
+const cappedActor = "ChatGPT:lease-cap-test";
+const cappedScope = "task:lease-cap-test";
+const cappedClaim = spawnSync(pythonExe, [coordinatorPath, "--store", STORE, "claim", cappedActor, cappedScope, "--lease-seconds", "3600"], { encoding: "utf8" });
+check(cappedClaim.status === 0, "oversized requested claim lease is accepted and capped", `${cappedClaim.status}: ${cappedClaim.stderr} ${cappedClaim.stdout}`);
+let cappedSnapshotRun = spawnSync(pythonExe, [coordinatorPath, "--store", STORE, "snapshot", "--limit", "32"], { encoding: "utf8" });
+let cappedSnapshot = {};
+try { cappedSnapshot = JSON.parse(cappedSnapshotRun.stdout || "{}"); } catch {}
+let cappedJob = cappedSnapshot.active?.find((job) => job.scope === cappedScope);
+let cappedLeaseMs = Date.parse(cappedJob?.lease_expires_at || "") - Date.parse(cappedJob?.updated_at || "");
+check(cappedSnapshotRun.status === 0 && cappedLeaseMs > 0 && cappedLeaseMs <= 4 * 60 * 1000, "claim cannot reserve collision ownership more than four minutes ahead", JSON.stringify(cappedSnapshot));
+const cappedHeartbeat = spawnSync(pythonExe, [coordinatorPath, "--store", STORE, "heartbeat", cappedActor, cappedScope, "--lease-seconds", "3600"], { encoding: "utf8" });
+check(cappedHeartbeat.status === 0, "oversized heartbeat request is accepted and capped", `${cappedHeartbeat.status}: ${cappedHeartbeat.stderr} ${cappedHeartbeat.stdout}`);
+cappedSnapshotRun = spawnSync(pythonExe, [coordinatorPath, "--store", STORE, "snapshot", "--limit", "32"], { encoding: "utf8" });
+try { cappedSnapshot = JSON.parse(cappedSnapshotRun.stdout || "{}"); } catch {}
+cappedJob = cappedSnapshot.active?.find((job) => job.scope === cappedScope);
+cappedLeaseMs = Date.parse(cappedJob?.lease_expires_at || "") - Date.parse(cappedJob?.updated_at || "");
+check(cappedLeaseMs > 0 && cappedLeaseMs <= 4 * 60 * 1000, "heartbeat can add at most four minutes", JSON.stringify(cappedSnapshot));
+rmSync(STORE, { force: true });
+
+if (process.platform === "win32") {
+  console.log(`\ntest 8b - mixed-case legacy Windows scopes migrate without phantom ownership`);
+  resetStore();
+  const legacyActor = "ChatGPT:legacy-case-recover";
+  const legacyTimestamp = new Date().toISOString();
+  const legacyScope = resolve(ROOT, ".state/Legacy-Case-Recover.txt");
+  const legacyStoredScope = legacyScope.toUpperCase();
+  const legacyLookupScope = legacyScope.toLowerCase();
+  writeFileSync(STORE, JSON.stringify({
+    coordinator: { version: 1, jobs: {}, operations: {} },
+    claims: [{ actor: legacyActor, scope: legacyStoredScope, timestamp: legacyTimestamp }],
+  }, null, 2) + "\n", "utf8");
+  const legacyBefore = spawnSync(pythonExe, [coordinatorPath, "--store", STORE, "snapshot", "--limit", "32"], { encoding: "utf8" });
+  let legacyBeforeSnapshot = {};
+  try { legacyBeforeSnapshot = JSON.parse(legacyBefore.stdout || "{}"); } catch {}
+  const legacyJob = legacyBeforeSnapshot.active?.find((job) => job.scope === legacyLookupScope);
+  const legacyLeaseMs = Date.parse(legacyJob?.lease_expires_at || "") - Date.parse(legacyJob?.updated_at || "");
+  check(legacyBefore.status === 0 && legacyBeforeSnapshot.counts?.legacy_only_claims === 0 && legacyBeforeSnapshot.counts?.active === 1 && legacyLeaseMs <= 4 * 60 * 1000, "legacy raw claim is migrated to a bounded collision lease", `${legacyBefore.status}: ${legacyBefore.stderr} ${legacyBefore.stdout}`);
+  const legacyRecover = spawnSync(pythonExe, [
+    coordinatorPath, "--store", STORE, "recover", legacyActor, legacyLookupScope,
+    "--expected-claim-timestamp", legacyTimestamp,
+    "--operation-id", "test-legacy-case-recover",
+  ], { encoding: "utf8" });
+  let legacyRecoverResult = {};
+  try { legacyRecoverResult = JSON.parse(legacyRecover.stdout || "{}"); } catch {}
+  check(legacyRecover.status === 0 && legacyRecoverResult.ok === true, "mixed-case current claim remains exactly recoverable", `${legacyRecover.status}: ${legacyRecover.stderr} ${legacyRecover.stdout}`);
+  rmSync(STORE, { force: true });
+
+  resetStore();
+  const expiredLegacyTimestamp = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  writeFileSync(STORE, JSON.stringify({ coordinator: { version: 1, jobs: {}, operations: {} }, claims: [{ actor: legacyActor, scope: legacyStoredScope, timestamp: expiredLegacyTimestamp }] }, null, 2) + "\n", "utf8");
+  const expiredLegacy = spawnSync(pythonExe, [coordinatorPath, "--store", STORE, "snapshot", "--limit", "32"], { encoding: "utf8" });
+  let expiredLegacySnapshot = {};
+  try { expiredLegacySnapshot = JSON.parse(expiredLegacy.stdout || "{}"); } catch {}
+  check(expiredLegacy.status === 0 && expiredLegacySnapshot.counts?.claims === 0 && expiredLegacySnapshot.counts?.legacy_only_claims === 0, "legacy claim with no heartbeat expires instead of becoming permanent", `${expiredLegacy.status}: ${expiredLegacy.stderr} ${expiredLegacy.stdout}`);
+  rmSync(STORE, { force: true });
+}
+
+// Test 8c: known repository aliases are one exact collision identity across the
+// TypeScript compatibility writer and standalone Python coordinator.
+console.log(`\ntest 8c - short and owner-qualified repository scopes collide cross-runtime`);
+resetStore();
+const rrShort = "regression-research:git-ref:refs/heads/alias-proof";
+const rrFull = "organicoverlords/regression-research:git-ref:refs/heads/alias-proof";
+const rrOwner = "ChatGPT:ts-repo-alias-owner";
+const rrOther = "ChatGPT:py-repo-alias-other";
+const rrStore = new BusyStore(() => false, STORE);
+const rrClaim = await rrStore.claim(rrOwner, rrShort);
+check(rrClaim.ok && rrClaim.claim?.scope === rrShort, "TypeScript stores the canonical short repository scope", JSON.stringify(rrClaim));
+const pyAliasInspect = spawnSync(pythonExe, [coordinatorPath, "--store", STORE, "inspect", rrFull], { encoding: "utf8" });
+let pyAliasView = {};
+try { pyAliasView = JSON.parse(pyAliasInspect.stdout || "{}"); } catch {}
+check(pyAliasInspect.status === 0 && pyAliasView.claim?.actor === rrOwner && pyAliasView.claim?.scope === rrShort, "standalone Python sees the TypeScript claim through the owner-qualified alias", `${pyAliasInspect.status}: ${pyAliasInspect.stderr} ${pyAliasInspect.stdout}`);
+const pyAliasCollision = spawnSync(pythonExe, [coordinatorPath, "--store", STORE, "claim", rrOther, rrFull], { encoding: "utf8" });
+let pyAliasCollisionResult = {};
+try { pyAliasCollisionResult = JSON.parse(pyAliasCollision.stdout || "{}"); } catch {}
+check(pyAliasCollision.status === 0 && pyAliasCollisionResult.ok === false && pyAliasCollisionResult.reason === "scope_already_claimed", "Python cannot claim the owner-qualified alias around the TypeScript owner", `${pyAliasCollision.status}: ${pyAliasCollision.stderr} ${pyAliasCollision.stdout}`);
+const rrRelease = await rrStore.release(rrOwner, rrFull);
+check(rrRelease.ok, "TypeScript can release its short claim through the owner-qualified alias", JSON.stringify(rrRelease));
+rmSync(STORE, { force: true });
+
+resetStore();
+const agentsShort = "agents:file:RULES.md";
+const agentsFull = "organicoverlords/agents:file:RULES.md";
+const agentsOwner = "ChatGPT:py-agents-alias-owner";
+const agentsOther = "ChatGPT:ts-agents-alias-other";
+const pyAgentsClaim = spawnSync(pythonExe, [coordinatorPath, "--store", STORE, "claim", agentsOwner, agentsShort], { encoding: "utf8" });
+let pyAgentsClaimResult = {};
+try { pyAgentsClaimResult = JSON.parse(pyAgentsClaim.stdout || "{}"); } catch {}
+check(pyAgentsClaim.status === 0 && pyAgentsClaimResult.ok === true, "standalone Python claims the short agents scope", `${pyAgentsClaim.status}: ${pyAgentsClaim.stderr} ${pyAgentsClaim.stdout}`);
+const agentsStore = new BusyStore(() => false, STORE);
+const agentsClaims = await agentsStore.list();
+check(agentsClaims.length === 1 && agentsClaims[0]?.scope === agentsShort && agentsClaims[0]?.actor === agentsOwner, "TypeScript canonicalizes the Python agents claim", JSON.stringify(agentsClaims));
+const agentsCollision = await agentsStore.claim(agentsOther, agentsFull);
+check(agentsCollision.ok === false && agentsCollision.reason === "scope_already_claimed", "TypeScript rejects the owner-qualified agents alias while Python owns the short form", JSON.stringify(agentsCollision));
+const agentsRelease = await agentsStore.release(agentsOwner, agentsFull);
+check(agentsRelease.ok, "TypeScript releases the Python-owned agents scope through its owner-qualified alias", JSON.stringify(agentsRelease));
+rmSync(STORE, { force: true });
+
+// Existing same-owner aliases converge to the newest receipt. Conflicting owners
+// fail closed instead of allowing the loader to choose an arbitrary winner.
+resetStore();
+const aliasOld = new Date(Date.now() - 2_000).toISOString();
+const aliasNew = new Date(Date.now() - 1_000).toISOString();
+writeFileSync(STORE, JSON.stringify({ claims: [
+  { actor: rrOwner, scope: rrFull, timestamp: aliasOld },
+  { actor: rrOwner, scope: rrShort, timestamp: aliasNew },
+] }, null, 2) + "\n", "utf8");
+const sameOwnerAliasStore = new BusyStore(() => false, STORE);
+const sameOwnerAliases = await sameOwnerAliasStore.list();
+check(sameOwnerAliases.length === 1 && sameOwnerAliases[0]?.scope === rrShort && sameOwnerAliases[0]?.timestamp === aliasNew, "same-owner stored aliases converge deterministically to the newest canonical claim", JSON.stringify(sameOwnerAliases));
+rmSync(STORE, { force: true });
+
+resetStore();
+writeFileSync(STORE, JSON.stringify({ claims: [
+  { actor: rrOwner, scope: rrShort, timestamp: aliasOld },
+  { actor: rrOther, scope: rrFull, timestamp: aliasNew },
+] }, null, 2) + "\n", "utf8");
+const conflictingAliasStore = new BusyStore(() => false, STORE);
+let aliasConflictError = "";
+try { await conflictingAliasStore.list(); } catch (error) { aliasConflictError = String(error?.message || error); }
+check(aliasConflictError.includes("conflicting BUSY claims canonicalize to one scope"), "different-owner stored aliases fail closed", aliasConflictError);
+rmSync(STORE, { force: true });
+
+// Test 9: Windows readers may allow read/write but deny delete sharing. In that
 // state rename/replace fails even though an in-place write is legal.
 if (process.platform === "win32") {
-  console.log(`\ntest 7 - Windows reader without delete sharing does not block claim/release`);
+  console.log(`\ntest 9 - Windows reader without delete sharing does not block claim/release`);
   resetStore();
   const ps = [
     "$p=$env:BUSY_TEST_STORE",
