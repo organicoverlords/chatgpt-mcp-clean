@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, rename, rm, stat } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat } from "node:fs/promises";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { basename, dirname, extname, isAbsolute } from "node:path";
@@ -8,7 +8,7 @@ import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { constants as zlibConstants, createZstdCompress } from "node:zlib";
 import type { Request, Response as ExpressResponse } from "express";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 export const FILE_TRANSFER_WIDGET_URI = "ui://process/file-transfer-v1.html";
@@ -89,6 +89,7 @@ export type LocalFileTransfer = {
 };
 
 const localExports = new Map<string, LocalFileTransfer>();
+const localImageResources = new Map<string, LocalFileTransfer>();
 
 function maxFileBytes(): number {
   const configured = Number(process.env.MCP_FILE_TRANSFER_MAX_BYTES || DEFAULT_MAX_FILE_BYTES);
@@ -97,6 +98,7 @@ function maxFileBytes(): number {
 
 function cleanupExpired(now = Date.now()): void {
   for (const [token, item] of localExports) if (item.expires_at <= now) localExports.delete(token);
+  for (const [token, item] of localImageResources) if (item.expires_at <= now) localImageResources.delete(token);
 }
 
 function mimeTypeFor(path: string): string {
@@ -158,6 +160,7 @@ export async function prepareLocalFileTransfer(path: string): Promise<LocalFileT
     expires_at: Date.now() + LOCAL_EXPORT_TTL_MS,
   };
   localExports.set(item.token, item);
+  if (item.mime_type.startsWith("image/")) localImageResources.set(item.token, item);
   return item;
 }
 
@@ -171,6 +174,43 @@ function localTransferMeta(item: LocalFileTransfer) {
     bytes: item.bytes,
     sha256: item.sha256,
   };
+}
+
+function localImageResourceUri(item: LocalFileTransfer): string {
+  return `mcp-upload://file-transfer/${item.token}`;
+}
+
+function localImageResourceLink(item: LocalFileTransfer) {
+  if (!item.mime_type.startsWith("image/")) return null;
+  return {
+    type: "resource_link" as const,
+    uri: localImageResourceUri(item),
+    name: item.file_name,
+    title: item.file_name,
+    description: "Exact original local image for immediate model vision and inline preview",
+    mimeType: item.mime_type,
+    size: item.bytes,
+    annotations: { audience: ["assistant", "user"] as ("assistant" | "user")[] },
+  };
+}
+
+async function localImageResourceContents(uri: string) {
+  cleanupExpired();
+  const parsed = new URL(uri);
+  if (parsed.protocol !== "mcp-upload:" || parsed.hostname !== "file-transfer") throw new Error("unsupported file-transfer image resource URI");
+  const token = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
+  const item = localImageResources.get(token);
+  if (!item) throw new Error("file-transfer image resource is unavailable or expired");
+  const current = await stat(item.path).catch(() => null);
+  if (!current?.isFile() || current.size !== item.bytes || current.mtimeMs !== item.mtime_ms) {
+    localImageResources.delete(token);
+    throw new Error("source image changed after transfer preparation");
+  }
+  const data = await readFile(item.path);
+  if (data.length !== item.bytes) throw new Error("source image size changed while reading");
+  const digest = createHash("sha256").update(data).digest("hex");
+  if (digest !== item.sha256) throw new Error("source image hash changed while reading");
+  return { uri, mimeType: item.mime_type, blob: data.toString("base64") };
 }
 
 function zstdStream() {
@@ -340,6 +380,12 @@ function uploadToolMeta() {
 }
 
 export function registerFileTransferTools(server: McpServer, callerId: string): void {
+  server.registerResource(
+    "file-transfer-image",
+    new ResourceTemplate("mcp-upload://file-transfer/{token}", { list: undefined }),
+    { title: "Exact uploaded image", description: "Original local image bytes exposed for immediate model vision" },
+    async (uri) => ({ contents: [await localImageResourceContents(uri.href)] }),
+  );
   server.registerResource("process-file-transfer-widget", FILE_TRANSFER_WIDGET_URI, {}, async () => ({
     contents: [{
       uri: FILE_TRANSFER_WIDGET_URI,
@@ -360,8 +406,12 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
     },
     async ({ path }) => {
       const item = await prepareLocalFileTransfer(path);
+      const image = localImageResourceLink(item);
       return {
-        content: [{ type: "text" as const, text: JSON.stringify({ caller_id: callerId, status: "ready", file_name: item.file_name, mime_type: item.mime_type, bytes: item.bytes, sha256: item.sha256 }) }],
+        content: [
+          { type: "text" as const, text: JSON.stringify({ caller_id: callerId, status: "ready", file_name: item.file_name, mime_type: item.mime_type, bytes: item.bytes, sha256: item.sha256 }) },
+          ...(image ? [image] : []),
+        ],
         structuredContent: { direction: "local_to_chatgpt", status: "ready", file_name: item.file_name, mime_type: item.mime_type, bytes: item.bytes, sha256: item.sha256 },
         _meta: { file_transfer: localTransferMeta(item) },
       };
@@ -394,10 +444,10 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
 export function fileTransferWidgetHtml(): string {
   return `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color-scheme:light dark}body{margin:0;background:transparent}.status{padding:6px 8px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-word}</style></head>
-<body><div id="status" class="status">FILE_TRANSFER_READY</div>
+<style>:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color-scheme:light dark}body{margin:0;background:transparent}.image{display:none;max-width:100%;height:auto;border-radius:8px}.image.on{display:block}.status{padding:6px 8px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-word}</style>
+<body><img id="image" class="image" alt="Uploaded image"><div id="status" class="status">FILE_TRANSFER_READY</div>
 <script>
-const statusEl=document.getElementById('status');let started='';
+const statusEl=document.getElementById('status');const imageEl=document.getElementById('image');let started='';
 function setStatus(v){statusEl.textContent=v;window.openai?.notifyIntrinsicHeight?.();}
 function hex(bytes){return [...new Uint8Array(bytes)].map(b=>b.toString(16).padStart(2,'0')).join('');}
 function payload(result){return result?._meta?.file_transfer||null;}
@@ -409,7 +459,9 @@ async function render(result){
   const r=await fetch(p.transfer_url,{cache:'no-store'});if(!r.ok)throw new Error('TRANSFER_HTTP_'+r.status);
   const data=await r.arrayBuffer();if(data.byteLength!==p.bytes)throw new Error('BYTE_COUNT_MISMATCH');
   const digest=hex(await crypto.subtle.digest('SHA-256',data));if(digest!==p.sha256)throw new Error('SHA256_MISMATCH');
-  const file=new File([data],p.file_name,{type:p.mime_type});const out=await window.openai.uploadFile(file,{library:true});
+   const blob=new Blob([data],{type:p.mime_type});
+   if(p.mime_type.startsWith('image/')){imageEl.src=URL.createObjectURL(blob);imageEl.classList.add('on');window.openai?.notifyIntrinsicHeight?.();}
+   const file=new File([blob],p.file_name,{type:p.mime_type});const out=await window.openai.uploadFile(file,{library:true});
   const fileId=out?.fileId||'';if(!fileId)throw new Error('UPLOAD_FILE_ID_MISSING');
   window.openai?.setWidgetState?.({modelContent:{file_transfer:{status:'ok',direction:'local_to_chatgpt',fileId,fileName:p.file_name,bytes:p.bytes,sha256:p.sha256}},privateContent:{file_transfer:{status:'ok',fileId,fileName:p.file_name,bytes:p.bytes,sha256:p.sha256}},imageIds:p.mime_type.startsWith('image/')?[fileId]:[]});
   setStatus('FILE_TRANSFER_OK '+p.file_name+' '+p.bytes+' bytes');
