@@ -13,6 +13,7 @@ import { PROCESS_LIBRARY_UPLOAD_WIDGET_URI, processLibraryUploadContent, process
 const toolProfile = (process.env.MCP_TOOL_PROFILE || "process").trim().toLowerCase();
 if (toolProfile !== "full" && toolProfile !== "process") throw new Error("MCP_TOOL_PROFILE must be full or process");
 const fullToolProfile = toolProfile === "full";
+const configuredMaxLiveProcesses = Number(process.env.MCP_MAX_LIVE_PROCESSES || 12);
 const BOOTSTRAP_PROCESS_ALIAS = "bootstrap";
 
 function bootstrapScriptPath(): string {
@@ -58,6 +59,7 @@ async function readBootstrapSnapshot(maxChars = 32_000): Promise<Record<string, 
 
 const processManager = new ProcessManager({
   receiptDirectory: resolve(process.env.MCP_PROCESS_RECEIPT_DIR || ".state/process-receipts"),
+  maxLiveTotal: configuredMaxLiveProcesses,
 });
 const liveSessions = new Set<string>();
 const busyStore = fullToolProfile ? new BusyStore((scope) => {
