@@ -77,8 +77,9 @@ try {
   for (const process of liveProcesses) await concurrencyManager.kill(process.process_id).catch(() => undefined);
 }
 
-assert.throws(() => new ProcessManager({ maxLiveTotal: 0 }), /maxLiveTotal must be an integer between 1 and 32/);
-assert.throws(() => new ProcessManager({ maxLiveTotal: 33 }), /maxLiveTotal must be an integer between 1 and 32/);
+assert.throws(() => new ProcessManager({ maxLiveTotal: 0 }), /maxLiveTotal must be an integer between 1 and 80/);
+assert.doesNotThrow(() => new ProcessManager({ maxLiveTotal: 80 }), "explicit 80-process shared-host ceiling must be supported");
+assert.throws(() => new ProcessManager({ maxLiveTotal: 81 }), /maxLiveTotal must be an integer between 1 and 80/);
 assert.throws(() => new ProcessManager({ minFreeMemoryPct: 0 }), /minFreeMemoryPct must be a finite number between 1 and 50/);
 assert.throws(() => new ProcessManager({ minFreeMemoryPct: 51 }), /minFreeMemoryPct must be a finite number between 1 and 50/);
 assert.throws(() => new ProcessManager({ minFreeMemoryPct: Number.NaN }), /minFreeMemoryPct must be a finite number between 1 and 50/);
@@ -361,5 +362,27 @@ try {
   assert.match(recoveredOldest.stdout, /RECEIPT_CHURN_0/, "receipt churn from other callers must not evict a process before the retention window expires");
 } finally {
   rmSync(receiptChurnDirectory, { recursive: true, force: true });
+}
+const eightySlotDirectory = mkdtempSync(join(tmpdir(), "mcp-host-admission-80-"));
+let eightySlotProcess;
+try {
+  const slots = join(eightySlotDirectory, ".host-admission");
+  const { mkdirSync } = await import("node:fs");
+  mkdirSync(slots, { recursive: true });
+  for (let index = 0; index < 79; index += 1) {
+    writeFileSync(join(slots, `${index}.json`), JSON.stringify({ version: 1, process_id: `occupied-${index}`, manager_pid: process.pid, child_pid: null, claimed_at: new Date().toISOString() }));
+  }
+  const eightySlotManager = new ProcessManager({ receiptDirectory: eightySlotDirectory, maxLiveTotal: 80 });
+  eightySlotProcess = eightySlotManager.start("Start-Sleep -Seconds 10 # slot eighty", undefined, "caller_slot_eighty");
+  assert.equal(eightySlotProcess.running, true, "slot 80 must be admitted");
+  assert.throws(
+    () => eightySlotManager.start("Start-Sleep -Seconds 10 # slot eighty one blocked", undefined, "caller_slot_eighty_one"),
+    /start_process_host_concurrency_limited: shared MCP host already has 80 live process slots; max=80/,
+    "slot 81 must be rejected without requiring 80 real child processes",
+  );
+  await eightySlotManager.kill(eightySlotProcess.process_id);
+  eightySlotProcess = undefined;
+} finally {
+  rmSync(eightySlotDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 console.log("PASS process guard enforces duplicate reuse, per-caller and shared-host live concurrency, low-memory start admission, protected control-plane kill refusal, restart receipts, cross-clone control, fast-start collapse, compact no-change waits, nonblocking zero-wait, and bounded-wait behavior, and time-based receipt retention");
