@@ -6,6 +6,9 @@ import { ProcessManager } from "../dist/lib/process-manager.js";
 
 const manager = new ProcessManager();
 const commandWaitMs = 30_000;
+assert.ok(process.env.USERPROFILE, "USERPROFILE is required for Vault-root preflight test");
+const vaultRoot = join(process.env.USERPROFILE, "Desktop", "vault");
+const psQuote = (value) => value.replaceAll("'", "''");
 
 async function run(command, caller) {
   const result = await manager.startWithWait(command, undefined, caller, commandWaitMs);
@@ -43,6 +46,30 @@ rejects("$PID = 123", /automatic/);
 rejects("$PID++", /automatic/);
 rejects("$args = @('bad')", /automatic/);
 
+const historicalNestedExpansion = String.raw`$childOnlyPath=''; powershell.exe -Command "Test-Path -LiteralPath \"$childOnlyPath\""`;
+rejects(historicalNestedExpansion, /Invoke-LiteralScript\.ps1/);
+rejects(String.raw`pwsh.exe -NoProfile -Command "Write-Output $env:TEMP"`, /parent-expandable/);
+
+const nestedSingleQuoted = await run(String.raw`pwsh.exe -NoProfile -Command 'Write-Output $env:TEMP'`, "caller_nested_single_quoted_allowed");
+assert.equal(nestedSingleQuoted.exit_code, 0, JSON.stringify(nestedSingleQuoted));
+const nestedLiteralDoubleQuoted = await run(String.raw`pwsh.exe -NoProfile -Command "Write-Output NESTED_LITERAL_OK"`, "caller_nested_literal_double_allowed");
+assert.equal(nestedLiteralDoubleQuoted.exit_code, 0, JSON.stringify(nestedLiteralDoubleQuoted));
+assert.match(nestedLiteralDoubleQuoted.stdout, /NESTED_LITERAL_OK/);
+const nestedEscapedVariable = await run("pwsh.exe -NoProfile -Command \"Write-Output `$env:TEMP\"", "caller_nested_escaped_variable_allowed");
+assert.equal(nestedEscapedVariable.exit_code, 0, JSON.stringify(nestedEscapedVariable));
+const encodedChild = Buffer.from("Write-Output 'NESTED_ENCODED_OK'", "utf16le").toString("base64");
+const nestedEncoded = await run(`pwsh.exe -NoProfile -EncodedCommand ${encodedChild}`, "caller_nested_encoded_allowed");
+assert.equal(nestedEncoded.exit_code, 0, JSON.stringify(nestedEncoded));
+assert.match(nestedEncoded.stdout, /NESTED_ENCODED_OK/);
+const nestedFile = await run(String.raw`pwsh.exe -NoProfile -File C:\definitely-missing-mcp-preflight.ps1`, "caller_nested_file_allowed");
+assert.notEqual(nestedFile.exit_code, 0, "missing -File fixture should fail at execution, not preflight");
+const nestedCommandLiteral = await run(String.raw`Write-Output 'pwsh.exe -Command "$env:TEMP"'; # powershell.exe -Command "$childOnlyPath"
+Write-Output 'NESTED_COMMAND_LITERAL_ALLOWED'`, "caller_nested_command_literal_allowed");
+assert.equal(nestedCommandLiteral.exit_code, 0, JSON.stringify(nestedCommandLiteral));
+assert.match(nestedCommandLiteral.stdout, /NESTED_COMMAND_LITERAL_ALLOWED/);
+const unrelatedLaterCommandOption = await run(String.raw`pwsh.exe -NoProfile -File C:\definitely-missing-mcp-preflight.ps1; Write-Output -Command "$env:TEMP"; Write-Output 'NESTED_SEGMENT_BOUNDARY_ALLOWED'`, "caller_nested_segment_boundary_allowed");
+assert.match(unrelatedLaterCommandOption.stdout, /NESTED_SEGMENT_BOUNDARY_ALLOWED/);
+
 const foreachPipelineSubmitted = "foreach ($x in 1,2) { $x } | Measure-Object | Select-Object -ExpandProperty Count";
 const foreachPipeline = await run(foreachPipelineSubmitted, "caller_pwsh_foreach_pipeline_autonormalized");
 assert.equal(foreachPipeline.exit_code, 0, JSON.stringify(foreachPipeline));
@@ -66,6 +93,15 @@ rejects("where.exe /R C:\\ *.txt", /drive[- ]root/);
 rejects("findstr.exe /S needle C:\\*", /drive[- ]root/);
 rejects("cmd.exe /c dir C:\\ /s", /drive[- ]root/);
 rejects("tree.exe C:\\ /F", /drive[- ]root/);
+rejects(`Get-ChildItem -LiteralPath '${psQuote(vaultRoot)}' -Recurse -File | Select-String needle`, /Vault root/);
+rejects(`gci -r "${vaultRoot.replaceAll("\\", "/")}"`, /Vault root/);
+rejects(`rg needle '${psQuote(vaultRoot)}'`, /Vault root/);
+rejects(`where.exe /R "${vaultRoot}" *.txt`, /Vault root/);
+rejects(`findstr.exe /S needle "${vaultRoot}\\*.txt"`, /Vault root/);
+rejects(`cmd.exe /c dir "${vaultRoot}" /s`, /Vault root/);
+rejects(`tree.exe "${vaultRoot}" /F`, /Vault root/);
+rejects(`Get-ChildItem -LiteralPath '$env:USERPROFILE\\Desktop\\vault' -Recurse -File`, /Vault root/);
+rejects(`rg needle '%USERPROFILE%\\Desktop\\vault'`, /Vault root/);
 rejects("$pidToWait=20052; if(Get-Process -Id $pidToWait -ErrorAction SilentlyContinue){'WAIT_FOREIGN_UBT='+$pidToWait; Wait-Process -Id $pidToWait}; 'FOREIGN_UBT_EXITED'", /P3 build-slot waits/);
 rejects("$lane='C:\\work'; $ownerPid=20052; while((Get-Date)-lt (Get-Date).AddMinutes(15)){if(-not (Get-Process -Id $ownerPid -ErrorAction SilentlyContinue)){break}; Start-Sleep -Milliseconds 200}; & (Join-Path $lane 'scripts\\Invoke-P3Build.ps1') -ProjectRoot $lane -Target Editor", /P3 build-slot polling/);
 rejects("Wait-Process -Id 20052; & 'C:\\work\\scripts\\Invoke-P3HotSourceBuild.ps1' -Module P3Gameplay", /P3 build-slot waits/);
@@ -88,6 +124,15 @@ const ordinaryWait = await run("Wait-Process -Id 2147483647 -ErrorAction Silentl
 assert.match(ordinaryWait.stdout, /ORDINARY_WAIT_ALLOWED/);
 const ordinaryMutex = await run("$m=[Threading.Mutex]::new($false,'Local\\McpOrdinaryMutex'); try { [void]$m.WaitOne(1); Write-Output 'ORDINARY_MUTEX_ALLOWED' } finally { try { $m.ReleaseMutex() } catch {}; $m.Dispose() }", "caller_ordinary_mutex_allowed");
 assert.match(ordinaryMutex.stdout, /ORDINARY_MUTEX_ALLOWED/);
+
+const exactVaultRead = await run(`Get-Item -LiteralPath '${psQuote(vaultRoot)}' | Select-Object -ExpandProperty Name`, "caller_exact_vault_read");
+assert.equal(exactVaultRead.exit_code, 0, JSON.stringify(exactVaultRead));
+assert.match(exactVaultRead.stdout, /vault/i);
+const boundedVaultSubdir = await run(`Get-ChildItem -LiteralPath '${psQuote(join(vaultRoot, "04 Operating Contracts", "__mcp_preflight_missing__"))}' -Recurse -ErrorAction SilentlyContinue; Write-Output 'VAULT_SUBDIR_ALLOWED'`, "caller_bounded_vault_subdir");
+assert.equal(boundedVaultSubdir.exit_code, 0, JSON.stringify(boundedVaultSubdir));
+assert.match(boundedVaultSubdir.stdout, /VAULT_SUBDIR_ALLOWED/);
+const indexedVaultHelper = await run(`& python.exe '${psQuote(join(vaultRoot, "tools", "memory_bank.py"))}' --help`, "caller_vault_indexed_helper");
+assert.equal(indexedVaultHelper.exit_code, 0, JSON.stringify(indexedVaultHelper));
 
 const boundedRoot = mkdtempSync(join(tmpdir(), "mcp-bounded-recursion-"));
 try {
@@ -132,4 +177,4 @@ try {
   rmSync(rejectionReceiptDirectory, { recursive: true, force: true });
 }
 
-console.log("PASS powershell_preflight pwsh=7.6.5 ps7_operators=true loop_pipeline_autonormalization=true drive_root_recursion=blocked bounded_recursion=allowed durable_rejections=true");
+console.log("PASS powershell_preflight pwsh=7.6.5 ps7_operators=true loop_pipeline_autonormalization=true nested_command_parent_expansion=blocked drive_root_recursion=blocked vault_root_recursion=blocked bounded_recursion=allowed durable_rejections=true");
