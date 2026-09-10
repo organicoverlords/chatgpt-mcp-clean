@@ -246,6 +246,72 @@ if (process.platform === "win32") {
   rmSync(STORE, { force: true });
 }
 
+// Test 8c: known repository aliases are one exact collision identity across the
+// TypeScript compatibility writer and standalone Python coordinator.
+console.log(`\ntest 8c - short and owner-qualified repository scopes collide cross-runtime`);
+resetStore();
+const rrShort = "regression-research:git-ref:refs/heads/alias-proof";
+const rrFull = "organicoverlords/regression-research:git-ref:refs/heads/alias-proof";
+const rrOwner = "ChatGPT:ts-repo-alias-owner";
+const rrOther = "ChatGPT:py-repo-alias-other";
+const rrStore = new BusyStore(() => false, STORE);
+const rrClaim = await rrStore.claim(rrOwner, rrShort);
+check(rrClaim.ok && rrClaim.claim?.scope === rrShort, "TypeScript stores the canonical short repository scope", JSON.stringify(rrClaim));
+const pyAliasInspect = spawnSync(pythonExe, [coordinatorPath, "--store", STORE, "inspect", rrFull], { encoding: "utf8" });
+let pyAliasView = {};
+try { pyAliasView = JSON.parse(pyAliasInspect.stdout || "{}"); } catch {}
+check(pyAliasInspect.status === 0 && pyAliasView.claim?.actor === rrOwner && pyAliasView.claim?.scope === rrShort, "standalone Python sees the TypeScript claim through the owner-qualified alias", `${pyAliasInspect.status}: ${pyAliasInspect.stderr} ${pyAliasInspect.stdout}`);
+const pyAliasCollision = spawnSync(pythonExe, [coordinatorPath, "--store", STORE, "claim", rrOther, rrFull], { encoding: "utf8" });
+let pyAliasCollisionResult = {};
+try { pyAliasCollisionResult = JSON.parse(pyAliasCollision.stdout || "{}"); } catch {}
+check(pyAliasCollision.status === 0 && pyAliasCollisionResult.ok === false && pyAliasCollisionResult.reason === "scope_already_claimed", "Python cannot claim the owner-qualified alias around the TypeScript owner", `${pyAliasCollision.status}: ${pyAliasCollision.stderr} ${pyAliasCollision.stdout}`);
+const rrRelease = await rrStore.release(rrOwner, rrFull);
+check(rrRelease.ok, "TypeScript can release its short claim through the owner-qualified alias", JSON.stringify(rrRelease));
+rmSync(STORE, { force: true });
+
+resetStore();
+const agentsShort = "agents:file:RULES.md";
+const agentsFull = "organicoverlords/agents:file:RULES.md";
+const agentsOwner = "ChatGPT:py-agents-alias-owner";
+const agentsOther = "ChatGPT:ts-agents-alias-other";
+const pyAgentsClaim = spawnSync(pythonExe, [coordinatorPath, "--store", STORE, "claim", agentsOwner, agentsShort], { encoding: "utf8" });
+let pyAgentsClaimResult = {};
+try { pyAgentsClaimResult = JSON.parse(pyAgentsClaim.stdout || "{}"); } catch {}
+check(pyAgentsClaim.status === 0 && pyAgentsClaimResult.ok === true, "standalone Python claims the short agents scope", `${pyAgentsClaim.status}: ${pyAgentsClaim.stderr} ${pyAgentsClaim.stdout}`);
+const agentsStore = new BusyStore(() => false, STORE);
+const agentsClaims = await agentsStore.list();
+check(agentsClaims.length === 1 && agentsClaims[0]?.scope === agentsShort && agentsClaims[0]?.actor === agentsOwner, "TypeScript canonicalizes the Python agents claim", JSON.stringify(agentsClaims));
+const agentsCollision = await agentsStore.claim(agentsOther, agentsFull);
+check(agentsCollision.ok === false && agentsCollision.reason === "scope_already_claimed", "TypeScript rejects the owner-qualified agents alias while Python owns the short form", JSON.stringify(agentsCollision));
+const agentsRelease = await agentsStore.release(agentsOwner, agentsFull);
+check(agentsRelease.ok, "TypeScript releases the Python-owned agents scope through its owner-qualified alias", JSON.stringify(agentsRelease));
+rmSync(STORE, { force: true });
+
+// Existing same-owner aliases converge to the newest receipt. Conflicting owners
+// fail closed instead of allowing the loader to choose an arbitrary winner.
+resetStore();
+const aliasOld = new Date(Date.now() - 2_000).toISOString();
+const aliasNew = new Date(Date.now() - 1_000).toISOString();
+writeFileSync(STORE, JSON.stringify({ claims: [
+  { actor: rrOwner, scope: rrFull, timestamp: aliasOld },
+  { actor: rrOwner, scope: rrShort, timestamp: aliasNew },
+] }, null, 2) + "\n", "utf8");
+const sameOwnerAliasStore = new BusyStore(() => false, STORE);
+const sameOwnerAliases = await sameOwnerAliasStore.list();
+check(sameOwnerAliases.length === 1 && sameOwnerAliases[0]?.scope === rrShort && sameOwnerAliases[0]?.timestamp === aliasNew, "same-owner stored aliases converge deterministically to the newest canonical claim", JSON.stringify(sameOwnerAliases));
+rmSync(STORE, { force: true });
+
+resetStore();
+writeFileSync(STORE, JSON.stringify({ claims: [
+  { actor: rrOwner, scope: rrShort, timestamp: aliasOld },
+  { actor: rrOther, scope: rrFull, timestamp: aliasNew },
+] }, null, 2) + "\n", "utf8");
+const conflictingAliasStore = new BusyStore(() => false, STORE);
+let aliasConflictError = "";
+try { await conflictingAliasStore.list(); } catch (error) { aliasConflictError = String(error?.message || error); }
+check(aliasConflictError.includes("conflicting BUSY claims canonicalize to one scope"), "different-owner stored aliases fail closed", aliasConflictError);
+rmSync(STORE, { force: true });
+
 // Test 9: Windows readers may allow read/write but deny delete sharing. In that
 // state rename/replace fails even though an in-place write is legal.
 if (process.platform === "win32") {

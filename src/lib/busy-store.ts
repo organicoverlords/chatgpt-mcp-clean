@@ -35,10 +35,26 @@ function isLockContentionError(error: unknown): boolean {
 }
 
 
+const REPO_SCOPE_ALIASES = new Map<string, string>([
+  ["regression-research", "regression-research"],
+  ["organicoverlords/regression-research", "regression-research"],
+  ["agents", "agents"],
+  ["organicoverlords/agents", "agents"],
+]);
+
 function canonicalScope(scope: string): string {
   const value = scope.trim();
   if (!value) throw new Error("scope must not be empty");
-  return isAbsolute(value) ? (process.platform === "win32" ? normalize(value).toLowerCase() : normalize(value)) : value;
+  if (isAbsolute(value)) {
+    return process.platform === "win32" ? normalize(value).toLowerCase() : normalize(value);
+  }
+
+  // Arbitrary logical scopes remain opaque. Only known repository identities
+  // collapse so short and owner-qualified spellings cannot evade one claim.
+  const colon = value.indexOf(":");
+  const repo = (colon === -1 ? value : value.slice(0, colon)).toLowerCase();
+  const canonicalRepo = REPO_SCOPE_ALIASES.get(repo);
+  return canonicalRepo ? canonicalRepo + (colon === -1 ? "" : value.slice(colon)) : value;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

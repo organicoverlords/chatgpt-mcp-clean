@@ -55,17 +55,29 @@ def capped_lease_expiry(claim_timestamp: str, raw_lease: object = None) -> str:
     return iso(cap)
 
 
+REPO_SCOPE_ALIASES = {
+    "regression-research": "regression-research",
+    "organicoverlords/regression-research": "regression-research",
+    "agents": "agents",
+    "organicoverlords/agents": "agents",
+}
+
+
 def canonical_scope(scope: str) -> str:
     value = scope.strip()
     if not value:
         raise ValueError("scope must not be empty")
-    # Busy scopes are often logical identifiers and must remain opaque. For an
-    # explicitly absolute filesystem scope, however, Windows spelling aliases
-    # (case, separator style, and `.` segments) name the same mutation resource
-    # and therefore must collide atomically. Keep this lexical: claims may name
-    # files that do not exist yet, so never require filesystem resolution.
+    # Absolute filesystem aliases name one exact mutation resource even when the
+    # file does not exist yet. Keep this lexical and independent of filesystem IO.
     if os.path.isabs(value):
         return os.path.normcase(os.path.normpath(value))
+
+    # Keep arbitrary logical scopes opaque. Normalize only known repository
+    # identities so short and owner-qualified spellings share one collision key.
+    repo, separator, suffix = value.partition(":")
+    canonical_repo = REPO_SCOPE_ALIASES.get(repo.casefold())
+    if canonical_repo is not None:
+        return canonical_repo + (separator + suffix if separator else "")
     return value
 
 
