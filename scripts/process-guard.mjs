@@ -93,8 +93,9 @@ const hostAdmissionProcesses = [];
 try {
   const firstManager = new ProcessManager({ receiptDirectory: hostAdmissionDirectory, maxLiveTotal: 2 });
   const secondManager = new ProcessManager({ receiptDirectory: hostAdmissionDirectory, maxLiveTotal: 2 });
-  hostAdmissionProcesses.push(firstManager.start("Start-Sleep -Seconds 10 # host slot one", undefined, "caller_host_slot_one"));
-  hostAdmissionProcesses.push(secondManager.start("Start-Sleep -Seconds 10 # host slot two", undefined, "caller_host_slot_two"));
+  const firstHostProcess = firstManager.start("Start-Sleep -Seconds 10 # host slot one", undefined, "caller_host_slot_one");
+  const secondHostProcess = secondManager.start("Start-Sleep -Seconds 10 # host slot two", undefined, "caller_host_slot_two");
+  hostAdmissionProcesses.push({ manager: firstManager, process: firstHostProcess }, { manager: secondManager, process: secondHostProcess });
   assert.throws(
     () => firstManager.start("Start-Sleep -Seconds 10 # host slot blocked", undefined, "caller_host_slot_three"),
     /start_process_host_concurrency_limited/,
