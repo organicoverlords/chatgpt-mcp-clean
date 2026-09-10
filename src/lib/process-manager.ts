@@ -329,6 +329,27 @@ function tempRootMentioned(rawSegment: string): boolean {
   return false;
 }
 
+function topLevelPowerShellPipelineSlices(start: number, end: number, code: string): Array<{ start: number; end: number }> {
+  const slices: Array<{ start: number; end: number }> = [];
+  const stack: string[] = [];
+  const closing: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
+  let sliceStart = start;
+  for (let index = start; index < end; index += 1) {
+    const char = code[index]!;
+    if (char === "(" || char === "[" || char === "{") { stack.push(char); continue; }
+    if (char === ")" || char === "]" || char === "}") {
+      if (stack[stack.length - 1] === closing[char]) stack.pop();
+      continue;
+    }
+    if (char === "|" && stack.length === 0 && code[index - 1] !== "|" && code[index + 1] !== "|") {
+      slices.push({ start: sliceStart, end: index });
+      sliceStart = index + 1;
+    }
+  }
+  slices.push({ start: sliceStart, end });
+  return slices;
+}
+
 function tempRootRecursiveScanError(command: string, code: string): string | undefined {
   const boundaries = [...code.matchAll(/[;\r\n]/g)].map((match) => match.index ?? 0);
   const starts = [0, ...boundaries.map((index) => index + 1)];
@@ -338,30 +359,47 @@ function tempRootRecursiveScanError(command: string, code: string): string | und
   for (let segmentIndex = 0; segmentIndex < starts.length; segmentIndex += 1) {
     const start = starts[segmentIndex]!;
     const end = ends[segmentIndex]!;
-    const rawSegment = command.slice(start, end);
-    const codeSegment = code.slice(start, end);
-    if (!tempRootMentioned(rawSegment)) continue;
+    let tempProducerInPipeline = false;
+    for (const slice of topLevelPowerShellPipelineSlices(start, end, code)) {
+      const rawInvocation = command.slice(slice.start, slice.end);
+      const codeInvocation = code.slice(slice.start, slice.end);
+      const rootMentioned = tempRootMentioned(rawInvocation);
 
-    const producer = /\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:Get-ChildItem|gci|dir|ls)\b/i.exec(codeSegment);
-    if (producer) tempEnumerationVariables.add(producer[1]!.toLowerCase());
+      if (rootMentioned) {
+        const producer = /\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:Get-ChildItem|gci|dir|ls)\b/i.exec(codeInvocation);
+        if (producer) tempEnumerationVariables.add(producer[1]!.toLowerCase());
 
-    if (/\b(?:Get-ChildItem|gci|dir|ls)\b/i.test(codeSegment) && /-(?:Recurse|r)\b/i.test(codeSegment)) {
-      return "recursive enumeration from the Temp root is blocked; use one explicit Temp subdirectory";
-    }
-    if (/\b(?:rg|rg\.exe|ripgrep|fd|fd\.exe)\b/i.test(codeSegment)) {
-      return "recursive native search from the Temp root is blocked; use one explicit Temp subdirectory";
-    }
-    if (/\bwhere(?:\.exe)?\b/i.test(codeSegment) && /\/R\b/i.test(codeSegment)) {
-      return "recursive native search from the Temp root is blocked; use one explicit Temp subdirectory";
-    }
-    if (/\bfindstr(?:\.exe)?\b/i.test(codeSegment) && /\/S\b/i.test(codeSegment)) {
-      return "recursive native search from the Temp root is blocked; use one explicit Temp subdirectory";
-    }
-    if (/\bcmd(?:\.exe)?\b/i.test(codeSegment) && /\bdir\b/i.test(codeSegment) && /\/S\b/i.test(codeSegment)) {
-      return "recursive native enumeration from the Temp root is blocked; use one explicit Temp subdirectory";
-    }
-    if (/\btree(?:\.com|\.exe)?\b/i.test(codeSegment)) {
-      return "Temp-root tree enumeration is blocked; use one explicit Temp subdirectory";
+        if (/\b(?:Get-ChildItem|gci|dir|ls)\b/i.test(codeInvocation) && /-(?:Recurse|r)\b/i.test(codeInvocation)) {
+          return "recursive enumeration from the Temp root is blocked; use one explicit Temp subdirectory";
+        }
+        if (/\b(?:rg|rg\.exe|ripgrep|fd|fd\.exe)\b/i.test(codeInvocation)) {
+          return "recursive native search from the Temp root is blocked; use one explicit Temp subdirectory";
+        }
+        if (/\bwhere(?:\.exe)?\b/i.test(codeInvocation) && /\/R\b/i.test(codeInvocation)) {
+          return "recursive native search from the Temp root is blocked; use one explicit Temp subdirectory";
+        }
+        if (/\bfindstr(?:\.exe)?\b/i.test(codeInvocation) && /\/S\b/i.test(codeInvocation)) {
+          return "recursive native search from the Temp root is blocked; use one explicit Temp subdirectory";
+        }
+        if (/\bcmd(?:\.exe)?\b/i.test(codeInvocation) && /\bdir\b/i.test(codeInvocation) && /\/S\b/i.test(codeInvocation)) {
+          return "recursive native enumeration from the Temp root is blocked; use one explicit Temp subdirectory";
+        }
+        if (/\btree(?:\.com|\.exe)?\b/i.test(codeInvocation)) {
+          return "Temp-root tree enumeration is blocked; use one explicit Temp subdirectory";
+        }
+        if (/\b(?:Get-ChildItem|gci|dir|ls)\b/i.test(codeInvocation)) tempProducerInPipeline = true;
+        continue;
+      }
+
+      if (tempProducerInPipeline && /(?:\bForEach-Object\b|%(?=\s*\{))/i.test(codeInvocation)) {
+        const automaticItem = String.raw`\$(?:_|PSItem)(?:\.FullName)?\b`;
+        const sameStatement = String.raw`[^};|\r\n]{0,1200}`;
+        const recurseAfterItem = new RegExp(`\\b(?:Get-ChildItem|gci|dir|ls)\\b${sameStatement}${automaticItem}${sameStatement}-(?:Recurse|r)\\b`, "i");
+        const recurseBeforeItem = new RegExp(`\\b(?:Get-ChildItem|gci|dir|ls)\\b${sameStatement}-(?:Recurse|r)\\b${sameStatement}${automaticItem}`, "i");
+        if (recurseAfterItem.test(codeInvocation) || recurseBeforeItem.test(codeInvocation)) {
+          return "recursive Temp-root pipeline fan-out is blocked; enumerate or recurse one explicit Temp subdirectory at a time";
+        }
+      }
     }
   }
 
@@ -374,7 +412,7 @@ function tempRootRecursiveScanError(command: string, code: string): string | und
       const itemVariable = String(match[1] || "");
       if (!itemVariable) continue;
       const itemReference = `\\$${itemVariable}(?:\\.FullName)?\\b`;
-      const sameStatement = String.raw`[^};\r\n]{0,1200}`;
+      const sameStatement = String.raw`[^};|\r\n]{0,1200}`;
       const recurseAfterItem = new RegExp(`\\b(?:Get-ChildItem|gci|dir|ls)\\b${sameStatement}${itemReference}${sameStatement}-(?:Recurse|r)\\b`, "i");
       const recurseBeforeItem = new RegExp(`\\b(?:Get-ChildItem|gci|dir|ls)\\b${sameStatement}-(?:Recurse|r)\\b${sameStatement}${itemReference}`, "i");
       const loopRemainder = code.slice(match.index ?? 0);
