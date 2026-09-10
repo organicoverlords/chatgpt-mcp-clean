@@ -25,7 +25,7 @@ const DEFAULT_MAX_LIVE_PER_CALLER = 5;
 // MCP host fan-out separately from the per-caller limit so many callers/clones cannot
 // multiply five live roots into a machine-wide process storm.
 const DEFAULT_MAX_LIVE_TOTAL = 12;
-const MAX_CONFIGURED_LIVE_TOTAL = 32;
+const MAX_CONFIGURED_LIVE_TOTAL = 80;
 const HOST_ADMISSION_DIRECTORY = ".host-admission";
 const CONTROL_POLL_MS = 100;
 const CONTROL_HANDOFF_OVERHEAD_MS = 1_500;
