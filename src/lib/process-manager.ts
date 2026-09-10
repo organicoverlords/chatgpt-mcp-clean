@@ -374,8 +374,9 @@ function tempRootRecursiveScanError(command: string, code: string): string | und
       const itemVariable = String(match[1] || "");
       if (!itemVariable) continue;
       const itemReference = `\\$${itemVariable}(?:\\.FullName)?\\b`;
-      const recurseAfterItem = new RegExp(`\\b(?:Get-ChildItem|gci|dir|ls)\\b[^}]{0,1200}${itemReference}[^}]{0,1200}-(?:Recurse|r)\\b`, "i");
-      const recurseBeforeItem = new RegExp(`\\b(?:Get-ChildItem|gci|dir|ls)\\b[^}]{0,1200}-(?:Recurse|r)\\b[^}]{0,1200}${itemReference}`, "i");
+      const sameStatement = String.raw`[^};\r\n]{0,1200}`;
+      const recurseAfterItem = new RegExp(`\\b(?:Get-ChildItem|gci|dir|ls)\\b${sameStatement}${itemReference}${sameStatement}-(?:Recurse|r)\\b`, "i");
+      const recurseBeforeItem = new RegExp(`\\b(?:Get-ChildItem|gci|dir|ls)\\b${sameStatement}-(?:Recurse|r)\\b${sameStatement}${itemReference}`, "i");
       const loopRemainder = code.slice(match.index ?? 0);
       if (recurseAfterItem.test(loopRemainder) || recurseBeforeItem.test(loopRemainder)) {
         return "recursive Temp-root fan-out is blocked; enumerate or recurse one explicit Temp subdirectory at a time";
