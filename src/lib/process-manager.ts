@@ -21,10 +21,6 @@ const MAX_COMPLETED_PROCESSES = 64;
 const TASKKILL_TIMEOUT_MS = 5_000;
 const KILL_SETTLE_MS = 1_000;
 const DEFAULT_MAX_LIVE_PER_CALLER = 5;
-// One PowerShell tool call can own a shell plus descendants/conhost. Bound the shared
-// MCP host fan-out separately from the per-caller limit so many callers/clones cannot
-// multiply five live roots into a machine-wide process storm.
-const DEFAULT_MAX_LIVE_TOTAL = 12;
 const MAX_CONFIGURED_LIVE_TOTAL = 32;
 const HOST_ADMISSION_DIRECTORY = ".host-admission";
 const CONTROL_POLL_MS = 100;
@@ -819,7 +815,7 @@ export class ProcessManager {
   private readonly processes = new Map<string, ProcessState>();
   private readonly outputCursors = new Map<string, OutputCursor>();
   private readonly maxLivePerCaller: number;
-  private readonly maxLiveTotal: number;
+  private readonly maxLiveTotal?: number;
   private readonly maxCompletedProcesses: number;
   private readonly minFreeMemoryPct?: number;
   private readonly memoryProbe: () => HostMemorySample;
@@ -837,8 +833,8 @@ export class ProcessManager {
 
   constructor(options: ProcessManagerOptions = {}) {
     this.maxLivePerCaller = options.maxLivePerCaller ?? DEFAULT_MAX_LIVE_PER_CALLER;
-    this.maxLiveTotal = options.maxLiveTotal ?? DEFAULT_MAX_LIVE_TOTAL;
-    if (!Number.isInteger(this.maxLiveTotal) || this.maxLiveTotal < 1 || this.maxLiveTotal > MAX_CONFIGURED_LIVE_TOTAL) {
+    this.maxLiveTotal = options.maxLiveTotal;
+    if (this.maxLiveTotal !== undefined && (!Number.isInteger(this.maxLiveTotal) || this.maxLiveTotal < 1 || this.maxLiveTotal > MAX_CONFIGURED_LIVE_TOTAL)) {
       throw new Error(`maxLiveTotal must be an integer between 1 and ${MAX_CONFIGURED_LIVE_TOTAL}`);
     }
     this.maxCompletedProcesses = options.maxCompletedProcesses ?? MAX_COMPLETED_PROCESSES;
@@ -851,8 +847,10 @@ export class ProcessManager {
     this.receiptDirectory = options.receiptDirectory ? resolve(options.receiptDirectory) : undefined;
     if (this.receiptDirectory) {
       mkdirSync(this.receiptDirectory, { recursive: true });
-      this.hostAdmissionDirectory = join(this.receiptDirectory, HOST_ADMISSION_DIRECTORY);
-      mkdirSync(this.hostAdmissionDirectory, { recursive: true });
+      if (this.maxLiveTotal !== undefined) {
+        this.hostAdmissionDirectory = join(this.receiptDirectory, HOST_ADMISSION_DIRECTORY);
+        mkdirSync(this.hostAdmissionDirectory, { recursive: true });
+      }
       this.receiptArchiveDirectory = join(this.receiptDirectory, "archive");
       mkdirSync(this.receiptArchiveDirectory, { recursive: true });
       this.controlRequestDirectory = join(this.receiptDirectory, ".control", "requests");
@@ -947,25 +945,27 @@ export class ProcessManager {
     throw new Error(`start_process_host_memory_pressure_limited: shared MCP host has ${roundedFreePct.toFixed(1)}% free physical memory; minimum=${this.minFreeMemoryPct}%; use read_output/kill_process on existing work and retry after memory pressure clears`);
   }
 
-  private rejectHostAdmission(callerId: string, ownerContext: TelemetryContext, liveCount: number): never {
+  private rejectHostAdmission(callerId: string, ownerContext: TelemetryContext, liveCount: number, maxLiveTotal: number): never {
     emitTelemetry({
       event: "process_host_concurrency_rejected",
       owner_caller_id: callerId,
       live_process_count: liveCount,
-      max_live_processes: this.maxLiveTotal,
+      max_live_processes: maxLiveTotal,
     }, ownerContext);
-    throw new Error(`start_process_host_concurrency_limited: shared MCP host already has ${liveCount} live process slots; max=${this.maxLiveTotal}; use read_output/kill_process on existing work before starting more`);
+    throw new Error(`start_process_host_concurrency_limited: shared MCP host already has ${liveCount} live process slots; max=${maxLiveTotal}; use read_output/kill_process on existing work before starting more`);
   }
 
   private claimHostAdmissionSlot(processId: string, callerId: string, claimedAt: string, ownerContext: TelemetryContext): void {
+    const maxLiveTotal = this.maxLiveTotal;
+    if (maxLiveTotal === undefined) return;
     if (!this.hostAdmissionDirectory) {
       const liveCount = this.liveProcessCount();
-      if (liveCount >= this.maxLiveTotal) this.rejectHostAdmission(callerId, ownerContext, liveCount);
+      if (liveCount >= maxLiveTotal) this.rejectHostAdmission(callerId, ownerContext, liveCount, maxLiveTotal);
       return;
     }
 
     const record: HostAdmissionRecord = { version: 1, process_id: processId, manager_pid: process.pid, child_pid: null, claimed_at: claimedAt };
-    for (let index = 0; index < this.maxLiveTotal; index += 1) {
+    for (let index = 0; index < maxLiveTotal; index += 1) {
       const path = join(this.hostAdmissionDirectory, `${index}.json`);
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
@@ -983,7 +983,7 @@ export class ProcessManager {
         }
       }
     }
-    this.rejectHostAdmission(callerId, ownerContext, this.maxLiveTotal);
+    this.rejectHostAdmission(callerId, ownerContext, maxLiveTotal, maxLiveTotal);
   }
 
   private updateHostAdmissionChildPid(processId: string, childPid: number): void {

@@ -79,6 +79,17 @@ try {
 
 assert.throws(() => new ProcessManager({ maxLiveTotal: 0 }), /maxLiveTotal must be an integer between 1 and 32/);
 assert.throws(() => new ProcessManager({ maxLiveTotal: 33 }), /maxLiveTotal must be an integer between 1 and 32/);
+
+const uncappedDefaultProcesses = [];
+const uncappedDefaultManager = new ProcessManager();
+try {
+  for (let index = 0; index < 13; index += 1) {
+    uncappedDefaultProcesses.push(uncappedDefaultManager.start(`Start-Sleep -Seconds 10 # uncapped default ${index}`, undefined, `caller_uncapped_default_${index}`));
+  }
+  assert.equal(uncappedDefaultProcesses.length, 13, "default ProcessManager must not impose a shared-host live-process ceiling");
+} finally {
+  for (const process of uncappedDefaultProcesses) await uncappedDefaultManager.kill(process.process_id).catch(() => undefined);
+}
 assert.throws(() => new ProcessManager({ minFreeMemoryPct: 0 }), /minFreeMemoryPct must be a finite number between 1 and 50/);
 assert.throws(() => new ProcessManager({ minFreeMemoryPct: 51 }), /minFreeMemoryPct must be a finite number between 1 and 50/);
 assert.throws(() => new ProcessManager({ minFreeMemoryPct: Number.NaN }), /minFreeMemoryPct must be a finite number between 1 and 50/);
@@ -362,4 +373,4 @@ try {
 } finally {
   rmSync(receiptChurnDirectory, { recursive: true, force: true });
 }
-console.log("PASS process guard enforces duplicate reuse, per-caller and shared-host live concurrency, low-memory start admission, protected control-plane kill refusal, restart receipts, cross-clone control, fast-start collapse, compact no-change waits, nonblocking zero-wait, and bounded-wait behavior, and time-based receipt retention");
+console.log("PASS process guard enforces duplicate reuse, per-caller live concurrency, uncapped shared-host defaults with optional explicit host caps, low-memory start admission, protected control-plane kill refusal, restart receipts, cross-clone control, fast-start collapse, compact no-change waits, nonblocking zero-wait, and bounded-wait behavior, and time-based receipt retention");

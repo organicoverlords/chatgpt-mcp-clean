@@ -13,11 +13,12 @@ import { registerFileTransferTools } from "./lib/file-transfer.js";
 const toolProfile = (process.env.MCP_TOOL_PROFILE || "process").trim().toLowerCase();
 if (toolProfile !== "full" && toolProfile !== "process") throw new Error("MCP_TOOL_PROFILE must be full or process");
 const fullToolProfile = toolProfile === "full";
-const configuredMaxLiveProcesses = Number(process.env.MCP_MAX_LIVE_PROCESSES || 12);
+const configuredMaxLiveProcessesRaw = process.env.MCP_MAX_LIVE_PROCESSES?.trim();
+const configuredMaxLiveProcesses = configuredMaxLiveProcessesRaw ? Number(configuredMaxLiveProcessesRaw) : undefined;
 const configuredMinFreeMemoryPct = Number(process.env.MCP_MIN_FREE_MEMORY_PCT || 10);
 const processManager = new ProcessManager({
   receiptDirectory: resolve(process.env.MCP_PROCESS_RECEIPT_DIR || ".state/process-receipts"),
-  maxLiveTotal: configuredMaxLiveProcesses,
+  ...(configuredMaxLiveProcesses !== undefined ? { maxLiveTotal: configuredMaxLiveProcesses } : {}),
   minFreeMemoryPct: configuredMinFreeMemoryPct,
 });
 const liveSessions = new Set<string>();
