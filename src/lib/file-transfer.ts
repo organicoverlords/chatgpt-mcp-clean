@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, readFile, rename, rm, stat } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { basename, dirname, extname, isAbsolute } from "node:path";
@@ -16,6 +16,10 @@ const LOCAL_EXPORT_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_FILE_BYTES = 512 * 1024 * 1024;
 const ZSTD_MIN_BYTES = 64 * 1024;
 const MAX_REDIRECTS = 4;
+const MAX_REVIEW_ZIP_ENTRIES = 512;
+const MAX_REVIEW_ZIP_DIRECTORY_BYTES = 8 * 1024 * 1024;
+const MAX_REVIEW_MANIFEST_BYTES = 1024 * 1024;
+const REVIEW_ZIP_SCHEMAS = new Set(["lowvram.visual-review-transfer.v1", "p3.visual-review-transfer.v1"]);
 
 const MIME_BY_EXT: Record<string, string> = {
   ".7z": "application/x-7z-compressed",
@@ -88,8 +92,29 @@ export type LocalFileTransfer = {
   expires_at: number;
 };
 
+type LocalImageResource = {
+  token: string;
+  source_path: string;
+  source_bytes: number;
+  source_mtime_ms: number;
+  file_name: string;
+  mime_type: string;
+  bytes: number;
+  sha256: string;
+  expires_at: number;
+  data_offset?: number;
+};
+
+type StoredZipEntry = {
+  name: string;
+  method: number;
+  compressed_size: number;
+  uncompressed_size: number;
+  local_header_offset: number;
+};
+
 const localExports = new Map<string, LocalFileTransfer>();
-const localImageResources = new Map<string, LocalFileTransfer>();
+const localImageResources = new Map<string, LocalImageResource>();
 
 function maxFileBytes(): number {
   const configured = Number(process.env.MCP_FILE_TRANSFER_MAX_BYTES || DEFAULT_MAX_FILE_BYTES);
@@ -160,7 +185,12 @@ export async function prepareLocalFileTransfer(path: string): Promise<LocalFileT
     expires_at: Date.now() + LOCAL_EXPORT_TTL_MS,
   };
   localExports.set(item.token, item);
-  if (item.mime_type.startsWith("image/")) localImageResources.set(item.token, item);
+  if (item.mime_type.startsWith("image/")) {
+    localImageResources.set(item.token, {
+      token: item.token, source_path: item.path, source_bytes: item.bytes, source_mtime_ms: item.mtime_ms,
+      file_name: item.file_name, mime_type: item.mime_type, bytes: item.bytes, sha256: item.sha256, expires_at: item.expires_at,
+    });
+  }
   return item;
 }
 
@@ -176,12 +206,11 @@ function localTransferMeta(item: LocalFileTransfer) {
   };
 }
 
-function localImageResourceUri(item: LocalFileTransfer): string {
+function localImageResourceUri(item: LocalImageResource): string {
   return `mcp-upload://file-transfer/${item.token}`;
 }
 
-function localImageResourceLink(item: LocalFileTransfer) {
-  if (!item.mime_type.startsWith("image/")) return null;
+function localImageResourceLink(item: LocalImageResource) {
   return {
     type: "resource_link" as const,
     uri: localImageResourceUri(item),
@@ -194,6 +223,147 @@ function localImageResourceLink(item: LocalFileTransfer) {
   };
 }
 
+async function readExactly(handle: Awaited<ReturnType<typeof open>>, length: number, position: number): Promise<Buffer> {
+  if (!Number.isSafeInteger(length) || length < 0 || !Number.isSafeInteger(position) || position < 0) throw new Error("invalid file range");
+  const buffer = Buffer.alloc(length);
+  let offset = 0;
+  while (offset < length) {
+    const { bytesRead } = await handle.read(buffer, offset, length - offset, position + offset);
+    if (bytesRead <= 0) throw new Error("unexpected end of file");
+    offset += bytesRead;
+  }
+  return buffer;
+}
+
+function safeArchivePath(value: string): boolean {
+  return value.length > 0 && !value.startsWith("/") && !value.includes("\\") && value.split("/").every((part) => part.length > 0 && part !== "." && part !== "..");
+}
+
+async function storedZipDirectory(path: string, sourceBytes: number): Promise<Map<string, StoredZipEntry>> {
+  const handle = await open(path, "r");
+  try {
+    const tailBytes = Math.min(sourceBytes, 22 + 0xffff);
+    const tail = await readExactly(handle, tailBytes, sourceBytes - tailBytes);
+    let eocd = -1;
+    for (let i = tail.length - 22; i >= 0; i -= 1) {
+      if (tail.readUInt32LE(i) !== 0x06054b50) continue;
+      const commentLength = tail.readUInt16LE(i + 20);
+      if (i + 22 + commentLength === tail.length) { eocd = i; break; }
+    }
+    if (eocd < 0) throw new Error("ZIP end-of-central-directory missing");
+    const disk = tail.readUInt16LE(eocd + 4);
+    const centralDisk = tail.readUInt16LE(eocd + 6);
+    const entriesOnDisk = tail.readUInt16LE(eocd + 8);
+    const entryCount = tail.readUInt16LE(eocd + 10);
+    const centralBytes = tail.readUInt32LE(eocd + 12);
+    const centralOffset = tail.readUInt32LE(eocd + 16);
+    if (disk !== 0 || centralDisk !== 0 || entriesOnDisk !== entryCount) throw new Error("multi-disk ZIP is unsupported");
+    if (entryCount === 0xffff || centralBytes === 0xffffffff || centralOffset === 0xffffffff) throw new Error("ZIP64 central directory is unsupported for review packages");
+    if (entryCount < 1 || entryCount > MAX_REVIEW_ZIP_ENTRIES) throw new Error(`review ZIP entry count must be 1..${MAX_REVIEW_ZIP_ENTRIES}`);
+    if (centralBytes <= 0 || centralBytes > MAX_REVIEW_ZIP_DIRECTORY_BYTES || centralOffset + centralBytes > sourceBytes) throw new Error("review ZIP central directory is out of bounds");
+    const central = await readExactly(handle, centralBytes, centralOffset);
+    const entries = new Map<string, StoredZipEntry>();
+    let cursor = 0;
+    for (let index = 0; index < entryCount; index += 1) {
+      if (cursor + 46 > central.length || central.readUInt32LE(cursor) !== 0x02014b50) throw new Error("invalid ZIP central directory record");
+      const flags = central.readUInt16LE(cursor + 8);
+      const method = central.readUInt16LE(cursor + 10);
+      const compressedSize = central.readUInt32LE(cursor + 20);
+      const uncompressedSize = central.readUInt32LE(cursor + 24);
+      const nameLength = central.readUInt16LE(cursor + 28);
+      const extraLength = central.readUInt16LE(cursor + 30);
+      const commentLength = central.readUInt16LE(cursor + 32);
+      const diskStart = central.readUInt16LE(cursor + 34);
+      const localHeaderOffset = central.readUInt32LE(cursor + 42);
+      const recordBytes = 46 + nameLength + extraLength + commentLength;
+      if (cursor + recordBytes > central.length) throw new Error("truncated ZIP central directory record");
+      if ((flags & 1) !== 0) throw new Error("encrypted review ZIP entries are unsupported");
+      if (compressedSize === 0xffffffff || uncompressedSize === 0xffffffff || localHeaderOffset === 0xffffffff || diskStart === 0xffff) throw new Error("ZIP64 central entries are unsupported for review packages");
+      if (diskStart !== 0) throw new Error("multi-disk ZIP entry is unsupported");
+      const name = central.subarray(cursor + 46, cursor + 46 + nameLength).toString("utf8");
+      if (!safeArchivePath(name) || entries.has(name)) throw new Error(`unsafe or duplicate ZIP entry: ${name}`);
+      entries.set(name, { name, method, compressed_size: compressedSize, uncompressed_size: uncompressedSize, local_header_offset: localHeaderOffset });
+      cursor += recordBytes;
+    }
+    if (cursor !== central.length) throw new Error("unexpected bytes in ZIP central directory");
+    return entries;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function storedZipDataOffset(path: string, sourceBytes: number, entry: StoredZipEntry): Promise<number> {
+  const handle = await open(path, "r");
+  try {
+    if (entry.local_header_offset + 30 > sourceBytes) throw new Error(`ZIP local header out of bounds: ${entry.name}`);
+    const header = await readExactly(handle, 30, entry.local_header_offset);
+    if (header.readUInt32LE(0) !== 0x04034b50) throw new Error(`invalid ZIP local header: ${entry.name}`);
+    const nameLength = header.readUInt16LE(26);
+    const extraLength = header.readUInt16LE(28);
+    const dataOffset = entry.local_header_offset + 30 + nameLength + extraLength;
+    if (dataOffset + entry.compressed_size > sourceBytes) throw new Error(`ZIP member out of bounds: ${entry.name}`);
+    return dataOffset;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readStoredZipMember(path: string, sourceBytes: number, entry: StoredZipEntry): Promise<Buffer> {
+  if (entry.method !== 0 || entry.compressed_size !== entry.uncompressed_size) throw new Error(`review ZIP member is not STORE/no-compression: ${entry.name}`);
+  const dataOffset = await storedZipDataOffset(path, sourceBytes, entry);
+  const handle = await open(path, "r");
+  try { return await readExactly(handle, entry.uncompressed_size, dataOffset); }
+  finally { await handle.close(); }
+}
+
+async function visualReviewZipResources(item: LocalFileTransfer): Promise<LocalImageResource[]> {
+  if (item.mime_type !== "application/zip") return [];
+  let entries: Map<string, StoredZipEntry>;
+  try { entries = await storedZipDirectory(item.path, item.bytes); }
+  catch { return []; }
+  const manifestEntry = entries.get("manifest.json");
+  if (!manifestEntry || manifestEntry.method !== 0 || manifestEntry.uncompressed_size <= 0 || manifestEntry.uncompressed_size > MAX_REVIEW_MANIFEST_BYTES) return [];
+  let manifest: any;
+  try { manifest = JSON.parse((await readStoredZipMember(item.path, item.bytes, manifestEntry)).toString("utf8")); }
+  catch { return []; }
+  if (!REVIEW_ZIP_SCHEMAS.has(String(manifest?.schema || ""))) return [];
+  if (!Array.isArray(manifest.files) || manifest.files.length < 1 || manifest.files.length > MAX_REVIEW_ZIP_ENTRIES - 1) throw new Error("visual review ZIP manifest has invalid files array");
+
+  const declared = new Set<string>();
+  const resources: LocalImageResource[] = [];
+  for (const raw of manifest.files) {
+    const archivePath = String(raw?.archive_path || "");
+    const bytes = Number(raw?.bytes);
+    const sha256 = String(raw?.sha256 || "").toLowerCase();
+    if (!safeArchivePath(archivePath) || declared.has(archivePath)) throw new Error(`visual review ZIP manifest has unsafe or duplicate path: ${archivePath}`);
+    if (!Number.isSafeInteger(bytes) || bytes <= 0 || !/^[0-9a-f]{64}$/.test(sha256)) throw new Error(`visual review ZIP manifest has invalid integrity metadata: ${archivePath}`);
+    declared.add(archivePath);
+    const entry = entries.get(archivePath);
+    if (!entry) throw new Error(`visual review ZIP declared member missing: ${archivePath}`);
+    if (entry.method !== 0 || entry.compressed_size !== entry.uncompressed_size) throw new Error(`visual review ZIP member is not STORE/no-compression: ${archivePath}`);
+    if (entry.uncompressed_size !== bytes) throw new Error(`visual review ZIP byte count mismatch: ${archivePath}`);
+    const mimeType = mimeTypeFor(archivePath);
+    if (!mimeType.startsWith("image/")) continue;
+    const token = randomUUID();
+    const resource: LocalImageResource = {
+      token,
+      source_path: item.path,
+      source_bytes: item.bytes,
+      source_mtime_ms: item.mtime_ms,
+      file_name: String(raw?.source_name || basename(archivePath)),
+      mime_type: mimeType,
+      bytes,
+      sha256,
+      expires_at: item.expires_at,
+      data_offset: await storedZipDataOffset(item.path, item.bytes, entry),
+    };
+    localImageResources.set(token, resource);
+    resources.push(resource);
+  }
+  if (entries.size !== declared.size + 1 || [...entries.keys()].some((name) => name !== "manifest.json" && !declared.has(name))) throw new Error("visual review ZIP contains undeclared members");
+  return resources;
+}
+
 async function localImageResourceContents(uri: string) {
   cleanupExpired();
   const parsed = new URL(uri);
@@ -201,12 +371,19 @@ async function localImageResourceContents(uri: string) {
   const token = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
   const item = localImageResources.get(token);
   if (!item) throw new Error("file-transfer image resource is unavailable or expired");
-  const current = await stat(item.path).catch(() => null);
-  if (!current?.isFile() || current.size !== item.bytes || current.mtimeMs !== item.mtime_ms) {
+  const current = await stat(item.source_path).catch(() => null);
+  if (!current?.isFile() || current.size !== item.source_bytes || current.mtimeMs !== item.source_mtime_ms) {
     localImageResources.delete(token);
-    throw new Error("source image changed after transfer preparation");
+    throw new Error("source image container changed after transfer preparation");
   }
-  const data = await readFile(item.path);
+  let data: Buffer;
+  if (item.data_offset === undefined) {
+    data = await readFile(item.source_path);
+  } else {
+    const handle = await open(item.source_path, "r");
+    try { data = await readExactly(handle, item.bytes, item.data_offset); }
+    finally { await handle.close(); }
+  }
   if (data.length !== item.bytes) throw new Error("source image size changed while reading");
   const digest = createHash("sha256").update(data).digest("hex");
   if (digest !== item.sha256) throw new Error("source image hash changed while reading");
@@ -406,11 +583,12 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
     },
     async ({ path }) => {
       const item = await prepareLocalFileTransfer(path);
-      const image = localImageResourceLink(item);
+      const directImage = item.mime_type.startsWith("image/") ? localImageResources.get(item.token) : undefined;
+      const reviewImages = directImage ? [directImage] : await visualReviewZipResources(item);
       return {
         content: [
           { type: "text" as const, text: JSON.stringify({ caller_id: callerId, status: "ready", file_name: item.file_name, mime_type: item.mime_type, bytes: item.bytes, sha256: item.sha256 }) },
-          ...(image ? [image] : []),
+          ...reviewImages.map(localImageResourceLink),
         ],
         structuredContent: { direction: "local_to_chatgpt", status: "ready", file_name: item.file_name, mime_type: item.mime_type, bytes: item.bytes, sha256: item.sha256 },
         _meta: { file_transfer: localTransferMeta(item) },
