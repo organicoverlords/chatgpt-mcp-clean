@@ -153,6 +153,35 @@ const p3ReviewZip = storedZip([
 const p3ReviewZipPath = join(dir, "p3-visual-review_test.zip");
 await writeFile(p3ReviewZipPath, p3ReviewZip);
 
+
+const tiny3dReceipt = Buffer.from(JSON.stringify({ schema: "tiny3d.library-preview.v1", asset_id: "a".repeat(64) }) + "\n", "utf8");
+const tiny3dViews = Array.from({ length: 12 }, (_, index) => {
+  const label = `view_${String(index).padStart(2, "0")}`;
+  const data = Buffer.concat([png, Buffer.from([index])]);
+  return { label, data, archive_path: `assets/${"a".repeat(64)}/views/${label}.png` };
+});
+const tiny3dZipManifest = Buffer.from(JSON.stringify({
+  schema: "tiny3d.visual-review-transfer.v1",
+  asset_count: 1,
+  media_count: 12,
+  assets: [{
+    asset_id: "a".repeat(64),
+    view_set: "twelve_standard_v1",
+    receipt: { archive_path: `assets/${"a".repeat(64)}/receipts/library_preview.json`, bytes: tiny3dReceipt.length, sha256: sha256(tiny3dReceipt), schema: "tiny3d.library-preview.v1" },
+    views: tiny3dViews.map(({ label, data, archive_path }) => ({ label, archive_path, bytes: data.length, sha256: sha256(data), mime: "image/png" })),
+  }],
+}) + "\n", "utf8");
+const tiny3dReviewZip = storedZip([
+  ["manifest.json", tiny3dZipManifest],
+  [`assets/${"a".repeat(64)}/receipts/library_preview.json`, tiny3dReceipt],
+  ...tiny3dViews.map(({ archive_path, data }) => [archive_path, data]),
+]);
+const tiny3dReviewZipPath = join(dir, "tiny3d-visual-review_test.zip");
+await writeFile(tiny3dReviewZipPath, tiny3dReviewZip);
+
+const genericZipPath = join(dir, "generic.zip");
+await writeFile(genericZipPath, storedZip([["note.txt", Buffer.from("not a review package")]]));
+
 const media = randomBytes(256 * 1024);
 const mediaPath = join(dir, "proof.mp4");
 await writeFile(mediaPath, media);
@@ -241,6 +270,21 @@ assert.ok(listedByName.download_chatgpt_file.outputSchema, "download tool must d
     assert.equal(Buffer.from(memberBlob, "base64").compare(reviewZipExpected[index]), 0, "P3 review ZIP image must remain byte-for-byte exact");
   }
 
+  const tiny3dZipUpload = await client.callTool({ name: "upload_local_file", arguments: { path: tiny3dReviewZipPath } });
+  assert.equal(tiny3dZipUpload._meta?.file_transfer?.delivery_mode, "review_resources", "Tiny3D review ZIP must bypass unsupported ChatGPT Library ZIP upload");
+  const tiny3dLinks = tiny3dZipUpload.content.filter((entry) => entry.type === "resource_link");
+  assert.equal(tiny3dLinks.length, 12);
+  assert.equal(tiny3dLinks[0].name, `${"a".repeat(64)}_view_00.png`);
+  for (let index = 0; index < tiny3dLinks.length; index += 1) {
+    const memberResource = await client.readResource({ uri: tiny3dLinks[index].uri });
+    const memberBlob = memberResource.contents[0]?.blob;
+    assert.ok(memberBlob, "Tiny3D review ZIP image must resolve as native image resource bytes");
+    assert.equal(Buffer.from(memberBlob, "base64").compare(tiny3dViews[index].data), 0, "Tiny3D review ZIP image must remain byte-for-byte exact");
+  }
+  const genericZipUpload = await client.callTool({ name: "upload_local_file", arguments: { path: genericZipPath } });
+  assert.equal(genericZipUpload.isError, true, "generic ZIP must fail before the widget can claim it is upload-ready");
+  assert.match(genericZipUpload.content?.[0]?.text || "", /ChatGPT Library upload does not support ZIP files/);
+
   const textUpload = await client.callTool({ name: "upload_local_file", arguments: { path: textPath } });
   assert.equal(textUpload.content.some((entry) => entry.type === "resource_link"), false, "non-image uploads must not add image resource content");
 
@@ -258,6 +302,7 @@ assert.match(widget, /<img id="image" class="image"/);
 assert.match(widget, /imageEl\.src=URL\.createObjectURL\(blob\)/, "widget must render an inline preview from the exact fetched image bytes");
 assert.match(widget, /const file=new File\(\[blob\],p\.file_name/, "Library upload must reuse the same exact bytes shown in the preview");
 assert.match(widget, /uploadFile\(file,\{library:true\}\)/);
+assert.match(widget, /delivery_mode==='review_resources'/, "review ZIP resources must bypass ChatGPT Library upload");
 assert.match(widget, /crypto\.subtle\.digest\('SHA-256',data\)/);
 assert.doesNotMatch(widget, /getFileDownloadUrl|callTool\(/, "download path should not need a widget round trip");
 
