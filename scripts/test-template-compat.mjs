@@ -7,9 +7,11 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 process.env.MCP_PUBLIC_ORIGIN = "https://mcp.example.test/";
 process.env.MCP_PROCESS_RECEIPT_DIR = join(await mkdtemp(join(tmpdir(), "mcp-template-compat-")), "receipts");
+delete process.env.MCP_VISUAL_PROOF_UI;
+process.env.MCP_TOOL_PROFILE = "process";
 
 const { FILE_TRANSFER_WIDGET_URI } = await import("../dist/lib/file-transfer.js");
-const { LEGACY_PROCESS_LIBRARY_UPLOAD_WIDGET_URI } = await import("../dist/lib/template-compat.js");
+const { LEGACY_PROCESS_LIBRARY_UPLOAD_WIDGET_URIS, LEGACY_VISUAL_PROOF_WIDGET_URI } = await import("../dist/lib/template-compat.js");
 const { createServer } = await import("../dist/server.js");
 
 const server = createServer("caller_template_compat_test");
@@ -24,15 +26,16 @@ try {
   assert.equal(byName.read_output?._meta?.["openai/outputTemplate"], undefined, "read_output must not mount an app template on this generation");
   assert.equal(byName.upload_local_file?._meta?.["openai/outputTemplate"], FILE_TRANSFER_WIDGET_URI, "working upload_local_file template contract must remain unchanged");
 
-  const current = await client.readResource({ uri: FILE_TRANSFER_WIDGET_URI });
-  assert.equal(current.contents[0]?.mimeType, "text/html;profile=mcp-app", "current file-transfer template must remain readable");
-
-  const legacy = await client.readResource({ uri: LEGACY_PROCESS_LIBRARY_UPLOAD_WIDGET_URI });
-  assert.equal(legacy.contents[0]?.mimeType, "text/html;profile=mcp-app", "legacy cached process template URI must resolve");
-  assert.match(String(legacy.contents[0]?.text || ""), /mcp-template-compat/, "legacy URI must return a valid compatibility app");
+  const expectedUris = [FILE_TRANSFER_WIDGET_URI, ...LEGACY_PROCESS_LIBRARY_UPLOAD_WIDGET_URIS, LEGACY_VISUAL_PROOF_WIDGET_URI];
+  for (const uri of expectedUris) {
+    const resource = await client.readResource({ uri });
+    assert.equal(resource.contents[0]?.uri, uri, `${uri} must resolve exactly`);
+    assert.equal(resource.contents[0]?.mimeType, "text/html;profile=mcp-app", `${uri} must remain an MCP app template`);
+    assert.ok(String(resource.contents[0]?.text || "").includes("<!doctype html>"), `${uri} must return HTML`);
+  }
 } finally {
   await client.close();
   await server.close();
 }
 
-console.log("template compatibility regression passed");
+console.log(`template compatibility regression passed uris=${[FILE_TRANSFER_WIDGET_URI, ...LEGACY_PROCESS_LIBRARY_UPLOAD_WIDGET_URIS, LEGACY_VISUAL_PROOF_WIDGET_URI].join(",")}`);
