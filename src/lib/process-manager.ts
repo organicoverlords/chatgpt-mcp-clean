@@ -10,6 +10,7 @@ const MAX_CAPTURE_CHARS = 100_000;
 // character read_output response. Keep the logical read/page contract at 32k; do not
 // reintroduce the stale August 6k transport assumption.
 const MAX_READ_CHARS = 32_000;
+const ADAPTIVE_READ_WAIT_MS = [2_000, 5_000, 10_000] as const;
 const MAX_COMMAND_REPORT_CHARS = 4_000;
 const COMPLETED_RETENTION_MS = 30 * 60 * 1000;
 const RECEIPT_ARCHIVE_RETENTION_DAYS = 7;
@@ -822,6 +823,7 @@ function processOutputAudit(
 export class ProcessManager {
   private readonly processes = new Map<string, ProcessState>();
   private readonly outputCursors = new Map<string, OutputCursor>();
+  private readonly adaptiveReadQuietStreaks = new Map<string, number>();
   private readonly maxLivePerCaller: number;
   private readonly maxLiveTotal?: number;
   private readonly maxCompletedProcesses: number;
@@ -1724,6 +1726,29 @@ export class ProcessManager {
     return needsPaging
       ? this.pageOutput(legacy, fullStdout.text, fullStderr.text, observerCallerId, fullStdout.truncated, fullStderr.truncated, limit)
       : legacy;
+  }
+
+  async readOutput(processId: string, maxChars = MAX_READ_CHARS, waitMs?: number): Promise<Record<string, unknown>> {
+    const observerCallerId = currentTelemetryContext().caller_id ?? "caller_unknown";
+    const adaptiveKey = `${processId}:${observerCallerId}`;
+    if (waitMs !== undefined) {
+      this.adaptiveReadQuietStreaks.delete(adaptiveKey);
+      return await this.readWithWait(processId, maxChars, waitMs);
+    }
+    const quietStreak = this.adaptiveReadQuietStreaks.get(adaptiveKey) ?? 0;
+    const adaptiveWaitMs = ADAPTIVE_READ_WAIT_MS[Math.min(quietStreak, ADAPTIVE_READ_WAIT_MS.length - 1)]!;
+    try {
+      const result = await this.readWithWait(processId, maxChars, adaptiveWaitMs);
+      if (result.running === true && result.no_change === true) {
+        this.adaptiveReadQuietStreaks.set(adaptiveKey, Math.min(quietStreak + 1, ADAPTIVE_READ_WAIT_MS.length - 1));
+      } else {
+        this.adaptiveReadQuietStreaks.delete(adaptiveKey);
+      }
+      return result;
+    } catch (error) {
+      this.adaptiveReadQuietStreaks.delete(adaptiveKey);
+      throw error;
+    }
   }
 
   async readWithWait(processId: string, maxChars = MAX_READ_CHARS, waitMs = 0): Promise<Record<string, unknown>> {

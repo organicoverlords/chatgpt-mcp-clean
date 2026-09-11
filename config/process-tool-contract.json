@@ -111,7 +111,7 @@
   },
   {
     "name": "read_output",
-    "description": "Read a bounded tail of accumulated stdout and stderr for a process_id. wait_ms controls the maximum wait for output or process exit; the default is 2 seconds and 0 is nonblocking. An unchanged timed wait returns no_change=true. elapsed_ms is process age. Each stream is limited to 32,000 characters.",
+    "description": "Read a bounded tail of accumulated stdout and stderr for a process_id. wait_ms optionally sets the maximum wait for output or process exit; 0 is nonblocking. An unchanged timed wait returns no_change=true. elapsed_ms is process age. Each stream is limited to 32,000 characters.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
