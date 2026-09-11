@@ -106,12 +106,13 @@ function toolResult(result) {
 async function callTool(sessionId, name, args = {}) {
   return toolResult(await mcpPost(sessionId, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name, arguments: args } }));
 }
-async function waitForOutput(sessionId, processId, pattern, timeoutMs = 20_000) {
+async function waitForOutput(sessionId, processId, pattern, timeoutMs = 20_000, initialOutput) {
   const deadline = Date.now() + timeoutMs;
-  let output;
+  let output = initialOutput;
+  if (pattern.test(output?.stdout || "")) return output;
   do {
     output = await callTool(sessionId, "read_output", { process_id: processId });
-    if (pattern.test(output.stdout)) return output;
+    if (pattern.test(output.stdout || "")) return output;
     await sleep(100);
   } while (Date.now() < deadline);
   return output;
@@ -182,7 +183,7 @@ try {
   jobOne = await callTool(sessionA, "start_process", { command: "1..20 | ForEach-Object { Write-Output ('JOB_ONE_' + $_); Start-Sleep -Milliseconds 200 }", activity_target: { type: "card", id: "smoke-activity-target", project: "nexus" }, action_class: "smoke" });
   assert.ok(jobOne.process_id && Date.now() - startedAt < 5000);
   assert.equal(jobOne.running, true);
-  const outputOne = await waitForOutput(sessionA, jobOne.process_id, /JOB_ONE_/);
+  const outputOne = await waitForOutput(sessionA, jobOne.process_id, /JOB_ONE_/, 20_000, jobOne);
   assert.equal(outputOne.running, true);
   assert.deepEqual(outputOne.activity_target, { type: "card", id: "smoke-activity-target", project: "nexus" });
   assert.equal(outputOne.action_class, "smoke");
@@ -204,7 +205,7 @@ try {
   assert.equal(readTwo.running, true);
 
   treeJob = await callTool(sessionA, "start_process", { command: "$child = Start-Process -FilePath \"$env:SystemRoot\\System32\\ping.exe\" -ArgumentList @('-t','127.0.0.1') -WindowStyle Hidden -PassThru; Write-Output ('CHILD_PID=' + $child.Id); Wait-Process -Id $child.Id" });
-  const treeOutput = await waitForOutput(sessionA, treeJob.process_id, /CHILD_PID=(\d+)/);
+  const treeOutput = await waitForOutput(sessionA, treeJob.process_id, /CHILD_PID=(\d+)/, 20_000, treeJob);
   const childPid = Number(treeOutput.stdout.match(/CHILD_PID=(\d+)/)?.[1]);
   assert.ok(childPid > 0, treeOutput.stdout);
   const killed = await callTool(sessionA, "kill_process", { process_id: treeJob.process_id });
