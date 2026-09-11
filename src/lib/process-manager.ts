@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { mkdir as mkdirAsync, readFile as readFileAsync, readdir as readdirAsync, rename as renameAsync, stat as statAsync, unlink as unlinkAsync, writeFile as writeFileAsync } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { Worker } from "node:worker_threads";
@@ -24,6 +24,7 @@ const DEFAULT_MAX_LIVE_PER_CALLER = 4;
 const MAX_CONFIGURED_LIVE_TOTAL = 80;
 const HOST_ADMISSION_DIRECTORY = ".host-admission";
 const CONTROL_POLL_MS = 100;
+const CONTROL_RECONCILE_MS = 5_000;
 const CONTROL_HANDOFF_OVERHEAD_MS = 1_500;
 const CONTROL_KILL_TIMEOUT_MS = TASKKILL_TIMEOUT_MS + KILL_SETTLE_MS + CONTROL_HANDOFF_OVERHEAD_MS;
 const CONTROL_RETENTION_MS = COMPLETED_RETENTION_MS;
@@ -831,6 +832,8 @@ export class ProcessManager {
   private readonly controlRequestDirectory?: string;
   private readonly controlResponseDirectory?: string;
   private readonly controlRequestsInFlight = new Set<string>();
+  private controlRequestWatcher?: FSWatcher;
+  private controlSweepScheduled = false;
   private readonly launcherWorker: Worker;
   private lastReceiptPruneAt = 0;
   private lastReceiptArchivePruneAt = 0;
@@ -859,8 +862,9 @@ export class ProcessManager {
       mkdirSync(this.controlResponseDirectory, { recursive: true });
       this.pruneReceipts();
       this.pruneControlFiles();
-      const controlTimer = setInterval(() => { void this.sweepControlRequestsAsync(); }, CONTROL_POLL_MS);
-      controlTimer.unref();
+      this.armControlRequestWatcher();
+      const controlReconcileTimer = setInterval(() => { this.scheduleControlRequestSweep(); }, CONTROL_RECONCILE_MS);
+      controlReconcileTimer.unref();
     }
   }
 
@@ -1254,8 +1258,32 @@ export class ProcessManager {
     }
   }
 
+  private scheduleControlRequestSweep(): void {
+    if (this.controlSweepScheduled) return;
+    this.controlSweepScheduled = true;
+    setImmediate(() => {
+      this.controlSweepScheduled = false;
+      void this.sweepControlRequestsAsync();
+    });
+  }
+
+  private armControlRequestWatcher(): void {
+    if (!this.controlRequestDirectory || this.controlRequestWatcher) return;
+    try {
+      const watcher = watch(this.controlRequestDirectory, () => this.scheduleControlRequestSweep());
+      watcher.on("error", () => {
+        if (this.controlRequestWatcher === watcher) this.controlRequestWatcher = undefined;
+      });
+      watcher.unref();
+      this.controlRequestWatcher = watcher;
+    } catch {
+      this.controlRequestWatcher = undefined;
+    }
+  }
+
   private async sweepControlRequestsAsync(): Promise<void> {
     if (!this.controlRequestDirectory || !this.controlResponseDirectory) return;
+    this.armControlRequestWatcher();
     let entries;
     try { entries = await readdirAsync(this.controlRequestDirectory, { withFileTypes: true }); } catch { return; }
     for (const entry of entries) {
