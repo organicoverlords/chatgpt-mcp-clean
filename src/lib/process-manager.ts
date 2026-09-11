@@ -487,6 +487,7 @@ function isProtectedControlPlaneProcessCommand(command: string): boolean {
 }
 function mcpProductionMutationError(command: string, code: string): string | undefined {
   const productionIngressError = "direct MCP production ingress mutation is blocked; use the documented redundant replacement/recovery scripts and prove the replacement off-path before changing serving production";
+  const rawProductionVpsTransportError = `${productionIngressError}; for read-only VPS diagnosis use the supported wrappers: node scripts/capture-edge-runtime.mjs, node scripts/capture-edge-fanout.mjs, or node scripts/capture-edge-backend-correlation.mjs`;
 
   const invokesObsoleteDatedCutoverHelper = /(?:^|[\\/])minimal-connectors[\\/]cutover-production-\d{8}\.ps1\b/i.test(command);
   if (invokesObsoleteDatedCutoverHelper) return productionIngressError;
@@ -515,7 +516,7 @@ function mcpProductionMutationError(command: string, code: string): string | und
     && /\b(?:asyncssh|paramiko|ssh2|node-ssh)\b/i.test(command);
   const invokesRawProductionVpsTransport = productionVpsHost
     && (rawRemoteTransportInCode || quotedRemoteTransportInvocation || nestedShellRemoteTransport || interpreterRemoteLibrary);
-  if (invokesRawProductionVpsTransport) return productionIngressError;
+  if (invokesRawProductionVpsTransport) return rawProductionVpsTransportError;
 
   const startsReplacementInternalTask = /\b(?:Start-ScheduledTask|schtasks(?:\.exe)?\s+\/Run)\b/i.test(code)
     && /McpV3ProductionReplacement(?:Guardian|Candidate)/i.test(command);
