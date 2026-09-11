@@ -18,6 +18,19 @@ function rejects(command) {
   );
 }
 
+function rejectsRawVpsWithGuidance(command) {
+  assert.throws(
+    () => manager.start(command, undefined, "caller_production_vps_read_route_reject"),
+    (error) => error instanceof Error
+      && error.message.startsWith("start_process_preflight_failed:")
+      && /direct MCP production ingress mutation/.test(error.message)
+      && /capture-edge-runtime\.mjs/.test(error.message)
+      && /capture-edge-fanout\.mjs/.test(error.message)
+      && /capture-edge-backend-correlation\.mjs/.test(error.message),
+    `expected raw production VPS rejection with supported read-route guidance: ${command}`,
+  );
+}
+
 
 function rejectsProtected(command) {
   assert.throws(
@@ -53,7 +66,7 @@ rejects(`sftp.exe root@${productionVpsIp}`);
 rejects(`rsync.exe C:\tmp\Caddyfile root@${productionVpsIp}:${caddyPath}`);
 rejects(`plink.exe root@${productionVpsIp} -batch echo mutation-capable-raw-transport`);
 rejects(`uv run --with asyncssh python -c "import asyncssh; print('${productionVpsIp}')"`);
-rejects(`ssh root@${productionVpsHost} true`);
+rejectsRawVpsWithGuidance(`ssh root@${productionVpsHost} true`);
 rejects(`& 'C:\Windows\System32\OpenSSH\ssh.exe' root@${productionVpsIp} true`);
 rejects(`Start-Process -FilePath 'C:\Windows\System32\OpenSSH\ssh.exe' -ArgumentList 'root@${productionVpsIp}','true'`);
 rejects(`ssh root@${wireGuardVpsIp} true`);
