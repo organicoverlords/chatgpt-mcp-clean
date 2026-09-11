@@ -227,6 +227,7 @@ try {
 const listedByName = Object.fromEntries(listed.tools.map((tool) => [tool.name, tool]));
 assert.ok(listedByName.upload_local_file.outputSchema, "upload tool must declare outputSchema for structuredContent");
 assert.ok(listedByName.download_chatgpt_file.outputSchema, "download tool must declare outputSchema for structuredContent");
+assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v2.html", "widget URI must be cache-busted after the Library/media contract change");
   const start = listed.tools.find((tool) => tool.name === "start_process");
   const read = listed.tools.find((tool) => tool.name === "read_output");
   const upload = listed.tools.find((tool) => tool.name === "upload_local_file");
@@ -240,8 +241,13 @@ assert.ok(listedByName.download_chatgpt_file.outputSchema, "download tool must d
   assert.deepEqual(fileSchema?.required, ["download_url", "file_id"]);
   assert.deepEqual(Object.keys(fileSchema?.properties || {}).sort(), ["download_url", "file_id", "file_name", "mime_type"]);
 
+  assert.deepEqual(upload?.annotations, { readOnlyHint: false, destructiveHint: false, openWorldHint: false }, "Library upload is an additive closed-domain write, not a read-only or open-world action");
   const imageUpload = await client.callTool({ name: "upload_local_file", arguments: { path: pngPath } });
-  assert.equal(imageUpload._meta?.file_transfer?.delivery_mode, "image_resource", "direct images must bypass ChatGPT Library upload and use the same-turn resource path");
+  assert.equal(imageUpload._meta?.file_transfer?.delivery_mode, "library_upload", "direct images must persist through the ChatGPT Library path");
+  const nativeImage = imageUpload.content.find((entry) => entry.type === "image");
+  assert.ok(nativeImage, "direct images must return native MCP image content for same-turn ChatGPT/Work visibility");
+  assert.equal(nativeImage.mimeType, "image/png");
+  assert.equal(Buffer.from(nativeImage.data, "base64").compare(png), 0, "native MCP image content must remain byte-for-byte exact");
   const imageLink = imageUpload.content.find((entry) => entry.type === "resource_link");
   assert.ok(imageLink, "image upload must return a same-turn resource_link for native vision");
   assert.equal(imageLink.mimeType, "image/png");
@@ -252,6 +258,7 @@ assert.ok(listedByName.download_chatgpt_file.outputSchema, "download tool must d
   assert.equal(Buffer.from(originalBlob, "base64").compare(png), 0, "model vision resource must be byte-for-byte the original image, not a thumbnail");
 
   const reviewZipUpload = await client.callTool({ name: "upload_local_file", arguments: { path: reviewZipPath } });
+  assert.equal(reviewZipUpload._meta?.file_transfer?.delivery_mode, "library_upload", "visual-review ZIPs must also persist the exact ZIP in Library");
   const reviewZipLinks = reviewZipUpload.content.filter((entry) => entry.type === "resource_link");
   assert.equal(reviewZipLinks.length, 2, "one visual-review ZIP must expose every manifest-declared image in the same tool result");
   assert.deepEqual(reviewZipLinks.map((entry) => entry.name), ["asset-a.png", "asset-b.png"]);
@@ -274,7 +281,7 @@ assert.ok(listedByName.download_chatgpt_file.outputSchema, "download tool must d
   }
 
   const tiny3dZipUpload = await client.callTool({ name: "upload_local_file", arguments: { path: tiny3dReviewZipPath } });
-  assert.equal(tiny3dZipUpload._meta?.file_transfer?.delivery_mode, "review_resources", "Tiny3D review ZIP must bypass unsupported ChatGPT Library ZIP upload");
+  assert.equal(tiny3dZipUpload._meta?.file_transfer?.delivery_mode, "library_upload", "Tiny3D review ZIP must persist in Library while still exposing review resources");
   const tiny3dLinks = tiny3dZipUpload.content.filter((entry) => entry.type === "resource_link");
   assert.equal(tiny3dLinks.length, 12);
   assert.equal(tiny3dLinks[0].name, `${"a".repeat(64)}_view_00.png`);
@@ -285,8 +292,13 @@ assert.ok(listedByName.download_chatgpt_file.outputSchema, "download tool must d
     assert.equal(Buffer.from(memberBlob, "base64").compare(tiny3dViews[index].data), 0, "Tiny3D review ZIP image must remain byte-for-byte exact");
   }
   const genericZipUpload = await client.callTool({ name: "upload_local_file", arguments: { path: genericZipPath } });
-  assert.equal(genericZipUpload.isError, true, "generic ZIP must fail before the widget can claim it is upload-ready");
-  assert.match(genericZipUpload.content?.[0]?.text || "", /ChatGPT Library upload does not support ZIP files/);
+  assert.notEqual(genericZipUpload.isError, true, "generic ZIP must be allowed through the same exact-byte Library upload path");
+  assert.equal(genericZipUpload._meta?.file_transfer?.delivery_mode, "library_upload");
+  assert.equal(genericZipUpload.content.some((entry) => entry.type === "resource_link"), false, "generic ZIP does not invent review resources");
+
+  const videoUpload = await client.callTool({ name: "upload_local_file", arguments: { path: mediaPath } });
+  assert.equal(videoUpload._meta?.file_transfer?.delivery_mode, "library_upload", "MP4 must use the same persistent Library upload path");
+  assert.equal(videoUpload.content.some((entry) => entry.type === "image"), false, "video upload must not masquerade as image content");
 
   const textUpload = await client.callTool({ name: "upload_local_file", arguments: { path: textPath } });
   assert.equal(textUpload.content.some((entry) => entry.type === "resource_link"), false, "non-image uploads must not add image resource content");
@@ -301,14 +313,15 @@ assert.ok(listedByName.download_chatgpt_file.outputSchema, "download tool must d
 }
 
 const widget = fileTransferWidgetHtml();
-assert.match(widget, /<img id="image" class="image"/);
-assert.match(widget, /imageEl\.src=URL\.createObjectURL\(blob\)/, "widget must render an inline preview from the exact fetched image bytes");
-assert.match(widget, /const file=new File\(\[blob\],p\.file_name/, "Library upload must reuse the same exact bytes shown in the preview");
-assert.match(widget, /uploadFile\(file,\{library:true\}\)/);
-assert.match(widget, /delivery_mode==='review_resources'/, "review ZIP resources must bypass ChatGPT Library upload");
-assert.match(widget, /delivery_mode==='image_resource'/, "direct image resources must bypass ChatGPT Library upload");
-assert.ok(widget.indexOf("delivery_mode==='image_resource'") < widget.indexOf("uploadFile(file,{library:true})"), "direct-image resource branch must return before the Library upload call");
-assert.match(widget, /crypto\.subtle\.digest\('SHA-256',data\)/);
-assert.doesNotMatch(widget, /getFileDownloadUrl|callTool\(/, "download path should not need a widget round trip");
+assert.match(widget, /<img id="image" class="media"/);
+assert.match(widget, /<video id="video" class="media" controls playsinline>/, "widget must expose an MP4-capable inline preview surface");
+assert.match(widget, /uploadFile\(file,\{library:true\}\)/, "every explicit local upload must request durable ChatGPT Library persistence");
+assert.match(widget, /getFileDownloadUrl\(\{fileId\}\)/, "widget must prefer the host-authorized file URL after Library persistence");
+assert.match(widget, /imageIds:p\.mime_type\.startsWith\('image\/'\)\?\[fileId\]:\[\]/, "uploaded images must remain model-visible on follow-up turns");
+assert.match(widget, /blobDataUrl\(blob\)/, "image preview must have a non-blob-URL fallback for sandboxed mobile widgets");
+assert.ok(widget.indexOf("crypto.subtle.digest('SHA-256',data)") < widget.indexOf("uploadFile(file,{library:true})"), "integrity verification must complete before Library upload");
+assert.doesNotMatch(widget, /delivery_mode==='image_resource'.*return/, "direct images must not return before Library upload");
+assert.doesNotMatch(widget, /delivery_mode==='review_resources'.*return/, "review ZIPs must not return before Library upload");
+assert.doesNotMatch(widget, /callTool\(/, "file transfer widget should not need a second tool invocation");
 
-console.log("PASS lossless file transfer: exact images and visual-review ZIP resources, inline preview, raw bytes, zstd, native file params");
+console.log("PASS lossless file transfer: native image visibility, persistent image/video/ZIP Library path, review resources, raw bytes, zstd, native file params");
