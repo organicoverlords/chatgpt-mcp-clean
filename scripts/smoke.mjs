@@ -162,6 +162,13 @@ assert.deepEqual(names, expectedTools);
 const startProcessTool = listed.body.result.tools.find((tool) => tool.name === "start_process");
 assert.equal(startProcessTool.inputSchema.properties.wait_ms.maximum, 10_000);
 assert.equal(startProcessTool.inputSchema.properties.wait_ms.minimum, 0);
+assert.deepEqual(startProcessTool.inputSchema.properties.activity_target.properties.type.enum, ["card", "node", "project"]);
+assert.equal(startProcessTool.inputSchema.properties.activity_target.properties.id.maxLength, 160);
+assert.equal(startProcessTool.inputSchema.properties.activity_target.properties.project.maxLength, 80);
+assert.equal(startProcessTool.inputSchema.properties.action_class.maxLength, 64);
+const invalidActivityTarget = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: "start_process", arguments: { command: "Write-Output INVALID_TARGET_MUST_NOT_RUN", activity_target: { type: "card", id: "bad id with spaces" } } } });
+assert.equal(invalidActivityTarget.body?.result?.isError, true, invalidActivityTarget.text);
+assert.match(invalidActivityTarget.body.result.content?.[0]?.text || "", /activity_target|invalid|validation/i);
 const readOutputTool = listed.body.result.tools.find((tool) => tool.name === "read_output");
 assert.equal(readOutputTool.inputSchema.properties.wait_ms.maximum, 10_000);
 assert.equal(readOutputTool.inputSchema.properties.wait_ms.minimum, 0);
@@ -172,11 +179,13 @@ let jobTwo;
 let treeJob;
 let floodJob;
 try {
-  jobOne = await callTool(sessionA, "start_process", { command: "1..20 | ForEach-Object { Write-Output ('JOB_ONE_' + $_); Start-Sleep -Milliseconds 200 }" });
+  jobOne = await callTool(sessionA, "start_process", { command: "1..20 | ForEach-Object { Write-Output ('JOB_ONE_' + $_); Start-Sleep -Milliseconds 200 }", activity_target: { type: "card", id: "smoke-activity-target", project: "nexus" }, action_class: "smoke" });
   assert.ok(jobOne.process_id && Date.now() - startedAt < 5000);
   assert.equal(jobOne.running, true);
   const outputOne = await waitForOutput(sessionA, jobOne.process_id, /JOB_ONE_/);
   assert.equal(outputOne.running, true);
+  assert.deepEqual(outputOne.activity_target, { type: "card", id: "smoke-activity-target", project: "nexus" });
+  assert.equal(outputOne.action_class, "smoke");
   assert.match(outputOne.stdout, /JOB_ONE_/, JSON.stringify({
     running: outputOne.running,
     exit_code: outputOne.exit_code,

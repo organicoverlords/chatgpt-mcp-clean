@@ -55,6 +55,28 @@ try {
   for (const processId of processIds) await duplicateManager.kill(processId).catch(() => undefined);
 }
 
+const metadataDuplicateManager = new ProcessManager();
+const activityTarget = { type: "card", id: "p3-lane-war", project: "p3" };
+let targetedFirst;
+let targetedDuplicate;
+let otherTarget;
+let noTarget;
+try {
+  targetedFirst = metadataDuplicateManager.start("Start-Sleep -Seconds 5 # metadata", undefined, "caller_metadata_duplicate", activityTarget, "test");
+  targetedDuplicate = metadataDuplicateManager.start("Start-Sleep -Seconds 5 # metadata", undefined, "caller_metadata_duplicate", activityTarget, "test");
+  otherTarget = metadataDuplicateManager.start("Start-Sleep -Seconds 5 # metadata", undefined, "caller_metadata_duplicate", { ...activityTarget, id: "p3-combat" }, "test");
+  noTarget = metadataDuplicateManager.start("Start-Sleep -Seconds 5 # metadata", undefined, "caller_metadata_duplicate");
+  assert.equal(targetedDuplicate.process_id, targetedFirst.process_id, "same command and activity metadata should reuse the process");
+  assert.notEqual(otherTarget.process_id, targetedFirst.process_id, "different explicit targets must not reuse a process");
+  assert.notEqual(noTarget.process_id, targetedFirst.process_id, "unclassified activity must not inherit a target from command reuse");
+  const targetedRead = metadataDuplicateManager.read(targetedFirst.process_id);
+  assert.deepEqual(targetedRead.activity_target, activityTarget);
+  assert.equal(targetedRead.action_class, "test");
+} finally {
+  const processIds = new Set([targetedFirst?.process_id, targetedDuplicate?.process_id, otherTarget?.process_id, noTarget?.process_id].filter(Boolean));
+  for (const processId of processIds) await metadataDuplicateManager.kill(processId).catch(() => undefined);
+}
+
 const concurrencyManager = new ProcessManager();
 const liveProcesses = [];
 let concurrencyRejection;
@@ -163,7 +185,7 @@ try {
 const receiptDirectory = mkdtempSync(join(tmpdir(), "shell-mcp-process-receipts-"));
 try {
   const beforeRestart = new ProcessManager({ receiptDirectory });
-  const started = beforeRestart.start("Write-Output 'RESTART_RECEIPT_OK'", undefined, "caller_restart_receipt_test");
+  const started = beforeRestart.start("Write-Output 'RESTART_RECEIPT_OK'", undefined, "caller_restart_receipt_test", { type: "node", id: "p3-stack", project: "p3" }, "verify");
   const completed = await waitForExit(beforeRestart, started.process_id);
   assert.equal(completed.exit_code, 0);
 
@@ -181,6 +203,8 @@ try {
   assert.ok(Number.isInteger(recovered.elapsed_ms) && recovered.elapsed_ms >= 0);
   assert.equal(recovered.running, false);
   assert.equal(recovered.exit_code, 0);
+  assert.deepEqual(recovered.activity_target, { type: "node", id: "p3-stack", project: "p3" });
+  assert.equal(recovered.action_class, "verify");
   assert.match(recovered.stdout, /RESTART_RECEIPT_OK/);
 } finally {
   rmSync(receiptDirectory, { recursive: true, force: true });
