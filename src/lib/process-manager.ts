@@ -1663,9 +1663,9 @@ export class ProcessManager {
     });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
-    if (!state || state.exitCode !== null) return this.read(started.process_id, MAX_READ_CHARS, false);
+    if (!state || state.exitCode !== null) return this.read(started.process_id, MAX_READ_CHARS);
     await Promise.race([state.done, delay(boundedWaitMs)]);
-    return this.read(started.process_id, MAX_READ_CHARS, false);
+    return this.read(started.process_id, MAX_READ_CHARS);
   }
 
   read(processId: string, maxChars = MAX_READ_CHARS, markRead = true): Record<string, unknown> {
