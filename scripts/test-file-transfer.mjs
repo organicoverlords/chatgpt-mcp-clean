@@ -191,7 +191,9 @@ assert.equal(mediaTransfer.headers.get("content-encoding"), undefined, "already-
 assert.equal(mediaTransfer.headers.get("x-file-transfer-encoding"), "identity");
 assert.equal(mediaTransfer.body.compare(media), 0, "media transfer must preserve exact bytes");
 const replay = await serve(mediaItem, "identity");
-assert.equal(replay.statusCode, 404, "completed upload capability URL must be single-use");
+assert.equal(replay.statusCode, 200, "upload capability must survive a normal widget remount within its bounded TTL");
+assert.equal(replay.headers.get("x-file-sha256"), mediaItem.sha256, "replayed upload must preserve the prepared hash");
+assert.equal(replay.body.compare(media), 0, "replayed upload must preserve exact bytes");
 
 const incoming = randomBytes(1024 * 1024 + 17);
 const destination = join(dir, "received", "generated.glb");

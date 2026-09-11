@@ -467,9 +467,9 @@ export async function serveLocalFileTransfer(req: Request, res: ExpressResponse)
     res.setHeader("X-File-Transfer-Encoding", "identity");
     await pipeline(createReadStream(item.path), res);
   }
-  // Capability URLs are single-use after a complete transfer. A failed stream can
-  // be retried until its short TTL expires, but a successful fetch cannot be replayed.
-  localExports.delete(token);
+  // Keep the bounded capability replayable until its short TTL expires. ChatGPT can
+  // remount the MCP app after a successful upload; that remount receives the same
+  // tool result and must be able to fetch the exact immutable bytes again.
 }
 
 function isPrivateIpv4(address: string): boolean {
