@@ -89,7 +89,7 @@ export function createServer(callerId: string): McpServer {
   server.registerTool(
     "read_output",
     {
-      description: "Read a bounded tail of accumulated stdout and stderr for a process_id. wait_ms controls the maximum wait for output or process exit; the default is 2 seconds and 0 is nonblocking. An unchanged timed wait returns no_change=true. elapsed_ms is process age. Each stream is limited to 32,000 characters.",
+      description: "Read a bounded tail of accumulated stdout and stderr for a process_id. wait_ms optionally sets the maximum wait for output or process exit; 0 is nonblocking. An unchanged timed wait returns no_change=true. elapsed_ms is process age. Each stream is limited to 32,000 characters.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: z.object({
         process_id: z.string().min(1),
@@ -99,7 +99,7 @@ export function createServer(callerId: string): McpServer {
     },
     async ({ process_id, max_chars, wait_ms }) => textResult(isBootstrapSnapshot(process_id)
       ? await readBootstrapSnapshot(max_chars ?? 32_000, process_id)
-      : await processManager.readWithWait(process_id, max_chars, wait_ms ?? 2_000), callerId),
+      : await processManager.readOutput(process_id, max_chars, wait_ms), callerId),
   );
 
   server.registerTool(
