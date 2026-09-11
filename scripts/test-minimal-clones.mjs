@@ -158,7 +158,11 @@ async function connect(clone, clientName) {
     assert.ok(text, result.text);
     return JSON.parse(text);
   }
-  return { tools, call };
+  async function readResource(uri) {
+    const result = await post({ jsonrpc: "2.0", id: Date.now(), method: "resources/read", params: { uri } }, sessionId);
+    return result.body.result;
+  }
+  return { tools, call, readResource };
 }
 
 let cloneA;
@@ -199,6 +203,21 @@ try {
     assert.deepEqual(byName.start_process.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: true });
     assert.deepEqual(byName.read_output.annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: false });
     assert.deepEqual(byName.kill_process.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: false });
+    assert.equal(byName.start_process?._meta?.["openai/outputTemplate"], undefined);
+    assert.equal(byName.read_output?._meta?.["openai/outputTemplate"], undefined);
+  }
+
+  const historicalTemplateUris = [
+    "ui://process/file-transfer-v1.html",
+    "ui://process/library-upload-v1.html",
+    "ui://process/library-upload-v2.html",
+    "ui://visual-proof/inline-v1.html",
+  ];
+  for (const uri of historicalTemplateUris) {
+    const resource = await a1.readResource(uri);
+    assert.equal(resource.contents?.[0]?.uri, uri, `${uri} must resolve over real Streamable HTTP`);
+    assert.equal(resource.contents?.[0]?.mimeType, "text/html;profile=mcp-app");
+    assert.match(String(resource.contents?.[0]?.text || ""), /<!doctype html>/i);
   }
 
   const bootstrapReads = await Promise.all(["bootstrap", "231b7e74-4cc8-43d0-9702-fd6dfa2215b3", "checkup"].map((process_id) =>

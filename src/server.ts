@@ -6,6 +6,7 @@ import { BusyStore } from "./lib/busy-store.js";
 import { viewImage } from "./lib/image-viewer.js";
 import { ProcessManager } from "./lib/process-manager.js";
 import { registerFileTransferTools } from "./lib/file-transfer.js";
+import { registerTemplateCompatibilityResources } from "./lib/template-compat.js";
 
 // The deployed ChatGPT connector surface is the process profile. Keep the broader
 // full profile explicit-only for internal/local tests so repo inspection without a
@@ -52,6 +53,7 @@ export function markSessionLive(sessionId: string, live: boolean): void {
 export function createServer(callerId: string): McpServer {
   const server = new McpServer({ name: "shell-mcp", version: "0.1.0" });
   registerFileTransferTools(server, callerId);
+  registerTemplateCompatibilityResources(server);
 
   if (fullToolProfile) {
   server.registerTool(
