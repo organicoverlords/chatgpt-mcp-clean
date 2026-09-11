@@ -227,13 +227,13 @@ try {
 const listedByName = Object.fromEntries(listed.tools.map((tool) => [tool.name, tool]));
 assert.ok(listedByName.upload_local_file.outputSchema, "upload tool must declare outputSchema for structuredContent");
 assert.ok(listedByName.download_chatgpt_file.outputSchema, "download tool must declare outputSchema for structuredContent");
-assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v2.html", "widget URI must be cache-busted after the Library/media contract change");
+assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v3.html", "widget URI must be cache-busted after the Library/media contract change");
   const start = listed.tools.find((tool) => tool.name === "start_process");
   const read = listed.tools.find((tool) => tool.name === "read_output");
   const upload = listed.tools.find((tool) => tool.name === "upload_local_file");
   const download = listed.tools.find((tool) => tool.name === "download_chatgpt_file");
-  assert.equal(start?._meta?.["openai/outputTemplate"], undefined, "start_process must not mount the file widget");
-  assert.equal(read?._meta?.["openai/outputTemplate"], undefined, "read_output must not mount the file widget");
+  assert.equal(start?._meta?.["openai/outputTemplate"], FILE_TRANSFER_WIDGET_URI, "start_process must mount the same-turn Library handoff widget");
+  assert.equal(read?._meta?.["openai/outputTemplate"], FILE_TRANSFER_WIDGET_URI, "read_output must mount the same-turn Library handoff widget");
   assert.equal(upload?._meta?.["openai/outputTemplate"], FILE_TRANSFER_WIDGET_URI, "only upload_local_file needs the upload widget");
   assert.equal(download?._meta?.["openai/outputTemplate"], undefined, "download_chatgpt_file should use native file params, not a widget");
   assert.deepEqual(download?._meta?.["openai/fileParams"], ["file"]);
@@ -242,6 +242,22 @@ assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v2.html", "wi
   assert.deepEqual(Object.keys(fileSchema?.properties || {}).sort(), ["download_url", "file_id", "file_name", "mime_type"]);
 
   assert.deepEqual(upload?.annotations, { readOnlyHint: false, destructiveHint: false, openWorldHint: false }, "Library upload is an additive closed-domain write, not a read-only or open-world action");
+
+  const markedImage = await client.callTool({ name: "start_process", arguments: { command: `Write-Output 'CHATGPT_LIBRARY_UPLOAD=${pngPath.replace(/'/g, "''")}'`, wait_ms: 10000 } });
+  assert.equal(markedImage._meta?.file_transfer?.file_name, "original.png", "process marker must prepare the same exact Library handoff without upload_local_file");
+  assert.equal(markedImage._meta?.file_transfer?.delivery_mode, "library_upload");
+  const markedNative = markedImage.content.find((entry) => entry.type === "image");
+  assert.ok(markedNative, "marked image process result must expose native image content in the same turn");
+  assert.equal(Buffer.from(markedNative.data, "base64").compare(png), 0);
+
+  const markedVideo = await client.callTool({ name: "start_process", arguments: { command: `Write-Output 'CHATGPT_LIBRARY_UPLOAD=${mediaPath.replace(/'/g, "''")}'`, wait_ms: 10000 } });
+  assert.equal(markedVideo._meta?.file_transfer?.file_name, "proof.mp4", "MP4 marker must use the same persistent Library handoff");
+  assert.equal(markedVideo._meta?.file_transfer?.mime_type, "video/mp4");
+
+  const markedZip = await client.callTool({ name: "start_process", arguments: { command: `Write-Output 'CHATGPT_LIBRARY_UPLOAD=${genericZipPath.replace(/'/g, "''")}'`, wait_ms: 10000 } });
+  assert.equal(markedZip._meta?.file_transfer?.file_name, "generic.zip", "ZIP marker must use the same persistent Library handoff");
+  assert.equal(markedZip._meta?.file_transfer?.mime_type, "application/zip");
+
   const imageUpload = await client.callTool({ name: "upload_local_file", arguments: { path: pngPath } });
   assert.equal(imageUpload._meta?.file_transfer?.delivery_mode, "library_upload", "direct images must persist through the ChatGPT Library path");
   const nativeImage = imageUpload.content.find((entry) => entry.type === "image");

@@ -5,7 +5,7 @@ import { z } from "zod";
 import { BusyStore } from "./lib/busy-store.js";
 import { viewImage } from "./lib/image-viewer.js";
 import { ProcessManager } from "./lib/process-manager.js";
-import { registerFileTransferTools } from "./lib/file-transfer.js";
+import { FILE_TRANSFER_WIDGET_URI, localFileTransferHandoff, prepareMarkedLocalFileTransfer, registerFileTransferTools } from "./lib/file-transfer.js";
 import { registerTemplateCompatibilityResources } from "./lib/template-compat.js";
 
 // The deployed ChatGPT connector surface is the process profile. Keep the broader
@@ -131,11 +131,14 @@ function textResult(value: unknown, id: string) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
 }
 
-function structuredTextResult(value: unknown, id: string) {
+async function structuredTextResult(value: unknown, id: string) {
   const data = resultData(value, id);
+  const transfer = await prepareMarkedLocalFileTransfer(value);
+  const handoff = transfer ? await localFileTransferHandoff(transfer) : null;
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(data) }],
+    content: [{ type: "text" as const, text: JSON.stringify(data) }, ...(handoff?.content || [])],
     structuredContent: data,
+    ...(handoff ? { _meta: { file_transfer: handoff.meta } } : {}),
   };
 }
 
@@ -171,7 +174,8 @@ export function createServer(callerId: string): McpServer {
   server.registerTool(
     "start_process",
     {
-      description: "Start a noninteractive PowerShell process. wait_ms controls how long the call may wait for completion before returning a process_id; the default is 750 ms and the supported range is 0 to 10 seconds.",
+      description: "Start a noninteractive PowerShell process. wait_ms controls how long the call may wait for completion before returning a process_id; the default is 750 ms and the supported range is 0 to 10 seconds. To return one finished local file to ChatGPT/Library in the same process turn, print a final line CHATGPT_LIBRARY_UPLOAD=<absolute path> after the file is fully written; this avoids a separate upload_local_file tool call and works in ChatGPT Work.",
+      _meta: { ui: { resourceUri: FILE_TRANSFER_WIDGET_URI }, "openai/outputTemplate": FILE_TRANSFER_WIDGET_URI },
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
       inputSchema: z.object({
         command: z.string().min(1),
@@ -188,7 +192,8 @@ export function createServer(callerId: string): McpServer {
   server.registerTool(
     "read_output",
     {
-      description: "Read a bounded tail of accumulated stdout and stderr for a process_id. wait_ms optionally sets the maximum wait for output or process exit; 0 is nonblocking. An unchanged timed wait returns no_change=true. elapsed_ms is process age. Each stream is limited to 32,000 characters.",
+      description: "Read a bounded tail of accumulated stdout and stderr for a process_id. wait_ms optionally sets the maximum wait for output or process exit; 0 is nonblocking. An unchanged timed wait returns no_change=true. elapsed_ms is process age. Each stream is limited to 32,000 characters. If stdout contains CHATGPT_LIBRARY_UPLOAD=<absolute path>, the same result carries that finished file into the ChatGPT/Library handoff without a separate upload tool call.",
+      _meta: { ui: { resourceUri: FILE_TRANSFER_WIDGET_URI }, "openai/outputTemplate": FILE_TRANSFER_WIDGET_URI },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: z.object({
         process_id: z.string().min(1),
