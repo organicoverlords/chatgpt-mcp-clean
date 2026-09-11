@@ -19,7 +19,7 @@ const MAX_REDIRECTS = 4;
 const MAX_REVIEW_ZIP_ENTRIES = 512;
 const MAX_REVIEW_ZIP_DIRECTORY_BYTES = 8 * 1024 * 1024;
 const MAX_REVIEW_MANIFEST_BYTES = 1024 * 1024;
-const REVIEW_ZIP_SCHEMAS = new Set(["lowvram.visual-review-transfer.v1", "p3.visual-review-transfer.v1"]);
+const REVIEW_ZIP_SCHEMAS = new Set(["lowvram.visual-review-transfer.v1", "p3.visual-review-transfer.v1", "tiny3d.visual-review-transfer.v1"]);
 
 const MIME_BY_EXT: Record<string, string> = {
   ".7z": "application/x-7z-compressed",
@@ -194,10 +194,11 @@ export async function prepareLocalFileTransfer(path: string): Promise<LocalFileT
   return item;
 }
 
-function localTransferMeta(item: LocalFileTransfer) {
+function localTransferMeta(item: LocalFileTransfer, deliveryMode: "library_upload" | "review_resources" = "library_upload") {
   return {
     direction: "local_to_chatgpt",
     phase: "ready",
+    delivery_mode: deliveryMode,
     transfer_url: localTransferUrl(item.token),
     file_name: item.file_name,
     mime_type: item.mime_type,
@@ -316,6 +317,41 @@ async function readStoredZipMember(path: string, sourceBytes: number, entry: Sto
   finally { await handle.close(); }
 }
 
+function visualReviewManifestFiles(manifest: any): any[] {
+  const schema = String(manifest?.schema || "");
+  if (schema !== "tiny3d.visual-review-transfer.v1") {
+    if (!Array.isArray(manifest?.files)) throw new Error("visual review ZIP manifest has invalid files array");
+    return manifest.files;
+  }
+
+  const assets = Array.isArray(manifest?.assets) ? manifest.assets : [];
+  if (!Number.isSafeInteger(manifest?.asset_count) || manifest.asset_count !== assets.length || assets.length < 1) {
+    throw new Error("Tiny3D visual review ZIP asset count mismatch");
+  }
+  const files: any[] = [];
+  let mediaCount = 0;
+  const seenAssets = new Set<string>();
+  for (const asset of assets) {
+    const assetId = String(asset?.asset_id || "");
+    if (!/^[0-9a-f]{64}$/.test(assetId) || seenAssets.has(assetId)) throw new Error(`Tiny3D visual review ZIP has invalid/duplicate asset_id: ${assetId}`);
+    seenAssets.add(assetId);
+    if (asset?.view_set !== "twelve_standard_v1") throw new Error(`Tiny3D visual review ZIP has unsupported view_set for ${assetId}`);
+    const views = Array.isArray(asset?.views) ? asset.views : [];
+    if (views.length !== 12) throw new Error(`Tiny3D visual review ZIP requires 12 views for ${assetId}`);
+    const receipt = asset?.receipt;
+    if (!receipt || typeof receipt !== "object") throw new Error(`Tiny3D visual review ZIP receipt missing for ${assetId}`);
+    files.push({ ...receipt, role: `receipt:${assetId}`, source_name: `${assetId}_library_preview.json` });
+    for (const view of views) {
+      const label = String(view?.label || "");
+      if (!label) throw new Error(`Tiny3D visual review ZIP view label missing for ${assetId}`);
+      files.push({ ...view, role: `view:${assetId}:${label}`, source_name: `${assetId}_${label}.png` });
+      mediaCount += 1;
+    }
+  }
+  if (!Number.isSafeInteger(manifest?.media_count) || manifest.media_count !== mediaCount) throw new Error("Tiny3D visual review ZIP media count mismatch");
+  return files;
+}
+
 async function visualReviewZipResources(item: LocalFileTransfer): Promise<LocalImageResource[]> {
   if (item.mime_type !== "application/zip") return [];
   let entries: Map<string, StoredZipEntry>;
@@ -327,11 +363,12 @@ async function visualReviewZipResources(item: LocalFileTransfer): Promise<LocalI
   try { manifest = JSON.parse((await readStoredZipMember(item.path, item.bytes, manifestEntry)).toString("utf8")); }
   catch { return []; }
   if (!REVIEW_ZIP_SCHEMAS.has(String(manifest?.schema || ""))) return [];
-  if (!Array.isArray(manifest.files) || manifest.files.length < 1 || manifest.files.length > MAX_REVIEW_ZIP_ENTRIES - 1) throw new Error("visual review ZIP manifest has invalid files array");
+  const manifestFiles = visualReviewManifestFiles(manifest);
+  if (manifestFiles.length < 1 || manifestFiles.length > MAX_REVIEW_ZIP_ENTRIES - 1) throw new Error("visual review ZIP manifest has invalid files array");
 
   const declared = new Set<string>();
   const resources: LocalImageResource[] = [];
-  for (const raw of manifest.files) {
+  for (const raw of manifestFiles) {
     const archivePath = String(raw?.archive_path || "");
     const bytes = Number(raw?.bytes);
     const sha256 = String(raw?.sha256 || "").toLowerCase();
@@ -585,13 +622,19 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
       const item = await prepareLocalFileTransfer(path);
       const directImage = item.mime_type.startsWith("image/") ? localImageResources.get(item.token) : undefined;
       const reviewImages = directImage ? [directImage] : await visualReviewZipResources(item);
+      const reviewResourceMode = item.mime_type === "application/zip" && reviewImages.length > 0;
+      if (item.mime_type === "application/zip" && !reviewResourceMode) {
+        localExports.delete(item.token);
+        throw new Error("ChatGPT Library upload does not support ZIP files; only recognized manifest-declared visual review ZIPs are supported via exact image resources");
+      }
+      const deliveryMode = reviewResourceMode ? "review_resources" : "library_upload";
       return {
         content: [
-          { type: "text" as const, text: JSON.stringify({ caller_id: callerId, status: "ready", file_name: item.file_name, mime_type: item.mime_type, bytes: item.bytes, sha256: item.sha256 }) },
+          { type: "text" as const, text: JSON.stringify({ caller_id: callerId, status: "ready", delivery_mode: deliveryMode, file_name: item.file_name, mime_type: item.mime_type, bytes: item.bytes, sha256: item.sha256, review_resource_count: reviewResourceMode ? reviewImages.length : 0 }) },
           ...reviewImages.map(localImageResourceLink),
         ],
         structuredContent: { direction: "local_to_chatgpt", status: "ready", file_name: item.file_name, mime_type: item.mime_type, bytes: item.bytes, sha256: item.sha256 },
-        _meta: { file_transfer: localTransferMeta(item) },
+        _meta: { file_transfer: localTransferMeta(item, deliveryMode) },
       };
     },
   );
@@ -630,8 +673,10 @@ function setStatus(v){statusEl.textContent=v;window.openai?.notifyIntrinsicHeigh
 function hex(bytes){return [...new Uint8Array(bytes)].map(b=>b.toString(16).padStart(2,'0')).join('');}
 function payload(result){return result?._meta?.file_transfer||null;}
 async function render(result){
- const p=payload(result);if(!p||p.direction!=='local_to_chatgpt'||!p.transfer_url)return;
- const key=p.sha256+':'+p.transfer_url;if(started===key)return;started=key;setStatus('FILE_TRANSFER_RUNNING '+p.file_name);
+ const p=payload(result);if(!p||p.direction!=='local_to_chatgpt')return;
+ const key=p.sha256+':'+(p.delivery_mode||'library_upload');if(started===key)return;started=key;
+ if(p.delivery_mode==='review_resources'){setStatus('FILE_TRANSFER_OK review media exposed from '+p.file_name);return;}
+ if(!p.transfer_url)return;setStatus('FILE_TRANSFER_RUNNING '+p.file_name);
  try{
   if(typeof window.openai?.uploadFile!=='function')throw new Error('UPLOAD_FILE_UNAVAILABLE');
   const r=await fetch(p.transfer_url,{cache:'no-store'});if(!r.ok)throw new Error('TRANSFER_HTTP_'+r.status);
