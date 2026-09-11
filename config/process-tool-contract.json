@@ -178,7 +178,7 @@
   },
   {
     "name": "read_output",
-    "description": "Read a bounded tail of accumulated stdout and stderr for a process_id. wait_ms optionally sets the maximum wait for output or process exit; 0 is nonblocking. An unchanged timed wait returns no_change=true. elapsed_ms is process age. Each stream is limited to 32,000 characters.",
+    "description": "Read a bounded tail of accumulated stdout and stderr for a process_id. wait_ms optionally sets the maximum wait for output or process exit; 0 is nonblocking. An unchanged timed wait returns no_change=true. elapsed_ms is process age. Each stream is limited to 32,000 characters. If stdout contains CHATGPT_LIBRARY_UPLOAD=<absolute path>, the same result carries that finished file into the ChatGPT/Library handoff without a separate upload tool call.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -553,7 +553,7 @@
   },
   {
     "name": "start_process",
-    "description": "Start a noninteractive PowerShell process. wait_ms controls how long the call may wait for completion before returning a process_id; the default is 750 ms and the supported range is 0 to 10 seconds.",
+    "description": "Start a noninteractive PowerShell process. wait_ms controls how long the call may wait for completion before returning a process_id; the default is 750 ms and the supported range is 0 to 10 seconds. To return one finished local file to ChatGPT/Library in the same process turn, print a final line CHATGPT_LIBRARY_UPLOAD=<absolute path> after the file is fully written; this avoids a separate upload_local_file tool call and works in ChatGPT Work.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",

@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { FILE_TRANSFER_WIDGET_URI } from "../dist/lib/file-transfer.js";
 
 const externalStateRoot = process.env.MCP_TEST_STATE_ROOT?.trim();
 if (externalStateRoot) mkdirSync(resolve(externalStateRoot), { recursive: true });
@@ -203,8 +204,8 @@ try {
     assert.deepEqual(byName.start_process.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: true });
     assert.deepEqual(byName.read_output.annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: false });
     assert.deepEqual(byName.kill_process.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: false });
-    assert.equal(byName.start_process?._meta?.["openai/outputTemplate"], undefined);
-    assert.equal(byName.read_output?._meta?.["openai/outputTemplate"], undefined);
+    assert.equal(byName.start_process?._meta?.["openai/outputTemplate"], FILE_TRANSFER_WIDGET_URI);
+    assert.equal(byName.read_output?._meta?.["openai/outputTemplate"], FILE_TRANSFER_WIDGET_URI);
   }
 
   const historicalTemplateUris = [

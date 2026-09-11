@@ -22,8 +22,8 @@ await Promise.all([server.connect(serverTransport), client.connect(clientTranspo
 try {
   const listed = await client.listTools();
   const byName = Object.fromEntries(listed.tools.map((tool) => [tool.name, tool]));
-  assert.equal(byName.start_process?._meta?.["openai/outputTemplate"], undefined, "start_process must not mount an app template on this generation");
-  assert.equal(byName.read_output?._meta?.["openai/outputTemplate"], undefined, "read_output must not mount an app template on this generation");
+  assert.equal(byName.start_process?._meta?.["openai/outputTemplate"], FILE_TRANSFER_WIDGET_URI, "start_process must mount the Library handoff app template");
+  assert.equal(byName.read_output?._meta?.["openai/outputTemplate"], FILE_TRANSFER_WIDGET_URI, "read_output must mount the Library handoff app template");
   assert.equal(byName.upload_local_file?._meta?.["openai/outputTemplate"], FILE_TRANSFER_WIDGET_URI, "working upload_local_file template contract must remain unchanged");
 
   const expectedUris = [FILE_TRANSFER_WIDGET_URI, ...LEGACY_PROCESS_LIBRARY_UPLOAD_WIDGET_URIS, LEGACY_VISUAL_PROOF_WIDGET_URI];

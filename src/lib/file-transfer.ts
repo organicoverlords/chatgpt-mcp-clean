@@ -11,7 +11,8 @@ import type { Request, Response as ExpressResponse } from "express";
 import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-export const FILE_TRANSFER_WIDGET_URI = "ui://process/file-transfer-v2.html";
+export const FILE_TRANSFER_WIDGET_URI = "ui://process/file-transfer-v3.html";
+export const FILE_TRANSFER_MARKER_PREFIX = "CHATGPT_LIBRARY_UPLOAD=";
 const LEGACY_FILE_TRANSFER_WIDGET_URIS = ["ui://process/file-transfer-v1.html"] as const;
 const LOCAL_EXPORT_TTL_MS = 5 * 60 * 1000;
 const MAX_NATIVE_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -196,7 +197,18 @@ export async function prepareLocalFileTransfer(path: string): Promise<LocalFileT
   return item;
 }
 
-function localTransferMeta(item: LocalFileTransfer) {
+export async function prepareMarkedLocalFileTransfer(value: unknown): Promise<LocalFileTransfer | null> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const stdout = (value as Record<string, unknown>).stdout;
+  if (typeof stdout !== "string") return null;
+  const marker = stdout.split(/\r?\n/).map((line) => line.trim()).reverse().find((line) => line.startsWith(FILE_TRANSFER_MARKER_PREFIX));
+  if (!marker) return null;
+  const path = marker.slice(FILE_TRANSFER_MARKER_PREFIX.length).trim();
+  if (!path) throw new Error("CHATGPT_LIBRARY_UPLOAD marker must name an absolute local file path");
+  return prepareLocalFileTransfer(path);
+}
+
+export function localTransferMeta(item: LocalFileTransfer) {
   return {
     direction: "local_to_chatgpt",
     phase: "ready",
@@ -213,7 +225,7 @@ function localImageResourceUri(item: LocalImageResource): string {
   return `mcp-upload://file-transfer/${item.token}`;
 }
 
-function localImageResourceLink(item: LocalImageResource) {
+export function localImageResourceLink(item: LocalImageResource) {
   return {
     type: "resource_link" as const,
     uri: localImageResourceUri(item),
@@ -226,7 +238,7 @@ function localImageResourceLink(item: LocalImageResource) {
   };
 }
 
-async function localNativeImageContent(item: LocalImageResource) {
+export async function localNativeImageContent(item: LocalImageResource) {
   if (item.bytes > MAX_NATIVE_IMAGE_BYTES) return null;
   const resource = await localImageResourceContents(localImageResourceUri(item));
   return {
@@ -606,6 +618,16 @@ function uploadToolMeta() {
   };
 }
 
+export async function localFileTransferHandoff(item: LocalFileTransfer) {
+  const directImage = item.mime_type.startsWith("image/") ? localImageResources.get(item.token) : undefined;
+  const reviewImages = directImage ? [directImage] : await visualReviewZipResources(item);
+  const nativeImage = directImage ? await localNativeImageContent(directImage) : null;
+  const content: any[] = [];
+  if (nativeImage) content.push(nativeImage);
+  content.push(...reviewImages.map(localImageResourceLink));
+  return { item, content, meta: localTransferMeta(item) };
+}
+
 export function registerFileTransferTools(server: McpServer, callerId: string): void {
   server.registerResource(
     "file-transfer-image",
@@ -637,19 +659,14 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
       outputSchema: UploadLocalFileOutputSchema,
     },
     async ({ path }) => {
-      const item = await prepareLocalFileTransfer(path);
-      const directImage = item.mime_type.startsWith("image/") ? localImageResources.get(item.token) : undefined;
-      const reviewImages = directImage ? [directImage] : await visualReviewZipResources(item);
-      const nativeImage = directImage ? await localNativeImageContent(directImage) : null;
-      const content: any[] = [
-        { type: "text" as const, text: JSON.stringify({ caller_id: callerId, status: "ready", delivery_mode: "library_upload", file_name: item.file_name, mime_type: item.mime_type, bytes: item.bytes, sha256: item.sha256, review_resource_count: directImage ? 0 : reviewImages.length }) },
-      ];
-      if (nativeImage) content.push(nativeImage);
-      content.push(...reviewImages.map(localImageResourceLink));
+      const handoff = await localFileTransferHandoff(await prepareLocalFileTransfer(path));
       return {
-        content,
-        structuredContent: { direction: "local_to_chatgpt", status: "ready", file_name: item.file_name, mime_type: item.mime_type, bytes: item.bytes, sha256: item.sha256 },
-        _meta: { file_transfer: localTransferMeta(item) },
+        content: [
+          { type: "text" as const, text: JSON.stringify({ caller_id: callerId, status: "ready", delivery_mode: "library_upload", file_name: handoff.item.file_name, mime_type: handoff.item.mime_type, bytes: handoff.item.bytes, sha256: handoff.item.sha256 }) },
+          ...handoff.content,
+        ],
+        structuredContent: { direction: "local_to_chatgpt", status: "ready", file_name: handoff.item.file_name, mime_type: handoff.item.mime_type, bytes: handoff.item.bytes, sha256: handoff.item.sha256 },
+        _meta: { file_transfer: handoff.meta },
       };
     },
   );
@@ -715,6 +732,6 @@ async function render(result){
 }
 window.addEventListener('message',event=>{if(event.source!==window.parent)return;const m=event.data;if(m?.jsonrpc!=='2.0')return;if(m.id==='file-transfer-init'&&('result'in m||'error'in m)){if(!m.error)window.parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*');return;}if(m.method==='ui/notifications/tool-result')render(m.params||{});});
 const envelope=window.openai?.toolResponseMetadata?.mcp_tool_result;if(envelope)render(envelope);
-window.parent.postMessage({jsonrpc:'2.0',id:'file-transfer-init',method:'ui/initialize',params:{protocolVersion:'2026-01-26',appInfo:{name:'process-file-transfer',version:'2.0.0'},appCapabilities:{availableDisplayModes:['inline']}}},'*');
+window.parent.postMessage({jsonrpc:'2.0',id:'file-transfer-init',method:'ui/initialize',params:{protocolVersion:'2026-01-26',appInfo:{name:'process-file-transfer',version:'3.0.0'},appCapabilities:{availableDisplayModes:['inline']}}},'*');
 </script></body></html>`;
 }
