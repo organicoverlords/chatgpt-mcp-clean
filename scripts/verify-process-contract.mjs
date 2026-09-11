@@ -18,13 +18,35 @@ registerOptionalVisualProofTools(server, "contract-verifier");
 const actualTools = Object.entries(server._registeredTools)
   .sort(([a], [b]) => a.localeCompare(b))
   .map(([name, tool]) => ({ name, description: tool.description || "", inputSchema: z.toJSONSchema(tool.inputSchema), ...(tool.outputSchema ? { outputSchema: z.toJSONSchema(tool.outputSchema) } : {}) }));
+
+const structuredProcessToolNames = ["start_process", "read_output", "kill_process"];
+for (const name of structuredProcessToolNames) {
+  assert.ok(server._registeredTools[name]?.outputSchema, `${name} must declare outputSchema`);
+}
+
+async function assertStructuredProcessResult(name, args) {
+  const tool = server._registeredTools[name];
+  const result = await tool.handler(args, {});
+  assert.ok(result.structuredContent, `${name} must return structuredContent`);
+  assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent, `${name} text and structured results must stay compatible`);
+  const parsed = await tool.outputSchema.safeParseAsync(result.structuredContent);
+  assert.ok(parsed.success, `${name} structuredContent must validate against outputSchema: ${parsed.error || "unknown error"}`);
+  return result.structuredContent;
+}
+
+const startStructured = await assertStructuredProcessResult("start_process", { command: "Write-Output process-contract-structured", wait_ms: 10_000 });
+assert.match(startStructured.stdout || "", /process-contract-structured/, "start_process structured output should preserve stdout");
+const readStructured = await assertStructuredProcessResult("read_output", { process_id: startStructured.process_id, max_chars: 32_000, wait_ms: 0 });
+assert.equal(readStructured.process_id, startStructured.process_id, "read_output structured result must preserve process identity");
+const killStructured = await assertStructuredProcessResult("kill_process", { process_id: startStructured.process_id });
+assert.equal(killStructured.already_exited, true, "kill_process structured regression probe should exercise already-exited variant");
 const contractPath = resolve("config/process-tool-contract.json");
 const contractBytes = readFileSync(contractPath);
 const expectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "6d1667122da100bea318db0cdc662774c156245f06c94c80456b74f580d437de";
+const acceptedContractSha256 = "94270cd48cbf005b5b82babe7d41f795f4e356afc31b8d0309596da48f3bc6e2";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(expectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 assert.deepEqual(actualTools, expectedTools, "connector tool contract changed; do not replace a stable connector identity without an explicit contract migration");
@@ -33,4 +55,5 @@ const actualHash = createHash("sha256").update(serverBytes).digest("hex");
 const expectedHash = readFileSync(resolve("config/process-server.sha256"), "utf8").trim();
 assert.equal(actualHash, expectedHash, "dist/server.js changed from the pinned stable implementation; replacement blocked");
 console.log(`PASS process_contract_guard tools=${actualTools.map((tool) => tool.name).join(",")} server_sha256=${actualHash}`);
+process.exit(0);
 
