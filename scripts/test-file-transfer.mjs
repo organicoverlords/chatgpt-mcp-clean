@@ -241,6 +241,7 @@ assert.ok(listedByName.download_chatgpt_file.outputSchema, "download tool must d
   assert.deepEqual(Object.keys(fileSchema?.properties || {}).sort(), ["download_url", "file_id", "file_name", "mime_type"]);
 
   const imageUpload = await client.callTool({ name: "upload_local_file", arguments: { path: pngPath } });
+  assert.equal(imageUpload._meta?.file_transfer?.delivery_mode, "image_resource", "direct images must bypass ChatGPT Library upload and use the same-turn resource path");
   const imageLink = imageUpload.content.find((entry) => entry.type === "resource_link");
   assert.ok(imageLink, "image upload must return a same-turn resource_link for native vision");
   assert.equal(imageLink.mimeType, "image/png");
@@ -305,6 +306,8 @@ assert.match(widget, /imageEl\.src=URL\.createObjectURL\(blob\)/, "widget must r
 assert.match(widget, /const file=new File\(\[blob\],p\.file_name/, "Library upload must reuse the same exact bytes shown in the preview");
 assert.match(widget, /uploadFile\(file,\{library:true\}\)/);
 assert.match(widget, /delivery_mode==='review_resources'/, "review ZIP resources must bypass ChatGPT Library upload");
+assert.match(widget, /delivery_mode==='image_resource'/, "direct image resources must bypass ChatGPT Library upload");
+assert.ok(widget.indexOf("delivery_mode==='image_resource'") < widget.indexOf("uploadFile(file,{library:true})"), "direct-image resource branch must return before the Library upload call");
 assert.match(widget, /crypto\.subtle\.digest\('SHA-256',data\)/);
 assert.doesNotMatch(widget, /getFileDownloadUrl|callTool\(/, "download path should not need a widget round trip");
 

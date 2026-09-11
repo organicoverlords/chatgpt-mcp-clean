@@ -194,7 +194,7 @@ export async function prepareLocalFileTransfer(path: string): Promise<LocalFileT
   return item;
 }
 
-function localTransferMeta(item: LocalFileTransfer, deliveryMode: "library_upload" | "review_resources" = "library_upload") {
+function localTransferMeta(item: LocalFileTransfer, deliveryMode: "library_upload" | "image_resource" | "review_resources" = "library_upload") {
   return {
     direction: "local_to_chatgpt",
     phase: "ready",
@@ -622,12 +622,13 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
       const item = await prepareLocalFileTransfer(path);
       const directImage = item.mime_type.startsWith("image/") ? localImageResources.get(item.token) : undefined;
       const reviewImages = directImage ? [directImage] : await visualReviewZipResources(item);
+      const directImageResourceMode = Boolean(directImage);
       const reviewResourceMode = item.mime_type === "application/zip" && reviewImages.length > 0;
       if (item.mime_type === "application/zip" && !reviewResourceMode) {
         localExports.delete(item.token);
         throw new Error("ChatGPT Library upload does not support ZIP files; only recognized manifest-declared visual review ZIPs are supported via exact image resources");
       }
-      const deliveryMode = reviewResourceMode ? "review_resources" : "library_upload";
+      const deliveryMode = directImageResourceMode ? "image_resource" : reviewResourceMode ? "review_resources" : "library_upload";
       return {
         content: [
           { type: "text" as const, text: JSON.stringify({ caller_id: callerId, status: "ready", delivery_mode: deliveryMode, file_name: item.file_name, mime_type: item.mime_type, bytes: item.bytes, sha256: item.sha256, review_resource_count: reviewResourceMode ? reviewImages.length : 0 }) },
@@ -678,12 +679,13 @@ async function render(result){
  if(p.delivery_mode==='review_resources'){setStatus('FILE_TRANSFER_OK review media exposed from '+p.file_name);return;}
  if(!p.transfer_url)return;setStatus('FILE_TRANSFER_RUNNING '+p.file_name);
  try{
-  if(typeof window.openai?.uploadFile!=='function')throw new Error('UPLOAD_FILE_UNAVAILABLE');
   const r=await fetch(p.transfer_url,{cache:'no-store'});if(!r.ok)throw new Error('TRANSFER_HTTP_'+r.status);
   const data=await r.arrayBuffer();if(data.byteLength!==p.bytes)throw new Error('BYTE_COUNT_MISMATCH');
   const digest=hex(await crypto.subtle.digest('SHA-256',data));if(digest!==p.sha256)throw new Error('SHA256_MISMATCH');
    const blob=new Blob([data],{type:p.mime_type});
    if(p.mime_type.startsWith('image/')){imageEl.src=URL.createObjectURL(blob);imageEl.classList.add('on');window.openai?.notifyIntrinsicHeight?.();}
+   if(p.delivery_mode==='image_resource'){setStatus('FILE_TRANSFER_OK '+p.file_name+' exact image resource');return;}
+   if(typeof window.openai?.uploadFile!=='function')throw new Error('UPLOAD_FILE_UNAVAILABLE');
    const file=new File([blob],p.file_name,{type:p.mime_type});const out=await window.openai.uploadFile(file,{library:true});
   const fileId=out?.fileId||'';if(!fileId)throw new Error('UPLOAD_FILE_ID_MISSING');
   window.openai?.setWidgetState?.({modelContent:{file_transfer:{status:'ok',direction:'local_to_chatgpt',fileId,fileName:p.file_name,bytes:p.bytes,sha256:p.sha256}},privateContent:{file_transfer:{status:'ok',fileId,fileName:p.file_name,bytes:p.bytes,sha256:p.sha256}},imageIds:p.mime_type.startsWith('image/')?[fileId]:[]});
