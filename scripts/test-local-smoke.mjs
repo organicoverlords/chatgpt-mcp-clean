@@ -131,6 +131,12 @@ try {
     smoke.once("exit", (code) => resolveExit(code ?? 1));
   });
   assert.equal(exitCode, 0, `local smoke failed; server stderr: ${serverStderr}`);
+  const transportRows = readFileSync(join(temporary, "transport.jsonl"), "utf8").split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  const targetedStart = transportRows.find((row) => row.event === "process_started" && row.activity_target?.id === "smoke-activity-target");
+  assert.ok(targetedStart, "process_started telemetry must retain the explicit activity target");
+  assert.deepEqual(targetedStart.activity_target, { type: "card", id: "smoke-activity-target", project: "nexus" });
+  assert.equal(targetedStart.action_class, "smoke");
+  assert.equal(transportRows.some((row) => JSON.stringify(row).includes("INVALID_TARGET_MUST_NOT_RUN")), false, "schema-rejected target must never launch or reach process telemetry");
 
   const stress = spawn(process.execPath, [resolve("scripts/stress.mjs")], {
     cwd: resolve("."),

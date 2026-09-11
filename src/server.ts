@@ -19,6 +19,14 @@ const processManager = new ProcessManager({
   receiptDirectory: resolve(process.env.MCP_PROCESS_RECEIPT_DIR || ".state/process-receipts"),
   ...(configuredMaxLiveProcesses !== undefined ? { maxLiveTotal: configuredMaxLiveProcesses } : {}),
 });
+const activityToken = /^[A-Za-z0-9._/:_-]+$/;
+const activityTargetSchema = z.object({
+  type: z.enum(["card", "node", "project"]),
+  id: z.string().min(1).max(160).regex(activityToken),
+  project: z.string().min(1).max(80).regex(activityToken).optional(),
+}).strict();
+const actionClassSchema = z.string().min(1).max(64).regex(activityToken);
+
 const liveSessions = new Set<string>();
 const busyStore = fullToolProfile ? new BusyStore((scope) => {
   const sessionId = scope.startsWith("session:") ? scope.slice("session:".length) : scope;
@@ -69,9 +77,11 @@ export function createServer(callerId: string): McpServer {
         command: z.string().min(1),
         working_directory: z.string().optional(),
         wait_ms: z.number().int().min(0).max(10_000).optional(),
+        activity_target: activityTargetSchema.optional(),
+        action_class: actionClassSchema.optional(),
       }),
     },
-    async ({ command, working_directory, wait_ms }) => textResult(await processManager.startWithWait(command, working_directory, callerId, wait_ms ?? 750), callerId),
+    async ({ command, working_directory, wait_ms, activity_target, action_class }) => textResult(await processManager.startWithWait(command, working_directory, callerId, wait_ms ?? 750, activity_target, action_class), callerId),
   );
 
   server.registerTool(

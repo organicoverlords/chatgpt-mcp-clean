@@ -36,11 +36,23 @@ type ProcessManagerOptions = {
   receiptDirectory?: string;
 };
 
+export type ActivityTarget = {
+  type: "card" | "node" | "project";
+  id: string;
+  project?: string;
+};
+
+function sameActivityTarget(left?: ActivityTarget, right?: ActivityTarget): boolean {
+  return left?.type === right?.type && left?.id === right?.id && left?.project === right?.project;
+}
+
 type CompletedProcessReceipt = {
   version: 1;
   process_id: string;
   pid: number;
   caller_id: string;
+  activity_target?: ActivityTarget;
+  action_class?: string;
   request_id?: string;
   audit_schema?: "process-output-evidence.v1";
   retained_stdout_chars?: number;
@@ -166,6 +178,8 @@ type ProcessState = {
   ownerContext: TelemetryContext;
   command: string;
   submittedCommand?: string;
+  activityTarget?: ActivityTarget;
+  actionClass?: string;
   cwd: string;
   launching: boolean;
   terminalObserved: boolean;
@@ -983,7 +997,7 @@ export class ProcessManager {
       state.pid = message.pid;
       state.launching = false;
       this.updateHostAdmissionChildPid(state.id, state.pid);
-      emitTelemetry({ event: "process_started", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, cwd: state.cwd, started_at: state.startedAt }, state.ownerContext);
+      emitTelemetry({ event: "process_started", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, cwd: state.cwd, started_at: state.startedAt, ...(state.activityTarget ? { activity_target: state.activityTarget } : {}), ...(state.actionClass ? { action_class: state.actionClass } : {}) }, state.ownerContext);
       if (state.killRequested) this.launcherWorker.postMessage({ type: "kill", requestId: state.id });
       return;
     }
@@ -1374,6 +1388,8 @@ export class ProcessManager {
       process_id: state.id,
       pid: state.pid,
       caller_id: state.callerId,
+      ...(state.activityTarget ? { activity_target: state.activityTarget } : {}),
+      ...(state.actionClass ? { action_class: state.actionClass } : {}),
       ...audit,
       command,
       ...(state.command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}),
@@ -1437,7 +1453,7 @@ export class ProcessManager {
     const stdout = state.stdout.tail(MAX_CAPTURE_CHARS, MAX_CAPTURE_CHARS);
     const stderr = state.stderr.tail(MAX_CAPTURE_CHARS, MAX_CAPTURE_CHARS);
     const audit = processOutputAudit(stdout.text, stderr.text, stdout.truncated, stderr.truncated, exitCode, signal, state.error, state.ownerContext.request_id);
-    const receipt: CompletedProcessReceipt = { version: 1, process_id: state.id, pid: state.pid, caller_id: state.callerId, ...audit, command, ...(state.command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}), ...(state.submittedCommand !== undefined ? { submitted_command: state.submittedCommand.slice(0, MAX_COMMAND_REPORT_CHARS), ...(state.submittedCommand.length > MAX_COMMAND_REPORT_CHARS ? { submitted_command_truncated: true as const } : {}) } : {}), cwd: state.cwd, stdout: stdout.text, stderr: stderr.text, ...(stdout.truncated ? { stdout_truncated: true as const } : {}), ...(stderr.truncated ? { stderr_truncated: true as const } : {}), exit_code: exitCode, signal, started_at: state.startedAt, finished_at: finishedAt, ...(state.error ? { error: state.error } : {}) };
+    const receipt: CompletedProcessReceipt = { version: 1, process_id: state.id, pid: state.pid, caller_id: state.callerId, ...(state.activityTarget ? { activity_target: state.activityTarget } : {}), ...(state.actionClass ? { action_class: state.actionClass } : {}), ...audit, command, ...(state.command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}), ...(state.submittedCommand !== undefined ? { submitted_command: state.submittedCommand.slice(0, MAX_COMMAND_REPORT_CHARS), ...(state.submittedCommand.length > MAX_COMMAND_REPORT_CHARS ? { submitted_command_truncated: true as const } : {}) } : {}), cwd: state.cwd, stdout: stdout.text, stderr: stderr.text, ...(stdout.truncated ? { stdout_truncated: true as const } : {}), ...(stderr.truncated ? { stderr_truncated: true as const } : {}), exit_code: exitCode, signal, started_at: state.startedAt, finished_at: finishedAt, ...(state.error ? { error: state.error } : {}) };
     const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
     try {
       await writeFileAsync(temporaryPath, JSON.stringify(receipt), { encoding: "utf8", flag: "wx" });
@@ -1455,7 +1471,7 @@ export class ProcessManager {
     const observerCallerId = observer.caller_id ?? "caller_unknown";
     emitTelemetry({ event: "process_receipt_read", process_id: receipt.process_id, pid: receipt.pid, owner_caller_id: receipt.caller_id, caller_id: observerCallerId }, observer);
     const audit = processOutputAudit(receipt.stdout, receipt.stderr, Boolean(receipt.stdout_truncated), Boolean(receipt.stderr_truncated), receipt.exit_code, receipt.signal, receipt.error, receipt.request_id);
-    const legacy = { ...processResponseState(receipt.started_at, false, receipt.finished_at), process_id: receipt.process_id, pid: receipt.pid, ...audit, command: receipt.command, ...(receipt.command_truncated ? { command_truncated: true } : {}), ...(receipt.submitted_command !== undefined ? { submitted_command: receipt.submitted_command, ...(receipt.submitted_command_truncated ? { submitted_command_truncated: true } : {}) } : {}), cwd: receipt.cwd, running: false, stdout: receipt.stdout.slice(-limit), stderr: receipt.stderr.slice(-limit), exit_code: receipt.exit_code, signal: receipt.signal, started_at: receipt.started_at, finished_at: receipt.finished_at, ...(receipt.stdout_truncated || receipt.stdout.length > limit ? { stdout_truncated: true } : {}), ...(receipt.stderr_truncated || receipt.stderr.length > limit ? { stderr_truncated: true } : {}), ...(receipt.error ? { error: receipt.error } : {}) };
+    const legacy = { ...processResponseState(receipt.started_at, false, receipt.finished_at), process_id: receipt.process_id, pid: receipt.pid, ...audit, ...(receipt.activity_target ? { activity_target: receipt.activity_target } : {}), ...(receipt.action_class ? { action_class: receipt.action_class } : {}), command: receipt.command, ...(receipt.command_truncated ? { command_truncated: true } : {}), ...(receipt.submitted_command !== undefined ? { submitted_command: receipt.submitted_command, ...(receipt.submitted_command_truncated ? { submitted_command_truncated: true } : {}) } : {}), cwd: receipt.cwd, running: false, stdout: receipt.stdout.slice(-limit), stderr: receipt.stderr.slice(-limit), exit_code: receipt.exit_code, signal: receipt.signal, started_at: receipt.started_at, finished_at: receipt.finished_at, ...(receipt.stdout_truncated || receipt.stdout.length > limit ? { stdout_truncated: true } : {}), ...(receipt.stderr_truncated || receipt.stderr.length > limit ? { stderr_truncated: true } : {}), ...(receipt.error ? { error: receipt.error } : {}) };
     const cursorExists = this.outputCursors.has(this.cursorKey(receipt.process_id, observerCallerId));
     const needsPaging = cursorExists || receipt.stdout.length + receipt.stderr.length > limit;
     return needsPaging ? this.pageOutput(legacy, receipt.stdout, receipt.stderr, observerCallerId, Boolean(receipt.stdout_truncated), Boolean(receipt.stderr_truncated), limit) : legacy;
@@ -1551,7 +1567,7 @@ export class ProcessManager {
     for (const state of remaining.slice(0, Math.max(0, remaining.length - this.maxCompletedProcesses))) this.processes.delete(state.id);
   }
 
-  start(command: string, workingDirectory?: string, callerId = "caller_unknown"): { mcp_status: "OK"; process_state: "RUNNING" | "COMPLETED"; elapsed_ms: number; next_action: "READ_SAME_PROCESS_ID" | "STOP_READING"; process_id: string; pid: number; cwd: string; running: boolean; launching?: boolean } {
+  start(command: string, workingDirectory?: string, callerId = "caller_unknown", activityTarget?: ActivityTarget, actionClass?: string): { mcp_status: "OK"; process_state: "RUNNING" | "COMPLETED"; elapsed_ms: number; next_action: "READ_SAME_PROCESS_ID" | "STOP_READING"; process_id: string; pid: number; cwd: string; running: boolean; launching?: boolean } {
     this.pruneCompleted();
     const normalization = normalizePowerShellControlStatementPipelines(command);
     const effectiveCommand = normalization.command;
@@ -1563,7 +1579,7 @@ export class ProcessManager {
       throw new Error(`start_process_preflight_failed: ${preflightError}`);
     }
     const cwd = normalizedCwd(workingDirectory);
-    const duplicate = [...this.processes.values()].find((state) => state.exitCode === null && state.callerId === callerId && state.cwd === cwd && state.command === effectiveCommand);
+    const duplicate = [...this.processes.values()].find((state) => state.exitCode === null && state.callerId === callerId && state.cwd === cwd && state.command === effectiveCommand && sameActivityTarget(state.activityTarget, activityTarget) && state.actionClass === actionClass);
     if (duplicate) {
       emitTelemetry({ event: "process_reused", process_id: duplicate.id, pid: duplicate.pid, owner_caller_id: duplicate.callerId });
       return { ...processResponseState(duplicate.startedAt, true), process_id: duplicate.id, pid: duplicate.pid, cwd: duplicate.cwd, running: true, ...(duplicate.launching ? { launching: true } : {}) } as const;
@@ -1578,7 +1594,7 @@ export class ProcessManager {
     let resolveDone!: () => void;
     const done = new Promise<void>((resolve) => { resolveDone = resolve; });
     const state: ProcessState = {
-      id: processId, pid: 0, callerId, ownerContext, command: effectiveCommand, ...(normalization.changed ? { submittedCommand: command } : {}), cwd,
+      id: processId, pid: 0, callerId, ownerContext, command: effectiveCommand, ...(normalization.changed ? { submittedCommand: command } : {}), ...(activityTarget ? { activityTarget } : {}), ...(actionClass ? { actionClass } : {}), cwd,
       launching: true, terminalObserved: false, resolveDone, killRequested: false,
       stdout: new BoundedCapture(), stderr: new BoundedCapture(), startedAt, exitCode: null,
       done, revision: 0, lastReadRevisionByCaller: new Map<string, number>(), waiters: new Set<() => void>(),
@@ -1594,7 +1610,7 @@ export class ProcessManager {
       throw error;
     }
     if (normalization.changed) emitTelemetry({ event: "process_command_normalized", process_id: state.id, rewrite: "control_statement_pipeline_capture" }, state.ownerContext);
-    emitTelemetry({ event: "process_launch_queued", process_id: state.id, owner_caller_id: state.callerId, cwd: state.cwd, started_at: state.startedAt }, state.ownerContext);
+    emitTelemetry({ event: "process_launch_queued", process_id: state.id, owner_caller_id: state.callerId, cwd: state.cwd, started_at: state.startedAt, ...(state.activityTarget ? { activity_target: state.activityTarget } : {}), ...(state.actionClass ? { action_class: state.actionClass } : {}) }, state.ownerContext);
     return { ...processResponseState(state.startedAt, true), process_id: state.id, pid: 0, cwd: state.cwd, running: true, launching: true } as const;
   }
 
@@ -1603,9 +1619,11 @@ export class ProcessManager {
     workingDirectory?: string,
     callerId = "caller_unknown",
     waitMs = 750,
+    activityTarget?: ActivityTarget,
+    actionClass?: string,
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
-    const started = this.start(command, cwd, callerId);
+    const started = this.start(command, cwd, callerId, activityTarget, actionClass);
     const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
     emitTelemetry({
       event: "process_wait_requested",
@@ -1650,6 +1668,8 @@ export class ProcessManager {
       ...processResponseState(state.startedAt, state.exitCode === null, state.finishedAt),
       process_id: state.id,
       pid: state.pid,
+      ...(state.activityTarget ? { activity_target: state.activityTarget } : {}),
+      ...(state.actionClass ? { action_class: state.actionClass } : {}),
       command,
       ...((state.command.length > MAX_COMMAND_REPORT_CHARS) ? { command_truncated: true } : {}),
       ...(state.submittedCommand !== undefined ? { submitted_command: state.submittedCommand.slice(0, MAX_COMMAND_REPORT_CHARS), ...(state.submittedCommand.length > MAX_COMMAND_REPORT_CHARS ? { submitted_command_truncated: true } : {}) } : {}),
