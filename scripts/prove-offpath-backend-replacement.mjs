@@ -171,13 +171,10 @@ try {
   for (const [name, annotations] of Object.entries(expectedProcessAnnotations)) {
     assert.deepEqual(afterByName[name]?.annotations, annotations, `${name} safety annotations changed across backend replacement`);
   }
-  let output;
-  for (let attempt = 0; attempt < 10; attempt++) {
-    output = await call("read_output", { process_id: started.process_id, wait_ms: 500 });
-    if (/BLUE_PROCESS/.test(output.stdout || "")) break;
-  }
+  assert.match(started.stdout || "", /BLUE_PROCESS/, "start response did not include initial process output");
+  const output = await call("read_output", { process_id: started.process_id, wait_ms: 0 });
   assert.equal(output.process_id, started.process_id);
-  assert.match(output.stdout, /BLUE_PROCESS/);
+  assert.match(output.stdout || "", /BLUE_PROCESS/, "nonblocking snapshot lost retained start output after backend replacement");
   assert.equal(output.running, true, "same process_id was not routed to the draining backend");
   const killed = await call("kill_process", { process_id: started.process_id });
   assert.equal(killed.killed, true);
