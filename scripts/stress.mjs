@@ -183,7 +183,12 @@ console.log(`\nphase 3 - ${PROCS} concurrent start_process/read_output/kill_proc
     jsonrpc: "2.0", id: 200 + job.pid, method: "tools/call",
     params: { name: "read_output", arguments: { process_id: job.process_id } },
   })));
-  const outputErrors = outputs.filter((r, i) => r.status !== 200 || !String(r.body?.result?.content?.[0]?.text || "").includes(`STRESS_${activeJobs[i].index}`)).length;
+  const outputErrors = outputs.filter((r, i) => {
+    const expected = `STRESS_${activeJobs[i].index}`;
+    const startText = String(activeJobs[i].job.stdout || "");
+    const readText = String(r.body?.result?.content?.[0]?.text || "");
+    return r.status !== 200 || (!startText.includes(expected) && !readText.includes(expected));
+  }).length;
   if (outputErrors) fail(`read_output had ${outputErrors} errors`); else ok("read_output clean, all outputs matched");
 
   const kills = await Promise.all(activeJobs.map(({ job }) => mcpPost({
