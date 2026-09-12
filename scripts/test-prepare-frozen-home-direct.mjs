@@ -15,4 +15,5 @@ for(const required of [
 ]) assert.ok(script.includes(required),`missing invariant: ${required}`);
 assert.match(script,/if\(\$Plan\).*route_mutation/s);
 assert.match(script,/if\(-not \$ExplicitUserAuthorization\)/);
-console.log("PASS prepare_frozen_home_direct exact_commit=true self_contained=true persistent_task=true shared_state=true route_unchanged=true explicit_auth=true");
+assert.match(script,/Push-Location -LiteralPath \$runtime[\s\S]*verify-process-contract\.mjs[\s\S]*finally \{[\s\S]*Pop-Location/,"frozen verifier must run with cwd bound to the frozen runtime even when prepare is launched elsewhere");
+console.log("PASS prepare_frozen_home_direct exact_commit=true self_contained=true persistent_task=true shared_state=true route_unchanged=true explicit_auth=true verifier_runtime_cwd=true");
