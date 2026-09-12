@@ -235,6 +235,8 @@ assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v4.html", "wi
   const download = listed.tools.find((tool) => tool.name === "download_chatgpt_file");
   assert.equal(start?._meta?.["openai/outputTemplate"], undefined, "start_process must not mount the file widget");
   assert.equal(read?._meta?.["openai/outputTemplate"], undefined, "read_output must not mount the file widget");
+  assert.equal(upload?._meta?.ui?.resourceUri, FILE_TRANSFER_WIDGET_URI, "upload_local_file advertises the modern MCP Apps resource URI");
+  assert.equal(upload?._meta?.["ui/resourceUri"], FILE_TRANSFER_WIDGET_URI, "upload_local_file mirrors the MCP Apps compatibility URI expected by host bindings");
   assert.equal(upload?._meta?.["openai/outputTemplate"], FILE_TRANSFER_WIDGET_URI, "upload_local_file alone mounts the HTTPS Library widget");
   assert.equal(download?._meta?.["openai/outputTemplate"], undefined, "download_chatgpt_file should use native file params, not a widget");
   assert.deepEqual(download?._meta?.["openai/fileParams"], ["file"]);
