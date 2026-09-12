@@ -231,7 +231,7 @@ try {
 const listedByName = Object.fromEntries(listed.tools.map((tool) => [tool.name, tool]));
 assert.ok(listedByName.upload_local_file.outputSchema, "upload tool must declare outputSchema for structuredContent");
 assert.ok(listedByName.download_chatgpt_file.outputSchema, "download tool must declare outputSchema for structuredContent");
-assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v5.html", "widget URI must be cache-busted for the official MCP Apps helper + host diagnostics canary");
+assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v6.html", "widget URI must be cache-busted for the official MCP Apps helper + host diagnostics canary");
   const start = listed.tools.find((tool) => tool.name === "start_process");
   const read = listed.tools.find((tool) => tool.name === "read_output");
   const upload = listed.tools.find((tool) => tool.name === "upload_local_file");
@@ -267,6 +267,7 @@ assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v5.html", "wi
   const imageUpload = await client.callTool({ name: "upload_local_file", arguments: { path: pngPath } });
   assert.equal(imageUpload._meta?.file_transfer?.delivery_mode, "library_upload", "direct image keeps native result and restores HTTPS Library upload");
   assert.match(imageUpload._meta?.file_transfer?.transfer_url || "", /^https:\/\//);
+  assert.match(imageUpload._meta?.file_transfer?.diagnostic_url || "", /^https:\/\//);
   assert.equal(imageUpload._meta?.file_transfer?.sha256, imageUpload.structuredContent.sha256);
   const nativeImage = imageUpload.content.find((entry) => entry.type === "image");
   assert.ok(nativeImage, "direct images must return native MCP image content for same-turn ChatGPT/Work visibility");
@@ -351,6 +352,8 @@ assert.match(widget, /getFileDownloadUrlAvailable/);
 assert.match(widget, /rawFileId/);
 assert.match(widget, /window\.openai\.getFileDownloadUrl\(\{fileId\}\)/);
 assert.match(widget, /getFileDownloadUrlResult/);
+assert.match(widget, /diagnostic_url/);
+assert.match(widget, /FILE_TRANSFER_HOST_DIAG|report\('complete'/);
 assert.match(widget, /delivery_mode==='review_resources'/);
 assert.match(widget, /delivery_mode==='resource_only'/);
 assert.match(widget, /setWidgetState/);

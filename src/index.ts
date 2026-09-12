@@ -15,7 +15,7 @@ import { startStallWatchdog } from "./lib/stall-watchdog.js";
 import { createResponseByteCounter } from "./lib/response-bytes.js";
 import { createServer, processRuntimeStatus } from "./server.js";
 import { registerOptionalVisualProofTools } from "./lib/visual-proof-registration.js";
-import { serveLocalFileTransfer } from "./lib/file-transfer.js";
+import { serveLocalFileTransfer, serveLocalFileTransferDiagnostic } from "./lib/file-transfer.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "127.0.0.1";
@@ -269,6 +269,12 @@ app.use("/mcp", (req, res, next) => {
   next();
 });
 const fileTransferPath = `${publicBasePath}/file-transfer/local` || "/file-transfer/local";
+const fileTransferDiagnosticPath = `${publicBasePath}/file-transfer/diagnostic` || "/file-transfer/diagnostic";
+app.post(fileTransferDiagnosticPath, express.text({ type: "text/plain", limit: "16kb" }), (req, res) => { void serveLocalFileTransferDiagnostic(req, res).catch((error) => {
+  console.error("file transfer diagnostic failed:", error instanceof Error ? error.message : String(error));
+  if (!res.headersSent) res.status(500).send("File transfer diagnostic failed");
+  else res.destroy();
+}); });
 app.get(fileTransferPath, (req, res) => { void serveLocalFileTransfer(req, res).catch((error) => {
   console.error("file transfer failed:", error instanceof Error ? error.message : String(error));
   if (!res.headersSent) res.status(500).send("File transfer failed");
