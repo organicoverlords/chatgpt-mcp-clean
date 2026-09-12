@@ -73,7 +73,8 @@ function Load-Caddy([string]$Config){
     try {
         & $CaddyExe adapt --config $Config --adapter caddyfile --pretty > $json
         if($LASTEXITCODE -ne 0){ throw 'Caddy adaptation failed' }
-        Invoke-WebRequest -Uri 'http://127.0.0.1:2019/load' -Method Post -ContentType 'application/json' -Body (Get-Content -Raw $json) -TimeoutSec 5 | Out-Null
+        & curl.exe -fsS --max-time 5 -H 'Content-Type: application/json' --data-binary ("@$json") 'http://127.0.0.1:2019/load' | Out-Null
+        if($LASTEXITCODE -ne 0){ throw 'Caddy admin load failed' }
     } finally { Remove-Item -LiteralPath $json -Force -ErrorAction SilentlyContinue }
 }
 if($CandidatePort -eq $currentPort){ throw 'candidate must use an alternate port' }

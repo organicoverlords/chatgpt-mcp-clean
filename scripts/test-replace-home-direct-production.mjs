@@ -44,6 +44,8 @@ try {
 
   const wrapperSource = readFileSync(wrapper, "utf8");
   assert.match(wrapperSource, /Replace-CaddyTargetUpstream/);
+  assert.match(wrapperSource, /curl\.exe -fsS --max-time 5 .*--data-binary/, "Caddy admin load must use curl exact-body POST instead of Windows PowerShell Invoke-WebRequest");
+  assert.doesNotMatch(wrapperSource, /Invoke-WebRequest[^\n]*127\.0\.0\.1:2019\/load/, "Caddy admin load must not use the Windows PowerShell Invoke-WebRequest path that throws NullReferenceException");
   assert.doesNotMatch(wrapperSource, /\$candidateText=\$original\.Replace\(\$needle,\$replacement\)/, "replacement must stay scoped to the target host block");
 
   console.log("PASS home_direct_current_port canonical_topology=true peer_target_host=true block_local_replace=true override_mismatch_fails_closed=true");
