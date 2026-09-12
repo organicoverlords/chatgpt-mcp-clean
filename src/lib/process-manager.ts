@@ -315,12 +315,55 @@ function driveRootRecursiveScanError(command: string, code: string): string | un
   return undefined;
 }
 
-function hasUnescapedPowerShellExpansion(value: string): boolean {
+function skipPowerShellSubexpression(value: string, dollarIndex: number): number | undefined {
+  if (value[dollarIndex] !== "$" || value[dollarIndex + 1] !== "(") return undefined;
+  let depth = 1;
+  let index = dollarIndex + 2;
+  while (index < value.length) {
+    const char = value[index]!;
+    if (char === "`") { index += 2; continue; }
+    if (char === "'" || char === '\"') {
+      const quote = char;
+      index += 1;
+      while (index < value.length) {
+        if (quote === "'" && value[index] === "'" && value[index + 1] === "'") { index += 2; continue; }
+        if (quote === '\"' && value[index] === "`") { index += 2; continue; }
+        if (value[index] === quote) { index += 1; break; }
+        index += 1;
+      }
+      continue;
+    }
+    if (char === "(") depth += 1;
+    if (char === ")") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+    index += 1;
+  }
+  return undefined;
+}
+
+function hasUnsafeNestedPowerShellExpansion(value: string): boolean {
+  // A child single-quoted literal cannot expand its own $variables. An unescaped
+  // parent expansion inside that literal is therefore intentional transport, not
+  // the child-variable trap this guard owns. Keep suspicious C-style quote escapes
+  // fail-closed because PowerShell does not use backslash to escape double quotes.
+  const cStyleQuoteEscape = value.includes('\\"');
+  let childSingleQuoted = false;
   for (let index = 0; index < value.length; index += 1) {
-    if (value[index] !== "$" || !/[A-Za-z0-9_?^$({]/.test(value[index + 1] || "")) continue;
+    const char = value[index]!;
+    if (char === "'") {
+      if (childSingleQuoted && value[index + 1] === "'") { index += 1; continue; }
+      childSingleQuoted = !childSingleQuoted;
+      continue;
+    }
+    if (char !== "$" || !/[A-Za-z0-9_?^$({]/.test(value[index + 1] || "")) continue;
     let backticks = 0;
     for (let cursor = index - 1; cursor >= 0 && value[cursor] === "`"; cursor -= 1) backticks += 1;
-    if (backticks % 2 === 0) return true;
+    if (backticks % 2 !== 0) continue;
+    if (!childSingleQuoted || cStyleQuoteEscape) return true;
+    const subexpressionEnd = skipPowerShellSubexpression(value, index);
+    if (subexpressionEnd !== undefined) index = subexpressionEnd;
   }
   return false;
 }
@@ -339,7 +382,7 @@ function nestedPowerShellCommandExpansionError(command: string, code: string): s
     while (payloadStart < segmentEnd && /\s/.test(command[payloadStart]!)) payloadStart += 1;
     if (command[payloadStart] !== '"') continue;
     const payload = command.slice(payloadStart + 1, segmentEnd);
-    if (hasUnescapedPowerShellExpansion(payload)) {
+    if (hasUnsafeNestedPowerShellExpansion(payload)) {
       return "nested powershell/pwsh -Command double-quoted payload contains parent-expandable $ syntax; use C:\\Users\\Lauri\\.agents\\Invoke-LiteralScript.ps1 to transport the child script literally";
     }
   }
@@ -694,10 +737,10 @@ function powershellPreflightError(command: string): string | undefined {
   if (swarmRouteError) return swarmRouteError;
   const productionMutationError = mcpProductionMutationError(command, code);
   if (productionMutationError) return productionMutationError;
-  const automaticVariable = String.raw`\$(?:(?:global|script|local|private):)?(?:PID|args)`;
+  const automaticVariable = String.raw`\$(?:(?:global|script|local|private):)?PID`;
   const writePattern = new RegExp(`${automaticVariable}\\s*(?:\\+\\+|--|[+*/%?-]?=)|(?:\\+\\+|--)\\s*${automaticVariable}`, "i");
   if (writePattern.test(code)) {
-    return "do not assign to or increment automatic $PID/$args variables; use a different helper name";
+    return "do not assign to or increment automatic $PID variable; use a different helper name";
   }
 
   const stack: Array<{ char: string; controlBlock: boolean }> = [];
