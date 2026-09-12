@@ -178,7 +178,7 @@
   },
   {
     "name": "read_output",
-    "description": "Read a bounded tail of accumulated stdout and stderr for a process_id. wait_ms optionally sets the maximum wait for output or process exit; 0 is nonblocking. An unchanged timed wait returns no_change=true. elapsed_ms is process age. Each stream is limited to 32,000 characters. If stdout contains CHATGPT_LIBRARY_UPLOAD=<absolute path>, the result carries a model-visible exact file resource without a separate upload_local_file call; ChatGPT UI may additionally persist it to Library when the file-transfer widget is available.",
+    "description": "Read a bounded tail of accumulated stdout and stderr for a process_id. wait_ms optionally sets the maximum wait for output or process exit; 0 is nonblocking. An unchanged timed wait returns no_change=true. elapsed_ms is process age. Each stream is limited to 32,000 characters.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -537,53 +537,6 @@
         "bootstrap_alias": {
           "type": "boolean",
           "const": true
-        },
-        "file_transfer": {
-          "type": "object",
-          "properties": {
-            "direction": {
-              "type": "string",
-              "const": "local_to_chatgpt"
-            },
-            "status": {
-              "type": "string",
-              "const": "ready"
-            },
-            "delivery_mode": {
-              "type": "string",
-              "const": "tool_file_reference"
-            },
-            "file_name": {
-              "type": "string"
-            },
-            "mime_type": {
-              "type": "string"
-            },
-            "bytes": {
-              "type": "integer",
-              "exclusiveMinimum": 0,
-              "maximum": 9007199254740991
-            },
-            "sha256": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{64}$"
-            },
-            "resource_uri": {
-              "type": "string",
-              "format": "uri"
-            }
-          },
-          "required": [
-            "direction",
-            "status",
-            "delivery_mode",
-            "file_name",
-            "mime_type",
-            "bytes",
-            "sha256",
-            "resource_uri"
-          ],
-          "additionalProperties": false
         }
       },
       "required": [
@@ -600,7 +553,7 @@
   },
   {
     "name": "start_process",
-    "description": "Start a noninteractive PowerShell process. wait_ms controls how long the call may wait for completion before returning a process_id; the default is 750 ms and the supported range is 0 to 10 seconds. To return one finished local file in the same process turn, print a final line CHATGPT_LIBRARY_UPLOAD=<absolute path> after the file is fully written. The result carries a model-visible exact file resource without a separate upload_local_file call; ChatGPT UI may additionally persist it to Library when the file-transfer widget is available.",
+    "description": "Start a noninteractive PowerShell process. wait_ms controls how long the call may wait for completion before returning a process_id; the default is 750 ms and the supported range is 0 to 10 seconds.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -993,53 +946,6 @@
         "bootstrap_alias": {
           "type": "boolean",
           "const": true
-        },
-        "file_transfer": {
-          "type": "object",
-          "properties": {
-            "direction": {
-              "type": "string",
-              "const": "local_to_chatgpt"
-            },
-            "status": {
-              "type": "string",
-              "const": "ready"
-            },
-            "delivery_mode": {
-              "type": "string",
-              "const": "tool_file_reference"
-            },
-            "file_name": {
-              "type": "string"
-            },
-            "mime_type": {
-              "type": "string"
-            },
-            "bytes": {
-              "type": "integer",
-              "exclusiveMinimum": 0,
-              "maximum": 9007199254740991
-            },
-            "sha256": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{64}$"
-            },
-            "resource_uri": {
-              "type": "string",
-              "format": "uri"
-            }
-          },
-          "required": [
-            "direction",
-            "status",
-            "delivery_mode",
-            "file_name",
-            "mime_type",
-            "bytes",
-            "sha256",
-            "resource_uri"
-          ],
-          "additionalProperties": false
         }
       },
       "required": [
@@ -1056,7 +962,7 @@
   },
   {
     "name": "upload_local_file",
-    "description": "Return one exact local file from the MCP host as a first-class MCP file resource. The result is usable without UI; when ChatGPT mounts the file-transfer widget, the widget also requests ChatGPT Library persistence. Transfers preserve exact bytes and SHA-256; already-compressed media is never transcoded.",
+    "description": "Return one exact local file from the MCP host as a first-class MCP file resource for ChatGPT to materialize as a native uploaded file. This tool does not mount an app/widget or call the widget upload API. Transfers preserve exact bytes and SHA-256; already-compressed media is never transcoded.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
