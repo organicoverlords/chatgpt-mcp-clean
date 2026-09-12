@@ -67,8 +67,13 @@ try {
     if($LASTEXITCODE -ne 0){ Fail 'npm ci failed for frozen runtime' }
     & npm.cmd --prefix $runtime run build --silent
     if($LASTEXITCODE -ne 0){ Fail 'build failed for frozen runtime' }
-    & node.exe (Join-Path $runtime 'scripts\\verify-process-contract.mjs') | Out-Null
-    if($LASTEXITCODE -ne 0){ Fail 'frozen runtime process contract verification failed' }
+    Push-Location -LiteralPath $runtime
+    try {
+        & node.exe (Join-Path $runtime 'scripts\\verify-process-contract.mjs') | Out-Null
+        if($LASTEXITCODE -ne 0){ Fail 'frozen runtime process contract verification failed' }
+    } finally {
+        Pop-Location
+    }
     $runtimeHead=(& git.exe -C $runtime rev-parse HEAD).Trim().ToLowerInvariant()
     $runtimeDirty=@(& git.exe -C $runtime status --porcelain=v1 --untracked-files=no)
     if($runtimeHead -ne $commit -or $runtimeDirty.Count -gt 0){ Fail 'frozen runtime identity is not exact/clean' }
