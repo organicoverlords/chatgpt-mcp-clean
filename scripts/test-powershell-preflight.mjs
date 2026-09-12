@@ -44,11 +44,17 @@ assert.match(operators.stdout, /NULL_OK/);
 
 rejects("$PID = 123", /automatic/);
 rejects("$PID++", /automatic/);
-rejects("$args = @('bad')", /automatic/);
+const writableArgs = await run("$args = @('good'); Write-Output ($args -join ',')", "caller_pwsh_args_assignment_allowed");
+assert.equal(writableArgs.exit_code, 0, JSON.stringify(writableArgs));
+assert.match(writableArgs.stdout, /good/);
 
 const historicalNestedExpansion = String.raw`$childOnlyPath=''; powershell.exe -Command "Test-Path -LiteralPath \"$childOnlyPath\""`;
 rejects(historicalNestedExpansion, /Invoke-LiteralScript\.ps1/);
 rejects(String.raw`pwsh.exe -NoProfile -Command "Write-Output $env:TEMP"`, /parent-expandable/);
+const parentLiteralExpansion = await run(String.raw`$wt='C:\safe-parent'; pwsh.exe -NoProfile -Command "Write-Output '$wt\child'"`, "caller_nested_parent_literal_expansion_allowed");
+assert.equal(parentLiteralExpansion.exit_code, 0, JSON.stringify(parentLiteralExpansion));
+assert.match(parentLiteralExpansion.stdout, /C:\\safe-parent\\child/);
+rejects(String.raw`$wt='C:\\unsafe-parent'; pwsh.exe -NoProfile -Command "Write-Output '$wt\\child \\"quoted\\"'"`, /parent-expandable/);
 
 const nestedSingleQuoted = await run(String.raw`pwsh.exe -NoProfile -Command 'Write-Output $env:TEMP'`, "caller_nested_single_quoted_allowed");
 assert.equal(nestedSingleQuoted.exit_code, 0, JSON.stringify(nestedSingleQuoted));
@@ -177,4 +183,4 @@ try {
   rmSync(rejectionReceiptDirectory, { recursive: true, force: true });
 }
 
-console.log("PASS powershell_preflight pwsh=7.6.5 ps7_operators=true loop_pipeline_autonormalization=true nested_command_parent_expansion=blocked drive_root_recursion=blocked vault_root_recursion=blocked bounded_recursion=allowed durable_rejections=true");
+console.log("PASS powershell_preflight pwsh=7.6.5 ps7_operators=true loop_pipeline_autonormalization=true nested_command_parent_expansion=guarded args_assignment=allowed drive_root_recursion=blocked vault_root_recursion=blocked bounded_recursion=allowed durable_rejections=true");
