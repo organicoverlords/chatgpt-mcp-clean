@@ -12,6 +12,7 @@ import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/sdk/serv
 import { z } from "zod";
 
 export const FILE_TRANSFER_WIDGET_URI = "ui://process/file-transfer-v4.html";
+const MCP_APP_MIME_TYPE = "text/html;profile=mcp-app";
 const LEGACY_FILE_TRANSFER_WIDGET_URIS = ["ui://process/file-transfer-v1.html"] as const;
 const LOCAL_EXPORT_TTL_MS = 5 * 60 * 1000;
 const MAX_NATIVE_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -643,6 +644,10 @@ function widgetResourceMeta() {
 function uploadToolMeta() {
   return {
     ui: { resourceUri: FILE_TRANSFER_WIDGET_URI, visibility: ["model", "app"] },
+    // Current MCP Apps helpers mirror the modern nested URI into this flat
+    // compatibility key. Some ChatGPT host/binding paths still require it
+    // before they fetch the ui:// resource and mount the widget.
+    "ui/resourceUri": FILE_TRANSFER_WIDGET_URI,
     "openai/outputTemplate": FILE_TRANSFER_WIDGET_URI,
   };
 }
@@ -667,17 +672,17 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
     { title: "Exact transferred file", description: "Exact original local file or manifest-declared review member returned by a tool" },
     async (uri) => ({ contents: [await localFileResourceContents(uri.href)] }),
   );
-  server.registerResource("process-file-transfer-widget", FILE_TRANSFER_WIDGET_URI, {}, async () => ({
+  server.registerResource("process-file-transfer-widget", FILE_TRANSFER_WIDGET_URI, { mimeType: MCP_APP_MIME_TYPE }, async () => ({
     contents: [{
       uri: FILE_TRANSFER_WIDGET_URI,
-      mimeType: "text/html;profile=mcp-app",
+      mimeType: MCP_APP_MIME_TYPE,
       text: fileTransferWidgetHtml(),
       _meta: widgetResourceMeta(),
     }],
   }));
   for (const [index, uri] of LEGACY_FILE_TRANSFER_WIDGET_URIS.entries()) {
-    server.registerResource(`process-file-transfer-widget-legacy-${index + 1}`, uri, {}, async () => ({
-      contents: [{ uri, mimeType: "text/html;profile=mcp-app", text: fileTransferWidgetHtml(), _meta: widgetResourceMeta() }],
+    server.registerResource(`process-file-transfer-widget-legacy-${index + 1}`, uri, { mimeType: MCP_APP_MIME_TYPE }, async () => ({
+      contents: [{ uri, mimeType: MCP_APP_MIME_TYPE, text: fileTransferWidgetHtml(), _meta: widgetResourceMeta() }],
     }));
   }
 
