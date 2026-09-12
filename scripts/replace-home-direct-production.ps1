@@ -71,8 +71,10 @@ function Load-Caddy([string]$Config){
     if($LASTEXITCODE -ne 0){ throw "Caddy validation failed: $Config" }
     $json=Join-Path $env:TEMP ("mcp-home-direct-caddy-{0}.json" -f [guid]::NewGuid().ToString('N'))
     try {
-        & $CaddyExe adapt --config $Config --adapter caddyfile --pretty > $json
+        $adapted=@(& $CaddyExe adapt --config $Config --adapter caddyfile --pretty)
         if($LASTEXITCODE -ne 0){ throw 'Caddy adaptation failed' }
+        $adaptedText=([string]::Join("`n",[string[]]$adapted)+"`n")
+        [IO.File]::WriteAllText($json,$adaptedText,(New-Object Text.UTF8Encoding($false)))
         & curl.exe -fsS --max-time 5 -H 'Content-Type: application/json' --data-binary ("@$json") 'http://127.0.0.1:2019/load' | Out-Null
         if($LASTEXITCODE -ne 0){ throw 'Caddy admin load failed' }
     } finally { Remove-Item -LiteralPath $json -Force -ErrorAction SilentlyContinue }

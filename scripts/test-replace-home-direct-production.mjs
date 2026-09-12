@@ -45,6 +45,8 @@ try {
   const wrapperSource = readFileSync(wrapper, "utf8");
   assert.match(wrapperSource, /Replace-CaddyTargetUpstream/);
   assert.match(wrapperSource, /curl\.exe -fsS --max-time 5 .*--data-binary/, "Caddy admin load must use curl exact-body POST instead of Windows PowerShell Invoke-WebRequest");
+  assert.match(wrapperSource, /Text\.UTF8Encoding\(\$false\)/, "adapted Caddy JSON must be written explicitly as UTF-8 without BOM for Windows PowerShell compatibility");
+  assert.doesNotMatch(wrapperSource, /adapt --config \$Config --adapter caddyfile --pretty > \$json/, "Windows PowerShell redirection must not serialize adapted JSON as UTF-16");
   assert.doesNotMatch(wrapperSource, /Invoke-WebRequest[^\n]*127\.0\.0\.1:2019\/load/, "Caddy admin load must not use the Windows PowerShell Invoke-WebRequest path that throws NullReferenceException");
   assert.doesNotMatch(wrapperSource, /\$candidateText=\$original\.Replace\(\$needle,\$replacement\)/, "replacement must stay scoped to the target host block");
 
