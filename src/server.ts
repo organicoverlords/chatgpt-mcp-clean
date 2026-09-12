@@ -48,6 +48,17 @@ const snapshotFreshnessSchema = z.object({
   read_mode: z.literal("MATERIALIZED_ONLY"),
 }).strict();
 
+const processFileTransferSchema = z.object({
+  direction: z.literal("local_to_chatgpt"),
+  status: z.literal("ready"),
+  delivery_mode: z.literal("tool_file_reference"),
+  file_name: z.string(),
+  mime_type: z.string(),
+  bytes: z.number().int().positive(),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  resource_uri: z.string().url(),
+}).strict();
+
 // start_process may return either its immediate launch receipt or the same completed/read
 // shape as read_output. read_output also serves the bounded bootstrap/timeline snapshots.
 // Keep one strict object schema for that shared result family so future top-level fields
@@ -98,6 +109,7 @@ const processOutputSchema = z.object({
   freshness: snapshotFreshnessSchema.optional(),
   snapshot_alias: z.literal(true).optional(),
   bootstrap_alias: z.literal(true).optional(),
+  file_transfer: processFileTransferSchema.optional(),
 }).strict();
 
 const killProcessOutputSchema = z.object({
@@ -135,9 +147,10 @@ async function structuredTextResult(value: unknown, id: string) {
   const data = resultData(value, id);
   const transfer = await prepareMarkedLocalFileTransfer(value);
   const handoff = transfer ? await localFileTransferHandoff(transfer) : null;
+  const structuredData = handoff ? { ...data, file_transfer: handoff.summary } : data;
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(data) }, ...(handoff?.content || [])],
-    structuredContent: data,
+    content: [{ type: "text" as const, text: JSON.stringify(structuredData) }, ...(handoff?.content || [])],
+    structuredContent: structuredData,
     ...(handoff ? { _meta: { file_transfer: handoff.meta } } : {}),
   };
 }
@@ -174,7 +187,7 @@ export function createServer(callerId: string): McpServer {
   server.registerTool(
     "start_process",
     {
-      description: "Start a noninteractive PowerShell process. wait_ms controls how long the call may wait for completion before returning a process_id; the default is 750 ms and the supported range is 0 to 10 seconds. To return one finished local file to ChatGPT/Library in the same process turn, print a final line CHATGPT_LIBRARY_UPLOAD=<absolute path> after the file is fully written; this avoids a separate upload_local_file tool call and works in ChatGPT Work.",
+      description: "Start a noninteractive PowerShell process. wait_ms controls how long the call may wait for completion before returning a process_id; the default is 750 ms and the supported range is 0 to 10 seconds. To return one finished local file in the same process turn, print a final line CHATGPT_LIBRARY_UPLOAD=<absolute path> after the file is fully written. The result carries a model-visible exact file resource without a separate upload_local_file call; ChatGPT UI may additionally persist it to Library when the file-transfer widget is available.",
       _meta: { ui: { resourceUri: FILE_TRANSFER_WIDGET_URI }, "openai/outputTemplate": FILE_TRANSFER_WIDGET_URI },
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
       inputSchema: z.object({
@@ -192,7 +205,7 @@ export function createServer(callerId: string): McpServer {
   server.registerTool(
     "read_output",
     {
-      description: "Read a bounded tail of accumulated stdout and stderr for a process_id. wait_ms optionally sets the maximum wait for output or process exit; 0 is nonblocking. An unchanged timed wait returns no_change=true. elapsed_ms is process age. Each stream is limited to 32,000 characters. If stdout contains CHATGPT_LIBRARY_UPLOAD=<absolute path>, the same result carries that finished file into the ChatGPT/Library handoff without a separate upload tool call.",
+      description: "Read a bounded tail of accumulated stdout and stderr for a process_id. wait_ms optionally sets the maximum wait for output or process exit; 0 is nonblocking. An unchanged timed wait returns no_change=true. elapsed_ms is process age. Each stream is limited to 32,000 characters. If stdout contains CHATGPT_LIBRARY_UPLOAD=<absolute path>, the result carries a model-visible exact file resource without a separate upload_local_file call; ChatGPT UI may additionally persist it to Library when the file-transfer widget is available.",
       _meta: { ui: { resourceUri: FILE_TRANSFER_WIDGET_URI }, "openai/outputTemplate": FILE_TRANSFER_WIDGET_URI },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: z.object({

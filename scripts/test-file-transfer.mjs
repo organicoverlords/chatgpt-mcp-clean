@@ -180,7 +180,8 @@ const tiny3dReviewZipPath = join(dir, "tiny3d-visual-review_test.zip");
 await writeFile(tiny3dReviewZipPath, tiny3dReviewZip);
 
 const genericZipPath = join(dir, "generic.zip");
-await writeFile(genericZipPath, storedZip([["note.txt", Buffer.from("not a review package")]]));
+const genericZip = storedZip([["note.txt", Buffer.from("not a review package")]]);
+await writeFile(genericZipPath, genericZip);
 
 const media = randomBytes(256 * 1024);
 const mediaPath = join(dir, "proof.mp4");
@@ -243,40 +244,63 @@ assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v3.html", "wi
 
   assert.deepEqual(upload?.annotations, { readOnlyHint: false, destructiveHint: false, openWorldHint: false }, "Library upload is an additive closed-domain write, not a read-only or open-world action");
 
+  function exactFileReference(result, expectedName, expectedMime, expectedBytes) {
+    const summary = result.structuredContent?.file_transfer || result.structuredContent;
+    assert.equal(summary?.delivery_mode, "tool_file_reference", "file handoff must be model-visible without UI");
+    assert.equal(summary?.file_name, expectedName);
+    assert.equal(summary?.mime_type, expectedMime);
+    assert.equal(summary?.bytes, expectedBytes);
+    const ref = result.content.find((entry) => entry.type === "resource_link" && entry.uri === summary?.resource_uri);
+    assert.ok(ref, "marker handoff must return the exact original as a first-class tool-result file reference");
+    assert.equal(ref.name, expectedName);
+    assert.equal(ref.mimeType, expectedMime);
+    assert.equal(ref.size, expectedBytes);
+    assert.match(ref.uri, /^mcp-upload:\/\/file-transfer\//);
+    return ref;
+  }
+
   const markedImage = await client.callTool({ name: "start_process", arguments: { command: `Write-Output 'CHATGPT_LIBRARY_UPLOAD=${pngPath.replace(/'/g, "''")}'`, wait_ms: 10000 } });
-  assert.equal(markedImage._meta?.file_transfer?.file_name, "original.png", "process marker must prepare the same exact Library handoff without upload_local_file");
+  assert.equal(markedImage._meta?.file_transfer?.file_name, "original.png", "process marker must prepare the same exact file handoff without upload_local_file");
   assert.equal(markedImage._meta?.file_transfer?.delivery_mode, "library_upload");
+  const markedImageRef = exactFileReference(markedImage, "original.png", "image/png", png.length);
+  const markedImageResource = await client.readResource({ uri: markedImageRef.uri });
+  assert.equal(Buffer.from(markedImageResource.contents[0].blob, "base64").compare(png), 0, "marker image file reference must resolve to exact bytes");
   const markedNative = markedImage.content.find((entry) => entry.type === "image");
   assert.ok(markedNative, "marked image process result must expose native image content in the same turn");
   assert.equal(Buffer.from(markedNative.data, "base64").compare(png), 0);
 
   const markedVideo = await client.callTool({ name: "start_process", arguments: { command: `Write-Output 'CHATGPT_LIBRARY_UPLOAD=${mediaPath.replace(/'/g, "''")}'`, wait_ms: 10000 } });
-  assert.equal(markedVideo._meta?.file_transfer?.file_name, "proof.mp4", "MP4 marker must use the same persistent Library handoff");
+  assert.equal(markedVideo._meta?.file_transfer?.file_name, "proof.mp4", "MP4 marker must use the same exact file handoff");
   assert.equal(markedVideo._meta?.file_transfer?.mime_type, "video/mp4");
+  const markedVideoRef = exactFileReference(markedVideo, "proof.mp4", "video/mp4", media.length);
+  const markedVideoResource = await client.readResource({ uri: markedVideoRef.uri });
+  assert.equal(Buffer.from(markedVideoResource.contents[0].blob, "base64").compare(media), 0, "marker video file reference must resolve to exact bytes");
 
   const markedZip = await client.callTool({ name: "start_process", arguments: { command: `Write-Output 'CHATGPT_LIBRARY_UPLOAD=${genericZipPath.replace(/'/g, "''")}'`, wait_ms: 10000 } });
-  assert.equal(markedZip._meta?.file_transfer?.file_name, "generic.zip", "ZIP marker must use the same persistent Library handoff");
+  assert.equal(markedZip._meta?.file_transfer?.file_name, "generic.zip", "ZIP marker must use the same exact file handoff");
   assert.equal(markedZip._meta?.file_transfer?.mime_type, "application/zip");
+  const markedZipRef = exactFileReference(markedZip, "generic.zip", "application/zip", genericZip.length);
+  const markedZipResource = await client.readResource({ uri: markedZipRef.uri });
+  assert.equal(Buffer.from(markedZipResource.contents[0].blob, "base64").compare(genericZip), 0, "marker ZIP file reference must resolve to exact bytes");
 
   const imageUpload = await client.callTool({ name: "upload_local_file", arguments: { path: pngPath } });
-  assert.equal(imageUpload._meta?.file_transfer?.delivery_mode, "library_upload", "direct images must persist through the ChatGPT Library path");
+  assert.equal(imageUpload._meta?.file_transfer?.delivery_mode, "library_upload", "direct images must expose the exact tool file reference while retaining optional Library widget metadata");
   const nativeImage = imageUpload.content.find((entry) => entry.type === "image");
   assert.ok(nativeImage, "direct images must return native MCP image content for same-turn ChatGPT/Work visibility");
   assert.equal(nativeImage.mimeType, "image/png");
   assert.equal(Buffer.from(nativeImage.data, "base64").compare(png), 0, "native MCP image content must remain byte-for-byte exact");
-  const imageLink = imageUpload.content.find((entry) => entry.type === "resource_link");
-  assert.ok(imageLink, "image upload must return a same-turn resource_link for native vision");
-  assert.equal(imageLink.mimeType, "image/png");
-  assert.equal(imageLink.size, png.length, "image resource_link must describe the exact original byte count");
-  const originalResource = await client.readResource({ uri: imageLink.uri });
+  const imageFileRef = exactFileReference(imageUpload, "original.png", "image/png", png.length);
+  assert.equal(imageUpload.content.filter((entry) => entry.type === "resource_link").length, 1, "direct image should expose one exact file resource plus native image content");
+  const originalResource = await client.readResource({ uri: imageFileRef.uri });
   const originalBlob = originalResource.contents[0]?.blob;
   assert.ok(originalBlob, "image resource must expose original bytes");
   assert.equal(Buffer.from(originalBlob, "base64").compare(png), 0, "model vision resource must be byte-for-byte the original image, not a thumbnail");
 
   const reviewZipUpload = await client.callTool({ name: "upload_local_file", arguments: { path: reviewZipPath } });
-  assert.equal(reviewZipUpload._meta?.file_transfer?.delivery_mode, "library_upload", "visual-review ZIPs must also persist the exact ZIP in Library");
-  const reviewZipLinks = reviewZipUpload.content.filter((entry) => entry.type === "resource_link");
-  assert.equal(reviewZipLinks.length, 2, "one visual-review ZIP must expose every manifest-declared image in the same tool result");
+  assert.equal(reviewZipUpload._meta?.file_transfer?.delivery_mode, "library_upload", "visual-review ZIPs must expose the exact ZIP container while retaining optional Library widget metadata");
+  exactFileReference(reviewZipUpload, "visual-review_two-images.zip", "application/zip", reviewZip.length);
+  const reviewZipLinks = reviewZipUpload.content.filter((entry) => entry.type === "resource_link" && entry.uri !== reviewZipUpload.structuredContent.resource_uri);
+  assert.equal(reviewZipLinks.length, 2, "one visual-review ZIP must expose every manifest-declared image in addition to the ZIP file reference");
   assert.deepEqual(reviewZipLinks.map((entry) => entry.name), ["asset-a.png", "asset-b.png"]);
   const reviewZipExpected = [zipPngA, zipPngB];
   for (let index = 0; index < reviewZipLinks.length; index += 1) {
@@ -287,7 +311,8 @@ assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v3.html", "wi
   }
 
   const p3ZipUpload = await client.callTool({ name: "upload_local_file", arguments: { path: p3ReviewZipPath } });
-  const p3ZipLinks = p3ZipUpload.content.filter((entry) => entry.type === "resource_link");
+  exactFileReference(p3ZipUpload, "p3-visual-review_test.zip", "application/zip", p3ReviewZip.length);
+  const p3ZipLinks = p3ZipUpload.content.filter((entry) => entry.type === "resource_link" && entry.uri !== p3ZipUpload.structuredContent.resource_uri);
   assert.deepEqual(p3ZipLinks.map((entry) => entry.name), ["contact-sheet.png", "keyframe.png"], "P3 review ZIP must expose image review media without mislabeling the video as image evidence");
   for (let index = 0; index < p3ZipLinks.length; index += 1) {
     const memberResource = await client.readResource({ uri: p3ZipLinks[index].uri });
@@ -297,8 +322,9 @@ assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v3.html", "wi
   }
 
   const tiny3dZipUpload = await client.callTool({ name: "upload_local_file", arguments: { path: tiny3dReviewZipPath } });
-  assert.equal(tiny3dZipUpload._meta?.file_transfer?.delivery_mode, "library_upload", "Tiny3D review ZIP must persist in Library while still exposing review resources");
-  const tiny3dLinks = tiny3dZipUpload.content.filter((entry) => entry.type === "resource_link");
+  assert.equal(tiny3dZipUpload._meta?.file_transfer?.delivery_mode, "library_upload", "Tiny3D review ZIP must expose the exact container plus review resources");
+  exactFileReference(tiny3dZipUpload, "tiny3d-visual-review_test.zip", "application/zip", tiny3dReviewZip.length);
+  const tiny3dLinks = tiny3dZipUpload.content.filter((entry) => entry.type === "resource_link" && entry.uri !== tiny3dZipUpload.structuredContent.resource_uri);
   assert.equal(tiny3dLinks.length, 12);
   assert.equal(tiny3dLinks[0].name, `${"a".repeat(64)}_view_00.png`);
   for (let index = 0; index < tiny3dLinks.length; index += 1) {
@@ -310,14 +336,17 @@ assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v3.html", "wi
   const genericZipUpload = await client.callTool({ name: "upload_local_file", arguments: { path: genericZipPath } });
   assert.notEqual(genericZipUpload.isError, true, "generic ZIP must be allowed through the same exact-byte Library upload path");
   assert.equal(genericZipUpload._meta?.file_transfer?.delivery_mode, "library_upload");
-  assert.equal(genericZipUpload.content.some((entry) => entry.type === "resource_link"), false, "generic ZIP does not invent review resources");
+  exactFileReference(genericZipUpload, "generic.zip", "application/zip", genericZip.length);
+  assert.equal(genericZipUpload.content.filter((entry) => entry.type === "resource_link").length, 1, "generic ZIP returns only its exact file reference and invents no review resources");
 
   const videoUpload = await client.callTool({ name: "upload_local_file", arguments: { path: mediaPath } });
-  assert.equal(videoUpload._meta?.file_transfer?.delivery_mode, "library_upload", "MP4 must use the same persistent Library upload path");
+  assert.equal(videoUpload._meta?.file_transfer?.delivery_mode, "library_upload", "MP4 must expose the same exact tool file reference path");
   assert.equal(videoUpload.content.some((entry) => entry.type === "image"), false, "video upload must not masquerade as image content");
+  exactFileReference(videoUpload, "proof.mp4", "video/mp4", media.length);
 
   const textUpload = await client.callTool({ name: "upload_local_file", arguments: { path: textPath } });
-  assert.equal(textUpload.content.some((entry) => entry.type === "resource_link"), false, "non-image uploads must not add image resource content");
+  exactFileReference(textUpload, "compressible.txt", "text/plain", text.length);
+  assert.equal(textUpload.content.filter((entry) => entry.type === "resource_link").length, 1, "non-image uploads return one exact file reference without image resources");
 
   const resource = await client.readResource({ uri: FILE_TRANSFER_WIDGET_URI });
   const meta = resource.contents[0]?._meta;
@@ -340,4 +369,4 @@ assert.doesNotMatch(widget, /delivery_mode==='image_resource'.*return/, "direct 
 assert.doesNotMatch(widget, /delivery_mode==='review_resources'.*return/, "review ZIPs must not return before Library upload");
 assert.doesNotMatch(widget, /callTool\(/, "file transfer widget should not need a second tool invocation");
 
-console.log("PASS lossless file transfer: native image visibility, persistent image/video/ZIP Library path, review resources, raw bytes, zstd, native file params");
+console.log("PASS lossless file transfer: model-visible exact file refs for image/video/ZIP, native image visibility, review resources, raw bytes, zstd, native file params");
