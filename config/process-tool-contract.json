@@ -962,7 +962,7 @@
   },
   {
     "name": "upload_local_file",
-    "description": "Return one exact local file from the MCP host as a first-class MCP file resource for ChatGPT to materialize as a native uploaded file. This tool does not mount an app/widget or call the widget upload API. Transfers preserve exact bytes and SHA-256; already-compressed media is never transcoded.",
+    "description": "Return one exact local file as a native MCP file resource and, for supported non-ZIP files, persist the same verified bytes into ChatGPT Library through the dedicated HTTPS file-transfer widget. ZIP files remain exact resource-only transfers. start_process/read_output never mount this widget.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
