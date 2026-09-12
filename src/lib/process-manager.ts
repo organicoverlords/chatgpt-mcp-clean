@@ -315,6 +315,131 @@ function driveRootRecursiveScanError(command: string, code: string): string | un
   return undefined;
 }
 
+function tempRootMentioned(rawSegment: string): boolean {
+  const roots = [
+    process.env.TEMP || "",
+    process.env.TMP || "",
+    process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "Temp") : "",
+    String.raw`$env:TEMP`,
+    String.raw`$env:TMP`,
+    String.raw`$env:LOCALAPPDATA\Temp`,
+    String.raw`%TEMP%`,
+    String.raw`%TMP%`,
+    String.raw`%LOCALAPPDATA%\Temp`,
+  ].filter(Boolean).map((value) => value.replaceAll("/", "\\").toLowerCase());
+  const normalized = rawSegment.replaceAll("/", "\\").toLowerCase();
+  const delimiter = (char: string | undefined) => !char || /[\s,;)|"'`=]/.test(char);
+  for (const root of new Set(roots)) {
+    let offset = 0;
+    while (offset < normalized.length) {
+      const index = normalized.indexOf(root, offset);
+      if (index < 0) break;
+      const before = index > 0 ? normalized[index - 1] : undefined;
+      const afterIndex = index + root.length;
+      const after = normalized[afterIndex];
+      const exactBoundary = delimiter(before) && (delimiter(after) || (after === "\\" && (delimiter(normalized[afterIndex + 1]) || normalized[afterIndex + 1] === "*")));
+      if (exactBoundary) return true;
+      offset = index + root.length;
+    }
+  }
+  return false;
+}
+
+function topLevelPowerShellPipelineSlices(start: number, end: number, code: string): Array<{ start: number; end: number }> {
+  const slices: Array<{ start: number; end: number }> = [];
+  const stack: string[] = [];
+  const closing: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
+  let sliceStart = start;
+  for (let index = start; index < end; index += 1) {
+    const char = code[index]!;
+    if (char === "(" || char === "[" || char === "{") { stack.push(char); continue; }
+    if (char === ")" || char === "]" || char === "}") {
+      if (stack[stack.length - 1] === closing[char]) stack.pop();
+      continue;
+    }
+    if (char === "|" && stack.length === 0 && code[index - 1] !== "|" && code[index + 1] !== "|") {
+      slices.push({ start: sliceStart, end: index });
+      sliceStart = index + 1;
+    }
+  }
+  slices.push({ start: sliceStart, end });
+  return slices;
+}
+
+function tempRootRecursiveScanError(command: string, code: string): string | undefined {
+  const boundaries = [...code.matchAll(/[;\r\n]/g)].map((match) => match.index ?? 0);
+  const starts = [0, ...boundaries.map((index) => index + 1)];
+  const ends = [...boundaries, command.length];
+  const tempEnumerationVariables = new Set<string>();
+
+  for (let segmentIndex = 0; segmentIndex < starts.length; segmentIndex += 1) {
+    const start = starts[segmentIndex]!;
+    const end = ends[segmentIndex]!;
+    let tempProducerInPipeline = false;
+    for (const slice of topLevelPowerShellPipelineSlices(start, end, code)) {
+      const rawInvocation = command.slice(slice.start, slice.end);
+      const codeInvocation = code.slice(slice.start, slice.end);
+      const rootMentioned = tempRootMentioned(rawInvocation);
+
+      if (rootMentioned) {
+        const producer = /\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:Get-ChildItem|gci|dir|ls)\b/i.exec(codeInvocation);
+        if (producer) tempEnumerationVariables.add(producer[1]!.toLowerCase());
+
+        if (/\b(?:Get-ChildItem|gci|dir|ls)\b/i.test(codeInvocation) && /-(?:Recurse|r)\b/i.test(codeInvocation)) {
+          return "recursive enumeration from the Temp root is blocked; use one explicit Temp subdirectory";
+        }
+        if (/\b(?:rg|rg\.exe|ripgrep|fd|fd\.exe)\b/i.test(codeInvocation)) {
+          return "recursive native search from the Temp root is blocked; use one explicit Temp subdirectory";
+        }
+        if (/\bwhere(?:\.exe)?\b/i.test(codeInvocation) && /\/R\b/i.test(codeInvocation)) {
+          return "recursive native search from the Temp root is blocked; use one explicit Temp subdirectory";
+        }
+        if (/\bfindstr(?:\.exe)?\b/i.test(codeInvocation) && /\/S\b/i.test(codeInvocation)) {
+          return "recursive native search from the Temp root is blocked; use one explicit Temp subdirectory";
+        }
+        if (/\bcmd(?:\.exe)?\b/i.test(codeInvocation) && /\bdir\b/i.test(codeInvocation) && /\/S\b/i.test(codeInvocation)) {
+          return "recursive native enumeration from the Temp root is blocked; use one explicit Temp subdirectory";
+        }
+        if (/\btree(?:\.com|\.exe)?\b/i.test(codeInvocation)) {
+          return "Temp-root tree enumeration is blocked; use one explicit Temp subdirectory";
+        }
+        if (/\b(?:Get-ChildItem|gci|dir|ls)\b/i.test(codeInvocation)) tempProducerInPipeline = true;
+        continue;
+      }
+
+      if (tempProducerInPipeline && /(?:\bForEach-Object\b|%(?=\s*\{))/i.test(codeInvocation)) {
+        const automaticItem = String.raw`\$(?:_|PSItem)(?:\.FullName)?\b`;
+        const sameStatement = String.raw`[^};|\r\n]{0,1200}`;
+        const recurseAfterItem = new RegExp(`\\b(?:Get-ChildItem|gci|dir|ls)\\b${sameStatement}${automaticItem}${sameStatement}-(?:Recurse|r)\\b`, "i");
+        const recurseBeforeItem = new RegExp(`\\b(?:Get-ChildItem|gci|dir|ls)\\b${sameStatement}-(?:Recurse|r)\\b${sameStatement}${automaticItem}`, "i");
+        if (recurseAfterItem.test(codeInvocation) || recurseBeforeItem.test(codeInvocation)) {
+          return "recursive Temp-root pipeline fan-out is blocked; enumerate or recurse one explicit Temp subdirectory at a time";
+        }
+      }
+    }
+  }
+
+  // A broad root enumeration can be cheap at launch yet explode into many expensive
+  // recursive walks in a foreach body. This exact pattern drove the 2026-09-10
+  // paging/stall incident, so reject it before the first child is admitted.
+  for (const producerVariable of tempEnumerationVariables) {
+    const loop = new RegExp(`\\bforeach\\s*\\(\\s*\\$([A-Za-z_][A-Za-z0-9_]*)\\s+in\\s+\\$${producerVariable}\\b`, "gi");
+    for (const match of code.matchAll(loop)) {
+      const itemVariable = String(match[1] || "");
+      if (!itemVariable) continue;
+      const itemReference = `\\$${itemVariable}(?:\\.FullName)?\\b`;
+      const sameStatement = String.raw`[^};|\r\n]{0,1200}`;
+      const recurseAfterItem = new RegExp(`\\b(?:Get-ChildItem|gci|dir|ls)\\b${sameStatement}${itemReference}${sameStatement}-(?:Recurse|r)\\b`, "i");
+      const recurseBeforeItem = new RegExp(`\\b(?:Get-ChildItem|gci|dir|ls)\\b${sameStatement}-(?:Recurse|r)\\b${sameStatement}${itemReference}`, "i");
+      const loopRemainder = code.slice(match.index ?? 0);
+      if (recurseAfterItem.test(loopRemainder) || recurseBeforeItem.test(loopRemainder)) {
+        return "recursive Temp-root fan-out is blocked; enumerate or recurse one explicit Temp subdirectory at a time";
+      }
+    }
+  }
+  return undefined;
+}
+
 function hasUnescapedPowerShellExpansion(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
     if (value[index] !== "$" || !/[A-Za-z0-9_?^$({]/.test(value[index + 1] || "")) continue;
@@ -688,6 +813,8 @@ function powershellPreflightError(command: string): string | undefined {
   if (rootScanError) return rootScanError;
   const vaultScanError = vaultRootRecursiveScanError(command, code);
   if (vaultScanError) return vaultScanError;
+  const tempScanError = tempRootRecursiveScanError(command, code);
+  if (tempScanError) return tempScanError;
   const p3BuildWaitError = p3BuildSlotWaitError(command, code);
   if (p3BuildWaitError) return p3BuildWaitError;
   const swarmRouteError = swarmRouteDecisionIsolationError(command, code);

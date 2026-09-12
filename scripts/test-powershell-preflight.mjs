@@ -8,6 +8,8 @@ const manager = new ProcessManager();
 const commandWaitMs = 30_000;
 assert.ok(process.env.USERPROFILE, "USERPROFILE is required for Vault-root preflight test");
 const vaultRoot = join(process.env.USERPROFILE, "Desktop", "vault");
+const tempRoot = process.env.TEMP || process.env.TMP;
+assert.ok(tempRoot, "TEMP or TMP is required for Temp-root preflight test");
 const psQuote = (value) => value.replaceAll("'", "''");
 
 async function run(command, caller) {
@@ -102,6 +104,21 @@ rejects(`cmd.exe /c dir "${vaultRoot}" /s`, /Vault root/);
 rejects(`tree.exe "${vaultRoot}" /F`, /Vault root/);
 rejects(`Get-ChildItem -LiteralPath '$env:USERPROFILE\\Desktop\\vault' -Recurse -File`, /Vault root/);
 rejects(`rg needle '%USERPROFILE%\\Desktop\\vault'`, /Vault root/);
+rejects(`Get-ChildItem -LiteralPath '${psQuote(tempRoot)}' -Recurse -File`, /Temp root/);
+rejects(`rg needle '${psQuote(tempRoot)}'`, /Temp root/);
+rejects(String.raw`Get-ChildItem '$env:TEMP' -Recurse -File`, /Temp root/);
+const historicalTempFanout = `$dirs=Get-ChildItem '${psQuote(tempRoot)}' -Directory -Filter 'p3-*' -ErrorAction SilentlyContinue; @(foreach($d in $dirs){$sum=(Get-ChildItem $d.FullName -File -Recurse -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum; [pscustomobject]@{Bytes=$sum;Name=$d.Name}})`;
+rejects(historicalTempFanout, /Temp-root fan-out/);
+const unrelatedRecurseAfterTempEnumeration = await run(`$dirs=Get-ChildItem '${psQuote(tempRoot)}' -Directory -Filter 'p3-*'; foreach($d in $dirs){Get-ChildItem -LiteralPath '${psQuote(join(vaultRoot, "04 Operating Contracts", "__mcp_preflight_missing__"))}' -Recurse -ErrorAction SilentlyContinue; Write-Output $d.FullName}; Write-Output 'TEMP_FANOUT_FALSE_POSITIVE_ALLOWED'`, "caller_temp_fanout_false_positive_allowed");
+assert.equal(unrelatedRecurseAfterTempEnumeration.exit_code, 0, JSON.stringify(unrelatedRecurseAfterTempEnumeration));
+assert.match(unrelatedRecurseAfterTempEnumeration.stdout, /TEMP_FANOUT_FALSE_POSITIVE_ALLOWED/);
+const tempPipelineFanout = `Get-ChildItem -LiteralPath '${psQuote(tempRoot)}' -Directory -Filter 'p3-*' | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -Recurse | Measure-Object Length -Sum }`;
+rejects(tempPipelineFanout, /Temp-root pipeline fan-out/);
+const tempPipelineFanoutAlias = `Get-ChildItem -LiteralPath '${psQuote(tempRoot)}' -Directory -Filter 'p3-*' | % { Get-ChildItem -Recurse -LiteralPath $PSItem.FullName | Measure-Object Length -Sum }`;
+rejects(tempPipelineFanoutAlias, /Temp-root pipeline fan-out/);
+const unrelatedPipelineRecurse = await run(`Get-ChildItem -LiteralPath '${psQuote(tempRoot)}' -Directory -Filter 'p3-*' | ForEach-Object { Get-ChildItem -LiteralPath '${psQuote(join(vaultRoot, "04 Operating Contracts", "__mcp_preflight_missing__"))}' -Recurse -ErrorAction SilentlyContinue; Write-Output $_.FullName }; Write-Output 'TEMP_PIPELINE_FALSE_POSITIVE_ALLOWED'`, "caller_temp_pipeline_false_positive_allowed");
+assert.equal(unrelatedPipelineRecurse.exit_code, 0, JSON.stringify(unrelatedPipelineRecurse));
+assert.match(unrelatedPipelineRecurse.stdout, /TEMP_PIPELINE_FALSE_POSITIVE_ALLOWED/);
 rejects("$pidToWait=20052; if(Get-Process -Id $pidToWait -ErrorAction SilentlyContinue){'WAIT_FOREIGN_UBT='+$pidToWait; Wait-Process -Id $pidToWait}; 'FOREIGN_UBT_EXITED'", /P3 build-slot waits/);
 rejects("$lane='C:\\work'; $ownerPid=20052; while((Get-Date)-lt (Get-Date).AddMinutes(15)){if(-not (Get-Process -Id $ownerPid -ErrorAction SilentlyContinue)){break}; Start-Sleep -Milliseconds 200}; & (Join-Path $lane 'scripts\\Invoke-P3Build.ps1') -ProjectRoot $lane -Target Editor", /P3 build-slot polling/);
 rejects("Wait-Process -Id 20052; & 'C:\\work\\scripts\\Invoke-P3HotSourceBuild.ps1' -Module P3Gameplay", /P3 build-slot waits/);
@@ -133,6 +150,14 @@ assert.equal(boundedVaultSubdir.exit_code, 0, JSON.stringify(boundedVaultSubdir)
 assert.match(boundedVaultSubdir.stdout, /VAULT_SUBDIR_ALLOWED/);
 const indexedVaultHelper = await run(`& python.exe '${psQuote(join(vaultRoot, "tools", "memory_bank.py"))}' --help`, "caller_vault_indexed_helper");
 assert.equal(indexedVaultHelper.exit_code, 0, JSON.stringify(indexedVaultHelper));
+
+const boundedTempSubdir = await run(`Get-ChildItem -LiteralPath '${psQuote(join(tempRoot, "mcp-preflight-explicit-missing"))}' -Recurse -ErrorAction SilentlyContinue; Write-Output 'TEMP_SUBDIR_ALLOWED'`, "caller_temp_subdir_allowed");
+assert.equal(boundedTempSubdir.exit_code, 0, JSON.stringify(boundedTempSubdir));
+assert.match(boundedTempSubdir.stdout, /TEMP_SUBDIR_ALLOWED/);
+const tempRootLiterals = await run(`Write-Output 'Get-ChildItem ${psQuote(tempRoot)} -Recurse'; # rg ${psQuote(tempRoot)}
+Write-Output 'TEMP_ROOT_LITERAL_ALLOWED'`, "caller_temp_root_literal_allowed");
+assert.equal(tempRootLiterals.exit_code, 0, JSON.stringify(tempRootLiterals));
+assert.match(tempRootLiterals.stdout, /TEMP_ROOT_LITERAL_ALLOWED/);
 
 const boundedRoot = mkdtempSync(join(tmpdir(), "mcp-bounded-recursion-"));
 try {
@@ -177,4 +202,4 @@ try {
   rmSync(rejectionReceiptDirectory, { recursive: true, force: true });
 }
 
-console.log("PASS powershell_preflight pwsh=7.6.5 ps7_operators=true loop_pipeline_autonormalization=true nested_command_parent_expansion=blocked drive_root_recursion=blocked vault_root_recursion=blocked bounded_recursion=allowed durable_rejections=true");
+console.log("PASS powershell_preflight pwsh=7.6.5 ps7_operators=true loop_pipeline_autonormalization=true nested_command_parent_expansion=blocked drive_root_recursion=blocked vault_root_recursion=blocked temp_root_fanout=blocked bounded_recursion=allowed durable_rejections=true");
