@@ -1,4 +1,4 @@
-export type CommandExecutionMode = "powershell" | "native" | "explicit_shell" | "native_sequence";
+export type CommandExecutionMode = "powershell" | "native" | "explicit_shell" | "native_sequence" | "native_pipeline";
 export type CommandRunCondition = "always" | "success" | "failure";
 
 export type CommandExecutionStep = {
@@ -133,6 +133,18 @@ function shouldDirectExplicitShell(command: string, base: string, parsed: Parsed
   return payload.length >= 2 && payload.startsWith('"') && payload.endsWith('"') && /&&|\|\|/.test(payload);
 }
 
+function cmdPayloadForNativePlanning(command: string): string | undefined {
+  const match = /^\s*(?:cmd|cmd\.exe)\s+(?:(?:\/[dqsuaefv](?::(?:on|off))?)\s+)*\/c\s+([\s\S]+)$/i.exec(command);
+  if (!match) return undefined;
+  let payload = match[1]!.trim();
+  if (payload.length >= 2 && payload.startsWith('"') && payload.endsWith('"')) payload = payload.slice(1, -1).trim();
+  if (!payload) return undefined;
+  // These constructs genuinely belong to cmd.exe. Everything else still has to pass
+  // the normal native/sequence planner before cmd can be elided.
+  if (/(?:^|[^`])[<>]/.test(payload) || /%[A-Za-z_][A-Za-z0-9_]*%/.test(payload) || /\bfor\s+%[A-Za-z]/i.test(payload)) return undefined;
+  return payload;
+}
+
 function pythonHeredocPlan(command: string): CommandExecutionPlan | undefined {
   // LLMs frequently emit POSIX `python - <<'PY'` even on Windows. Treat the heredoc as
   // process stdin, matching Execa/zx input semantics, instead of asking PowerShell to parse it.
@@ -144,6 +156,44 @@ function pythonHeredocPlan(command: string): CommandExecutionPlan | undefined {
   const [executable, ...args] = parsed.words;
   const stdin = `${match[5]}\n`;
   return { mode: "native", executable: executable!, args, stdin, reason: "python_heredoc_to_stdin" };
+}
+
+function splitTopLevelPipeline(command: string): string[] | undefined {
+  const parts: string[] = [];
+  let start = 0;
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  let sawPipe = false;
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+    if (escaped) { escaped = false; continue; }
+    if (quote) {
+      if (quote === '"' && char === "\\" && command[index + 1] === '"') { index += 1; continue; }
+      if (char === '`' && quote === '"') { escaped = true; continue; }
+      if (char === quote) {
+        if (quote === "'" && command[index + 1] === "'") { index += 1; continue; }
+        quote = undefined;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"') { quote = char; continue; }
+    if (char === '`') { escaped = true; continue; }
+    if (char === '|' && command[index + 1] === '|') return undefined;
+    if (char === '|') {
+      const segment = command.slice(start, index).trim();
+      if (!segment) return undefined;
+      parts.push(segment);
+      start = index + 1;
+      sawPipe = true;
+      continue;
+    }
+    if (char === ';' || char === '&' || char === '\r' || char === '\n') return undefined;
+  }
+  if (quote || escaped || !sawPipe) return undefined;
+  const tail = command.slice(start).trim();
+  if (!tail) return undefined;
+  parts.push(tail);
+  return parts.length > 1 ? parts : undefined;
 }
 
 function splitTopLevelSequence(command: string): SequencePart[] | undefined {
@@ -268,8 +318,31 @@ function planSingleCommand(command: string, powershellExe: string, env: NodeJS.P
  * and is evaluated against the original command before any process is launched.
  */
 export function planCommandExecution(command: string, powershellExe: string, env: NodeJS.ProcessEnv = process.env): CommandExecutionPlan {
+  const cmdPayload = cmdPayloadForNativePlanning(command);
+  if (cmdPayload) {
+    const inner = planCommandExecution(cmdPayload, powershellExe, env);
+    if (inner.mode === "native" || inner.mode === "native_sequence" || inner.mode === "native_pipeline") {
+      const reason = inner.mode === "native_sequence"
+        ? "cmd_wrapper_elided_native_sequence"
+        : inner.mode === "native_pipeline" ? "cmd_wrapper_elided_native_pipeline" : "cmd_wrapper_elided_native";
+      return { ...inner, reason };
+    }
+  }
+
   const heredoc = pythonHeredocPlan(command);
   if (heredoc) return heredoc;
+
+  const pipeline = splitTopLevelPipeline(command);
+  if (pipeline) {
+    const steps: CommandExecutionStep[] = [];
+    for (const part of pipeline) {
+      const plan = planSingleCommand(part, powershellExe, env);
+      if (plan.mode !== "native" || plan.steps) return planSingleCommand(command, powershellExe, env);
+      steps.push({ executable: plan.executable, args: plan.args, runIf: "always", reason: plan.reason, ...(plan.stdin !== undefined ? { stdin: plan.stdin } : {}) });
+    }
+    const first = steps[0]!;
+    return { mode: "native_pipeline", executable: first.executable, args: first.args, reason: "native_pipeline", steps };
+  }
 
   const sequence = splitTopLevelSequence(command);
   if (sequence) {

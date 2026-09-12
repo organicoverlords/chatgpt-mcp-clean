@@ -29,8 +29,9 @@ assert.equal(server._registeredTools.read_output?._meta, undefined, "read_output
 const startInputSchema = server._registeredTools.start_process?.inputSchema;
 assert.ok(startInputSchema, "start_process input schema missing");
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output LEGACY" })).success, true, "legacy command input must remain valid");
-assert.equal((await startInputSchema.safeParseAsync({ executable: "node", args: ["--version"] })).success, true, "structured executable+args input must be valid");
+assert.equal((await startInputSchema.safeParseAsync({ executable: "node", args: ["--version"], stdin: "" })).success, true, "structured executable+args+stdin input must be valid");
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output BAD", executable: "node" })).success, false, "command and executable modes must be mutually exclusive");
+assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output BAD", stdin: "x" })).success, false, "legacy command mode must reject structured stdin");
 
 async function assertStructuredProcessResult(name, args) {
   const tool = server._registeredTools[name];
@@ -53,6 +54,13 @@ const argvStructured = await assertStructuredProcessResult("start_process", {
 assert.equal(argvStructured.execution_mode, "native", "structured executable mode must bypass PowerShell");
 assert.equal(argvStructured.execution_reason, "structured_argv", "structured executable mode must expose its routing reason");
 assert.deepEqual(JSON.parse(String(argvStructured.stdout || "").trim()), [trickyArg], "structured argv must survive without shell reinterpretation");
+const stdinStructured = await assertStructuredProcessResult("start_process", {
+  executable: process.execPath,
+  args: ["-e", "process.stdin.pipe(process.stdout)"],
+  stdin: "contract-stdin\n",
+  wait_ms: 10_000,
+});
+assert.equal(String(stdinStructured.stdout || ""), "contract-stdin\n", "structured stdin must reach the child without shell transport");
 const readStructured = await assertStructuredProcessResult("read_output", { process_id: startStructured.process_id, max_chars: 32_000, wait_ms: 0 });
 assert.equal(readStructured.process_id, startStructured.process_id, "read_output structured result must preserve process identity");
 const killStructured = await assertStructuredProcessResult("kill_process", { process_id: startStructured.process_id });
@@ -63,7 +71,7 @@ const expectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "b7d301913dbae726d6216ccbf65b7eb42eceefc3d0027a35f838be66b478d5be";
+const acceptedContractSha256 = "07a79c7ce26c1af304c8a2fd847969965f92062ea6626bcb5d85b2fd2291199a";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(expectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 assert.deepEqual(actualTools, expectedTools, "connector tool contract changed; do not replace a stable connector identity without an explicit contract migration");

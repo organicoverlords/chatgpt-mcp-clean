@@ -57,9 +57,8 @@ try {
   assert.equal(arbitraryActor.exit_code, 0, JSON.stringify(arbitraryActor));
   assert.match(arbitraryActor.stdout, /ACTOR=ChatGPT:rowan-test-repaired/);
   assert.equal(arbitraryActor.submitted_command, arbitrarySubmitted);
-  assert.equal(arbitraryActor.repair_attempts?.length, 1, JSON.stringify(arbitraryActor));
-  assert.equal(arbitraryActor.repair_attempts[0].reason, "busy_actor_missing_harness");
-  assert.match(arbitraryActor.repair_attempts[0].stdout, /claim actor must be/);
+  assert.equal(arbitraryActor.repair_attempts, undefined, JSON.stringify(arbitraryActor));
+  assert.match(arbitraryActor.command, /claim 'ChatGPT:rowan-test-repaired'/);
 } finally {
   rmSync(busyActorDirectory, { recursive: true, force: true });
 }
@@ -147,7 +146,10 @@ assert.match(directNestedShell.stdout, /\\Temp/i);
 const parentLiteralExpansion = await run(String.raw`$wt='C:\safe-parent'; pwsh.exe -NoProfile -Command "Write-Output '$wt\child'"`, "caller_nested_parent_literal_expansion_allowed");
 assert.equal(parentLiteralExpansion.exit_code, 0, JSON.stringify(parentLiteralExpansion));
 assert.match(parentLiteralExpansion.stdout, /C:\\safe-parent\\child/);
-rejects(String.raw`$wt='C:\\unsafe-parent'; pwsh.exe -NoProfile -Command "Write-Output '$wt\\child \\"quoted\\"'"`, /parent-expandable/);
+const repairedNestedQuotes = await run(String.raw`$wt='C:\\unsafe-parent'; pwsh.exe -NoProfile -Command "Write-Output '$wt\\child \\"quoted\\"'"`, "caller_nested_cstyle_quotes_repaired");
+assert.equal(repairedNestedQuotes.exit_code, 0, JSON.stringify(repairedNestedQuotes));
+assert.equal(repairedNestedQuotes.repair_attempts, undefined, JSON.stringify(repairedNestedQuotes));
+assert.match(repairedNestedQuotes.stdout, /unsafe-parent/);
 
 const nestedSingleQuoted = await run(String.raw`pwsh.exe -NoProfile -Command 'Write-Output $env:TEMP'`, "caller_nested_single_quoted_allowed");
 assert.equal(nestedSingleQuoted.exit_code, 0, JSON.stringify(nestedSingleQuoted));

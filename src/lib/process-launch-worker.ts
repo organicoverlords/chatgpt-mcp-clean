@@ -34,7 +34,7 @@ const data = workerData as LaunchData;
 const port = parentPort;
 if (!port) throw new Error("process launcher worker requires a parent port");
 
-const children = new Map<string, ChildProcess>();
+const children = new Map<string, Set<ChildProcess>>();
 const pendingKills = new Set<string>();
 const pendingOutput = new Map<string, PendingOutput>();
 const send = (requestId: string, message: Record<string, unknown>) => port.postMessage({ requestId, ...message });
@@ -66,14 +66,30 @@ function queueOutput(requestId: string, kind: OutputKind, chunk: Buffer | string
   }
 }
 
+function addChild(requestId: string, child: ChildProcess): void {
+  let owned = children.get(requestId);
+  if (!owned) { owned = new Set<ChildProcess>(); children.set(requestId, owned); }
+  owned.add(child);
+}
+
+function removeChild(requestId: string, child: ChildProcess): void {
+  const owned = children.get(requestId);
+  if (!owned) return;
+  owned.delete(child);
+  if (owned.size === 0) children.delete(requestId);
+}
+
 function requestKill(requestId: string): void {
   pendingKills.add(requestId);
-  const child = children.get(requestId);
-  if (!child?.pid) return;
-  const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
-  const timer = setTimeout(() => killer.kill(), 2_000);
-  timer.unref();
-  killer.once("close", () => clearTimeout(timer));
+  const owned = children.get(requestId);
+  if (!owned?.size) return;
+  for (const child of owned) {
+    if (!child.pid) continue;
+    const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+    const timer = setTimeout(() => killer.kill(), 2_000);
+    timer.unref();
+    killer.once("close", () => clearTimeout(timer));
+  }
 }
 
 function planSteps(plan: CommandExecutionPlan): CommandExecutionStep[] {
@@ -113,7 +129,7 @@ function runStep(
       reject(new Error(`Background process did not receive a PID: ${step.executable}`));
       return;
     }
-    children.set(requestId, child);
+    addChild(requestId, child);
     const startMessage = stepIndex === 0 ? "started" : "step_started";
     send(requestId, {
       type: startMessage,
@@ -134,17 +150,55 @@ function runStep(
       if (settled) return;
       settled = true;
       flushOutput(requestId);
-      children.delete(requestId);
+      removeChild(requestId, child);
       reject(error);
     });
     child.once("exit", (code, signal) => {
       if (settled) return;
       settled = true;
       flushOutput(requestId);
-      children.delete(requestId);
+      removeChild(requestId, child);
       resolve({ code: code ?? -1, signal });
     });
   });
+}
+
+async function runNativePipeline(
+  requestId: string,
+  steps: CommandExecutionStep[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  plan: CommandExecutionPlan,
+): Promise<StepResult> {
+  const spawned: ChildProcess[] = [];
+  const results: Array<Promise<StepResult>> = [];
+  try {
+    for (let index = 0; index < steps.length; index += 1) {
+      const step = steps[index]!;
+      const child = crossSpawn(step.executable, step.args, { cwd, windowsHide: true, stdio: [index === 0 && step.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"], env });
+      if (!child.pid) throw new Error(`Background pipeline process did not receive a PID: ${step.executable}`);
+      addChild(requestId, child);
+      spawned.push(child);
+      send(requestId, { type: index === 0 ? "started" : "step_started", pid: child.pid, executionMode: plan.mode, executionReason: plan.reason, stepIndex: index, stepCount: steps.length, stepReason: step.reason });
+      child.stderr?.on("data", (chunk) => queueOutput(requestId, "stderr", chunk));
+      child.stdin?.on("error", () => {});
+      if (index > 0) spawned[index - 1]!.stdout?.pipe(child.stdin!);
+      if (index === steps.length - 1) child.stdout?.on("data", (chunk) => queueOutput(requestId, "stdout", chunk));
+      if (index === 0 && step.stdin !== undefined) child.stdin?.end(step.stdin);
+      results.push(new Promise<StepResult>((resolve, reject) => {
+        let settled = false;
+        child.once("error", (error) => { if (settled) return; settled = true; removeChild(requestId, child); reject(error); });
+        child.once("close", (code, signal) => { if (settled) return; settled = true; removeChild(requestId, child); resolve({ code: code ?? -1, signal }); });
+      }));
+    }
+    if (pendingKills.has(requestId)) requestKill(requestId);
+    const completed = await Promise.all(results);
+    flushOutput(requestId);
+    return completed.at(-1) ?? { code: 0, signal: null };
+  } catch (error) {
+    requestKill(requestId);
+    throw error;
+  }
 }
 
 async function executePlan(requestId: string, command: string, cwd: string, suppliedPlan?: CommandExecutionPlan): Promise<void> {
@@ -154,7 +208,11 @@ async function executePlan(requestId: string, command: string, cwd: string, supp
   let previousCode: number | undefined;
   let finalSignal: NodeJS.Signals | null = null;
   try {
-    for (let index = 0; index < steps.length; index += 1) {
+    if (plan.mode === "native_pipeline") {
+      const result = await runNativePipeline(requestId, steps, cwd, launchEnv.env, plan);
+      previousCode = result.code;
+      finalSignal = result.signal;
+    } else for (let index = 0; index < steps.length; index += 1) {
       if (pendingKills.has(requestId) && previousCode !== undefined) {
         previousCode = -1;
         finalSignal = null;

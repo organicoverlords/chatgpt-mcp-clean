@@ -296,7 +296,8 @@
             "powershell",
             "native",
             "explicit_shell",
-            "native_sequence"
+            "native_sequence",
+            "native_pipeline"
           ]
         },
         "execution_reason": {
@@ -606,7 +607,7 @@
   },
   {
     "name": "start_process",
-    "description": "Execute a local process. Prefer executable plus args for exact argv execution without shell parsing. Legacy command remains supported for shell programs; the runner routes plain native commands directly and uses PowerShell only when the command actually needs PowerShell syntax. wait_ms defaults to 750 ms and is bounded to 0..10000 ms.",
+    "description": "Execute a local process. Prefer executable plus args (and optional stdin) for exact process execution without shell parsing. Legacy command remains supported for shell programs; the runner routes plain native commands directly and uses PowerShell only when the command actually needs PowerShell syntax. wait_ms defaults to 750 ms and is bounded to 0..10000 ms.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -625,6 +626,10 @@
           "items": {
             "type": "string"
           }
+        },
+        "stdin": {
+          "type": "string",
+          "maxLength": 1000000
         },
         "working_directory": {
           "type": "string"
@@ -766,7 +771,8 @@
             "powershell",
             "native",
             "explicit_shell",
-            "native_sequence"
+            "native_sequence",
+            "native_pipeline"
           ]
         },
         "execution_reason": {

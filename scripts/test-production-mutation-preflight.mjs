@@ -18,9 +18,9 @@ function rejects(command) {
   );
 }
 
-function rejectsStructured(executable, args) {
+function rejectsStructured(executable, args, stdin) {
   assert.throws(
-    () => manager.startStructured(executable, args, undefined, "caller_structured_production_mutation_reject"),
+    () => manager.startStructured(executable, args, undefined, "caller_structured_production_mutation_reject", undefined, undefined, stdin),
     (error) => error instanceof Error
       && error.message.startsWith("start_process_preflight_failed:")
       && /direct MCP production ingress mutation/.test(error.message),
@@ -71,6 +71,7 @@ async function run(command) {
 
 rejectsStructured("ssh.exe", [`root@${productionVpsIp}`, "true"]);
 rejectsStructured("node.exe", ["dist/index.js", "--port", "3011"]);
+rejectsStructured("pwsh.exe", ["-NoProfile", "-Command", "-"], `ssh root@${productionVpsIp} true`);
 rejects(`& ssh.exe root@5.61.91.127 "cp /tmp/Caddyfile /etc/caddy/Caddyfile; systemctl reload caddy"`);
 rejects(`& ssh.exe root@${productionVpsIp} "python3 -c 'print(1)'"`);
 rejects(`scp.exe C:\tmp\Caddyfile root@${productionVpsIp}:${caddyPath}`);

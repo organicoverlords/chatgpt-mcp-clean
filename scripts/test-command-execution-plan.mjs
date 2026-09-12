@@ -55,9 +55,21 @@ assert.equal(sequencePlan.mode, "native_sequence");
 assert.equal(sequencePlan.steps?.length, 2);
 assert.deepEqual(sequencePlan.steps?.map((step) => step.runIf), ["always", "always"]);
 
+const cmdNativeSequence = planCommandExecution('cmd /d /s /c "git rev-parse HEAD && git rev-parse HEAD^{commit}"', pwsh);
+assert.equal(cmdNativeSequence.mode, "native_sequence");
+assert.equal(cmdNativeSequence.reason, "cmd_wrapper_elided_native_sequence");
+assert.equal(cmdNativeSequence.steps?.[1]?.args.at(-1), "HEAD^{commit}");
+
+const cmdRedirection = planCommandExecution('cmd /c "echo hello > out.txt"', pwsh);
+assert.equal(cmdRedirection.mode, "explicit_shell");
+
 const conditionalPlan = planCommandExecution(`node -e "process.exit(7)" && node -e "console.log('NO')" || node -e "console.log('RECOVER')"`, pwsh);
 assert.equal(conditionalPlan.mode, "native_sequence");
 assert.deepEqual(conditionalPlan.steps?.map((step) => step.runIf), ["always", "success", "failure"]);
+
+const nativePipelinePlan = planCommandExecution(`node -e "process.stdout.write('PIPE_OK')" | node -e "process.stdin.pipe(process.stdout)"`, pwsh);
+assert.equal(nativePipelinePlan.mode, "native_pipeline");
+assert.equal(nativePipelinePlan.steps?.length, 2);
 
 const heredocPlan = planCommandExecution("python - <<'PY'\nprint('HEREDOC_OK')\nPY", pwsh);
 assert.equal(heredocPlan.mode, "native");
@@ -121,8 +133,9 @@ const cStyleSubmitted = String.raw`$s='x'; Write-Output $s.Replace('x',"A \"B\" 
 const cStyle = await manager.startWithWait(cStyleSubmitted, process.cwd(), "caller_execution_plan_cstyle_quote", waitMs);
 assert.equal(cStyle.exit_code, 0, JSON.stringify(cStyle));
 assert.match(cStyle.stdout, /A "B" C/);
-assert.equal(cStyle.repair_attempts?.length, 1, JSON.stringify(cStyle));
-assert.equal(cStyle.repair_attempts[0].reason, "powershell_c_style_quote_escape");
+assert.equal(cStyle.repair_attempts, undefined, JSON.stringify(cStyle));
+assert.equal(cStyle.submitted_command, cStyleSubmitted);
+assert.match(cStyle.command, /`"B`"/);
 
 const npmVersion = await manager.startWithWait("npm --version", process.cwd(), "caller_execution_plan_npm", waitMs);
 assert.equal(npmVersion.exit_code, 0, JSON.stringify(npmVersion));
@@ -144,6 +157,16 @@ const orRecovers = await manager.startWithWait(`node -e "process.exit(7)" || nod
 assert.equal(orRecovers.exit_code, 0, JSON.stringify(orRecovers));
 assert.equal(orRecovers.execution_mode, "native_sequence", JSON.stringify(orRecovers));
 assert.match(orRecovers.stdout, /RECOVERED/);
+
+const nativePipeline = await manager.startWithWait(`node -e "process.stdout.write('PIPE_OK')" | node -e "process.stdin.pipe(process.stdout)"`, process.cwd(), "caller_execution_plan_native_pipeline", waitMs);
+assert.equal(nativePipeline.exit_code, 0, JSON.stringify(nativePipeline));
+assert.equal(nativePipeline.execution_mode, "native_pipeline", JSON.stringify(nativePipeline));
+assert.match(nativePipeline.stdout, /PIPE_OK/);
+
+const structuredStdin = await manager.startStructuredWithWait(process.execPath, ["-e", "process.stdin.pipe(process.stdout)"], process.cwd(), "caller_execution_plan_structured_stdin", waitMs, undefined, undefined, "STRUCTURED_STDIN_OK\n");
+assert.equal(structuredStdin.exit_code, 0, JSON.stringify(structuredStdin));
+assert.equal(structuredStdin.execution_mode, "native", JSON.stringify(structuredStdin));
+assert.match(structuredStdin.stdout, /STRUCTURED_STDIN_OK/);
 
 const heredoc = await manager.startWithWait("python - <<'PY'\nprint('HEREDOC_OK')\nPY", process.cwd(), "caller_execution_plan_heredoc", waitMs);
 assert.equal(heredoc.exit_code, 0, JSON.stringify(heredoc));
@@ -168,5 +191,5 @@ try {
   rmSync(cmdDir, { recursive: true, force: true });
 }
 
-console.log("PASS command_execution_plan native_argv=true native_sequence=true python_heredoc_stdin=true explicit_shell_direct=true powershell_repairs=true powershell_fallback=true");
+console.log("PASS command_execution_plan native_argv=true native_sequence=true native_pipeline=true python_heredoc_stdin=true structured_stdin=true cmd_wrapper_elision=true explicit_shell_direct=true powershell_repairs=true powershell_fallback=true");
 

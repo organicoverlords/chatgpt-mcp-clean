@@ -753,6 +753,16 @@ function normalizeCanonicalToolEntrypoints(command: string): PowerShellCommandNo
   return { command: normalized, changed: normalized !== command };
 }
 
+function normalizeBusyActorValue(actor: string): string {
+  const canonical = canonicalBusyHarness(actor);
+  if (canonical !== actor) return canonical;
+  if (!actor || actor.startsWith("$") || /\s/.test(actor)) return actor;
+  const alreadyHarnessed = BUSY_ACTOR_HARNESSES.some((harness) => actor.length > harness.length + 1
+    && actor.slice(0, harness.length).toLowerCase() === harness.toLowerCase()
+    && "-:/".includes(actor[harness.length]!));
+  return alreadyHarnessed ? canonical : `ChatGPT:${actor}`;
+}
+
 function normalizeBusyCoordinatorActorHarness(command: string): PowerShellCommandNormalization {
   if (!/(?:BusyCoordinator[\\/](?:python[\\/])?busy(?:-python)?\.(?:cmd|py)|\bbusy-python\.cmd\b)/i.test(command)) {
     return { command, changed: false };
@@ -760,15 +770,15 @@ function normalizeBusyCoordinatorActorHarness(command: string): PowerShellComman
   if (!/\b(?:claim|heartbeat)\b/i.test(command)) return { command, changed: false };
 
   let normalized = command;
-  // Literal actor passed directly to claim/heartbeat. Only canonicalize an already
-  // recognizable harness; never invent identity for an arbitrary actor string.
+  // Busy claim/heartbeat actor is a typed contract. Canonicalize known harness casing and
+  // supply this connector's ChatGPT harness for a bare literal actor before spawning.
   normalized = normalized.replace(
     /(\b(?:claim|heartbeat)\s+)(['"])([^'"\r\n]+)\2/gi,
-    (whole, prefix: string, quote: string, actor: string) => `${prefix}${quote}${canonicalBusyHarness(actor)}${quote}`,
+    (whole, prefix: string, quote: string, actor: string) => `${prefix}${quote}${normalizeBusyActorValue(actor)}${quote}`,
   );
   normalized = normalized.replace(
     /(\b(?:claim|heartbeat)\s+)([A-Za-z][^\s;'"|&]+)/gi,
-    (whole, prefix: string, actor: string) => `${prefix}${canonicalBusyHarness(actor)}`,
+    (whole, prefix: string, actor: string) => `${prefix}${normalizeBusyActorValue(actor)}`,
   );
 
   // The common generated form assigns the actor to a variable first. Restrict this
@@ -778,7 +788,7 @@ function normalizeBusyCoordinatorActorHarness(command: string): PowerShellComman
     const variable = match[1]!;
     if (!new RegExp(`\\b(?:claim|heartbeat)\\s+\\$${variable}\\b`, "i").test(normalized)) continue;
     const actor = match[3]!;
-    const canonical = canonicalBusyHarness(actor);
+    const canonical = normalizeBusyActorValue(actor);
     if (canonical === actor) continue;
     const actorStart = (match.index ?? 0) + match[0].lastIndexOf(actor);
     normalized = `${normalized.slice(0, actorStart)}${canonical}${normalized.slice(actorStart + actor.length)}`;
@@ -1242,6 +1252,27 @@ export function replayRuntimeRepair(command: string, stdout: string, stderr: str
   return runtimeRepairCommand(command, stdout, stderr);
 }
 
+export function replayPrepareStartProcessCommand(command: string): {
+  command: string;
+  rewrites: string[];
+  execution_mode: CommandExecutionMode;
+  execution_reason: string;
+} {
+  const normalized = replayNormalizeStartProcessCommand(command);
+  let effectiveCommand = normalized.command;
+  const rewrites = [...normalized.rewrites];
+  let executionPlan = planCommandExecution(effectiveCommand, POWERSHELL_EXE);
+  if (executionPlan.mode === "powershell" && effectiveCommand.includes('\\"')) {
+    const repairedQuotes = repairPowerShellCStyleDoubleQuotes(effectiveCommand);
+    if (repairedQuotes && repairedQuotes !== effectiveCommand) {
+      effectiveCommand = repairedQuotes;
+      rewrites.push("powershell_c_style_quote_escape");
+      executionPlan = planCommandExecution(effectiveCommand, POWERSHELL_EXE);
+    }
+  }
+  return { command: effectiveCommand, rewrites, execution_mode: executionPlan.mode, execution_reason: executionPlan.reason };
+}
+
 export class ProcessManager {
   private readonly processes = new Map<string, ProcessState>();
   private readonly outputCursors = new Map<string, OutputCursor>();
@@ -1463,7 +1494,7 @@ export class ProcessManager {
     if ((message.type === "started" || message.type === "step_started") && Number.isInteger(message.pid) && message.pid > 0) {
       state.pid = message.pid;
       state.launching = false;
-      if (message.executionMode === "powershell" || message.executionMode === "native" || message.executionMode === "explicit_shell" || message.executionMode === "native_sequence") state.executionMode = message.executionMode;
+      if (message.executionMode === "powershell" || message.executionMode === "native" || message.executionMode === "explicit_shell" || message.executionMode === "native_sequence" || message.executionMode === "native_pipeline") state.executionMode = message.executionMode;
       if (typeof message.executionReason === "string") state.executionReason = message.executionReason;
       this.updateHostAdmissionChildPid(state.id, state.pid);
       emitTelemetry({
@@ -2083,8 +2114,9 @@ export class ProcessManager {
     actionClass: string | undefined,
     submittedCommand: string | undefined,
     normalizationRewrites: string[] = [],
+    preflightCommand: string = effectiveCommand,
   ): StartResult {
-    const preflightError = commandPreflightError(effectiveCommand, executionPlan.mode);
+    const preflightError = commandPreflightError(preflightCommand, executionPlan.mode);
     if (preflightError) {
       const rejectionId = randomUUID();
       void this.persistPreflightRejectionAsync(rejectionId, submittedCommand ?? effectiveCommand, workingDirectory, callerId, preflightError);
@@ -2130,17 +2162,17 @@ export class ProcessManager {
 
   start(command: string, workingDirectory?: string, callerId = "caller_unknown", activityTarget?: ActivityTarget, actionClass?: string): StartResult {
     this.pruneCompleted();
-    const normalized = replayNormalizeStartProcessCommand(command);
-    const executionPlan = planCommandExecution(normalized.command, POWERSHELL_EXE);
+    const prepared = replayPrepareStartProcessCommand(command);
+    const executionPlan = planCommandExecution(prepared.command, POWERSHELL_EXE);
     return this.startPrepared(
-      normalized.command,
+      prepared.command,
       executionPlan,
       workingDirectory,
       callerId,
       activityTarget,
       actionClass,
-      normalized.command !== command ? command : undefined,
-      normalized.rewrites,
+      prepared.command !== command ? command : undefined,
+      prepared.rewrites,
     );
   }
 
@@ -2151,11 +2183,13 @@ export class ProcessManager {
     callerId = "caller_unknown",
     activityTarget?: ActivityTarget,
     actionClass?: string,
+    stdin?: string,
   ): StartResult {
     this.pruneCompleted();
-    const executionPlan = planStructuredExecution(executable, args, undefined, POWERSHELL_EXE);
+    const executionPlan = planStructuredExecution(executable, args, stdin, POWERSHELL_EXE);
     const displayCommand = structuredCommandDisplay(executable, args);
-    return this.startPrepared(displayCommand, executionPlan, workingDirectory, callerId, activityTarget, actionClass, undefined, ["structured_argv"]);
+    const preflightCommand = stdin === undefined ? displayCommand : `${displayCommand}\n${stdin}`;
+    return this.startPrepared(displayCommand, executionPlan, workingDirectory, callerId, activityTarget, actionClass, undefined, ["structured_argv", ...(stdin !== undefined ? ["structured_stdin"] : [])], preflightCommand);
   }
 
   async startWithWait(
@@ -2253,9 +2287,10 @@ export class ProcessManager {
     waitMs = 750,
     activityTarget?: ActivityTarget,
     actionClass?: string,
+    stdin?: string,
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
-    const started = this.startStructured(executable, args, cwd, callerId, activityTarget, actionClass);
+    const started = this.startStructured(executable, args, cwd, callerId, activityTarget, actionClass, stdin);
     const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
     emitTelemetry({ event: "process_wait_requested", action: "start_structured", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;
