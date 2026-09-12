@@ -68,10 +68,12 @@ export type ChatgptFileInput = z.infer<typeof ChatgptFileSchema>;
 const UploadLocalFileOutputSchema = z.object({
   direction: z.literal("local_to_chatgpt"),
   status: z.literal("ready"),
+  delivery_mode: z.literal("tool_file_reference"),
   file_name: z.string(),
   mime_type: z.string(),
   bytes: z.number().int().positive(),
   sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  resource_uri: z.string().url(),
 });
 
 const DownloadChatgptFileOutputSchema = z.object({
@@ -221,6 +223,32 @@ export function localTransferMeta(item: LocalFileTransfer) {
   };
 }
 
+export function localTransferSummary(item: LocalFileTransfer) {
+  return {
+    direction: "local_to_chatgpt" as const,
+    status: "ready" as const,
+    delivery_mode: "tool_file_reference" as const,
+    file_name: item.file_name,
+    mime_type: item.mime_type,
+    bytes: item.bytes,
+    sha256: item.sha256,
+    resource_uri: `mcp-upload://file-transfer/${item.token}`,
+  };
+}
+
+export function localFileResourceLink(item: LocalFileTransfer) {
+  return {
+    type: "resource_link" as const,
+    uri: `mcp-upload://file-transfer/${item.token}`,
+    name: item.file_name,
+    title: item.file_name,
+    description: "Exact original local file returned as a first-class tool-result file reference",
+    mimeType: item.mime_type,
+    size: item.bytes,
+    annotations: { audience: ["assistant", "user"] as ("assistant" | "user")[] },
+  };
+}
+
 function localImageResourceUri(item: LocalImageResource): string {
   return `mcp-upload://file-transfer/${item.token}`;
 }
@@ -240,7 +268,7 @@ export function localImageResourceLink(item: LocalImageResource) {
 
 export async function localNativeImageContent(item: LocalImageResource) {
   if (item.bytes > MAX_NATIVE_IMAGE_BYTES) return null;
-  const resource = await localImageResourceContents(localImageResourceUri(item));
+  const resource = await localFileResourceContents(localImageResourceUri(item));
   return {
     type: "image" as const,
     data: resource.blob,
@@ -426,29 +454,42 @@ async function visualReviewZipResources(item: LocalFileTransfer): Promise<LocalI
   return resources;
 }
 
-async function localImageResourceContents(uri: string) {
+async function localFileResourceContents(uri: string) {
   cleanupExpired();
   const parsed = new URL(uri);
-  if (parsed.protocol !== "mcp-upload:" || parsed.hostname !== "file-transfer") throw new Error("unsupported file-transfer image resource URI");
+  if (parsed.protocol !== "mcp-upload:" || parsed.hostname !== "file-transfer") throw new Error("unsupported file-transfer resource URI");
   const token = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
-  const item = localImageResources.get(token);
-  if (!item) throw new Error("file-transfer image resource is unavailable or expired");
-  const current = await stat(item.source_path).catch(() => null);
-  if (!current?.isFile() || current.size !== item.source_bytes || current.mtimeMs !== item.source_mtime_ms) {
-    localImageResources.delete(token);
-    throw new Error("source image container changed after transfer preparation");
+  const image = localImageResources.get(token);
+  if (image) {
+    const current = await stat(image.source_path).catch(() => null);
+    if (!current?.isFile() || current.size !== image.source_bytes || current.mtimeMs !== image.source_mtime_ms) {
+      localImageResources.delete(token);
+      throw new Error("source file container changed after transfer preparation");
+    }
+    let data: Buffer;
+    if (image.data_offset === undefined) {
+      data = await readFile(image.source_path);
+    } else {
+      const handle = await open(image.source_path, "r");
+      try { data = await readExactly(handle, image.bytes, image.data_offset); }
+      finally { await handle.close(); }
+    }
+    if (data.length !== image.bytes) throw new Error("source file size changed while reading");
+    const digest = createHash("sha256").update(data).digest("hex");
+    if (digest !== image.sha256) throw new Error("source file hash changed while reading");
+    return { uri, mimeType: image.mime_type, blob: data.toString("base64") };
   }
-  let data: Buffer;
-  if (item.data_offset === undefined) {
-    data = await readFile(item.source_path);
-  } else {
-    const handle = await open(item.source_path, "r");
-    try { data = await readExactly(handle, item.bytes, item.data_offset); }
-    finally { await handle.close(); }
+  const item = localExports.get(token);
+  if (!item) throw new Error("file-transfer resource is unavailable or expired");
+  const current = await stat(item.path).catch(() => null);
+  if (!current?.isFile() || current.size !== item.bytes || current.mtimeMs !== item.mtime_ms) {
+    localExports.delete(token);
+    throw new Error("source file changed after transfer preparation");
   }
-  if (data.length !== item.bytes) throw new Error("source image size changed while reading");
+  const data = await readFile(item.path);
+  if (data.length !== item.bytes) throw new Error("source file size changed while reading");
   const digest = createHash("sha256").update(data).digest("hex");
-  if (digest !== item.sha256) throw new Error("source image hash changed while reading");
+  if (digest !== item.sha256) throw new Error("source file hash changed while reading");
   return { uri, mimeType: item.mime_type, blob: data.toString("base64") };
 }
 
@@ -620,20 +661,23 @@ function uploadToolMeta() {
 
 export async function localFileTransferHandoff(item: LocalFileTransfer) {
   const directImage = item.mime_type.startsWith("image/") ? localImageResources.get(item.token) : undefined;
-  const reviewImages = directImage ? [directImage] : await visualReviewZipResources(item);
+  const reviewImages = directImage ? [] : await visualReviewZipResources(item);
   const nativeImage = directImage ? await localNativeImageContent(directImage) : null;
-  const content: any[] = [];
+  const content: any[] = [localFileResourceLink(item)];
   if (nativeImage) content.push(nativeImage);
+  // Preserve the MCP-readable exact image resource used by native vision and the
+  // manifest-declared review resources. The first resource_link above is always the
+  // original file itself and remains useful in Work/other hosts that do not mount UI.
   content.push(...reviewImages.map(localImageResourceLink));
-  return { item, content, meta: localTransferMeta(item) };
+  return { item, content, meta: localTransferMeta(item), summary: localTransferSummary(item) };
 }
 
 export function registerFileTransferTools(server: McpServer, callerId: string): void {
   server.registerResource(
-    "file-transfer-image",
+    "file-transfer-resource",
     new ResourceTemplate("mcp-upload://file-transfer/{token}", { list: undefined }),
-    { title: "Exact uploaded image", description: "Original local image bytes exposed for immediate model vision" },
-    async (uri) => ({ contents: [await localImageResourceContents(uri.href)] }),
+    { title: "Exact transferred file", description: "Exact original local file or manifest-declared review member returned by a tool" },
+    async (uri) => ({ contents: [await localFileResourceContents(uri.href)] }),
   );
   server.registerResource("process-file-transfer-widget", FILE_TRANSFER_WIDGET_URI, {}, async () => ({
     contents: [{
@@ -652,7 +696,7 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
   server.registerTool(
     "upload_local_file",
     {
-      description: "Upload one exact local file from the MCP host into ChatGPT/Library. Transfers raw bytes through a dedicated short-lived endpoint instead of embedding file data in process output. HTTP zstd level 1 is used opportunistically for compressible formats when the client advertises support; already-compressed media is streamed unchanged.",
+      description: "Return one exact local file from the MCP host as a first-class MCP file resource. The result is usable without UI; when ChatGPT mounts the file-transfer widget, the widget also requests ChatGPT Library persistence. Transfers preserve exact bytes and SHA-256; already-compressed media is never transcoded.",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       _meta: uploadToolMeta(),
       inputSchema: z.object({ path: z.string().min(1) }),
@@ -662,10 +706,10 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
       const handoff = await localFileTransferHandoff(await prepareLocalFileTransfer(path));
       return {
         content: [
-          { type: "text" as const, text: JSON.stringify({ caller_id: callerId, status: "ready", delivery_mode: "library_upload", file_name: handoff.item.file_name, mime_type: handoff.item.mime_type, bytes: handoff.item.bytes, sha256: handoff.item.sha256 }) },
+          { type: "text" as const, text: JSON.stringify({ caller_id: callerId, ...handoff.summary, library_persistence: "widget_optional" }) },
           ...handoff.content,
         ],
-        structuredContent: { direction: "local_to_chatgpt", status: "ready", file_name: handoff.item.file_name, mime_type: handoff.item.mime_type, bytes: handoff.item.bytes, sha256: handoff.item.sha256 },
+        structuredContent: handoff.summary,
         _meta: { file_transfer: handoff.meta },
       };
     },
