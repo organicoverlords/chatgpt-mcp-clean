@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,16 +9,19 @@ const temporary = mkdtempSync(join(tmpdir(), "home-direct-current-port-"));
 const topologyPath = join(temporary, "mcp-current-topology.json");
 const wrapper = fileURLToPath(new URL("./replace-home-direct-production.ps1", import.meta.url));
 const topologyPort = 43210;
+const caddyPath = join(temporary, "Caddyfile");
+const peerPort = 43211;
+writeFileSync(caddyPath, `91-159-12-133.sslip.io {\n\thandle {\n\t\treverse_proxy 127.0.0.1:${topologyPort}\n\t}\n\thandle /x {\n\t\treverse_proxy 127.0.0.1:${topologyPort}\n\t}\n}\n\npr237.91-159-12-133.sslip.io {\n\thandle {\n\t\treverse_proxy 127.0.0.1:${peerPort}\n\t}\n\thandle /x {\n\t\treverse_proxy 127.0.0.1:${peerPort}\n\t}\n}\n`);
 writeFileSync(topologyPath, JSON.stringify({
   schema: "mcp-current-topology.v1",
   authority: "current_serving_topology",
   serving: { backend: { listen: `127.0.0.1:${topologyPort}` } },
 }, null, 2));
 
-function run(extra = []) {
+function run(extra = [], candidatePort = topologyPort) {
   return spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", wrapper,
-    "-CandidatePort", String(topologyPort), "-CandidateGeneration", "candidate-test", "-Actor", "test", "-BusyScope", "test-scope",
-    "-CurrentTopologyPath", topologyPath, ...extra], { encoding: "utf8", windowsHide: true });
+    "-CandidatePort", String(candidatePort), "-CandidateGeneration", "candidate-test", "-Actor", "test", "-BusyScope", "test-scope",
+    "-CurrentTopologyPath", topologyPath, "-CaddyConfigPath", caddyPath, ...extra], { encoding: "utf8", windowsHide: true });
 }
 
 try {
@@ -30,7 +33,20 @@ try {
   assert.notEqual(mismatch.status, 0);
   assert.match(`${mismatch.stdout}\n${mismatch.stderr}`, /ExpectedCurrentPort disagrees with current topology/);
 
-  console.log("PASS home_direct_current_port canonical_topology=true stale_default_removed=true override_mismatch_fails_closed=true");
+
+  const peerDerived = run(["-StableHost", "pr237.91-159-12-133.sslip.io", "-CurrentPortFromTargetHost"], peerPort);
+  assert.notEqual(peerDerived.status, 0);
+  assert.match(`${peerDerived.stdout}\n${peerDerived.stderr}`, /candidate must use an alternate port/);
+
+  const peerMismatch = run(["-StableHost", "pr237.91-159-12-133.sslip.io", "-CurrentPortFromTargetHost", "-ExpectedCurrentPort", String(peerPort + 1)], peerPort);
+  assert.notEqual(peerMismatch.status, 0);
+  assert.match(`${peerMismatch.stdout}\n${peerMismatch.stderr}`, /ExpectedCurrentPort disagrees with target host route/);
+
+  const wrapperSource = readFileSync(wrapper, "utf8");
+  assert.match(wrapperSource, /Replace-CaddyTargetUpstream/);
+  assert.doesNotMatch(wrapperSource, /\$candidateText=\$original\.Replace\(\$needle,\$replacement\)/, "replacement must stay scoped to the target host block");
+
+  console.log("PASS home_direct_current_port canonical_topology=true peer_target_host=true block_local_replace=true override_mismatch_fails_closed=true");
 } finally {
   rmSync(temporary, { recursive: true, force: true });
 }
