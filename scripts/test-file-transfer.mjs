@@ -233,8 +233,12 @@ assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v4.html", "wi
   const read = listed.tools.find((tool) => tool.name === "read_output");
   const upload = listed.tools.find((tool) => tool.name === "upload_local_file");
   const download = listed.tools.find((tool) => tool.name === "download_chatgpt_file");
-  assert.equal(start?._meta?.["openai/outputTemplate"], undefined, "start_process must not mount the file widget");
-  assert.equal(read?._meta?.["openai/outputTemplate"], undefined, "read_output must not mount the file widget");
+  assert.ok(start?.inputSchema?.properties?.command, "start_process must expose legacy command input");
+  assert.ok(start?.inputSchema?.properties?.executable, "start_process must expose structured executable input");
+  assert.ok(start?.inputSchema?.properties?.args, "start_process must expose structured argv input");
+  assert.ok(start?.inputSchema?.properties?.stdin, "start_process must expose structured stdin input");
+  assert.equal(start?._meta, undefined, "start_process must be completely widget/app-metadata free");
+  assert.equal(read?._meta, undefined, "read_output must be completely widget/app-metadata free");
   assert.equal(upload?._meta?.ui?.resourceUri, FILE_TRANSFER_WIDGET_URI, "upload_local_file advertises the modern MCP Apps resource URI");
   assert.equal(upload?._meta?.["ui/resourceUri"], FILE_TRANSFER_WIDGET_URI, "upload_local_file mirrors the MCP Apps compatibility URI expected by host bindings");
   assert.equal(upload?._meta?.["openai/outputTemplate"], FILE_TRANSFER_WIDGET_URI, "upload_local_file alone mounts the HTTPS Library widget");

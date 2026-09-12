@@ -22,8 +22,8 @@ await Promise.all([server.connect(serverTransport), client.connect(clientTranspo
 try {
   const listed = await client.listTools();
   const byName = Object.fromEntries(listed.tools.map((tool) => [tool.name, tool]));
-  assert.equal(byName.start_process?._meta?.["openai/outputTemplate"], undefined, "start_process must not mount an app template");
-  assert.equal(byName.read_output?._meta?.["openai/outputTemplate"], undefined, "read_output must not mount an app template");
+  assert.equal(byName.start_process?._meta, undefined, "start_process must not advertise any app/widget metadata");
+  assert.equal(byName.read_output?._meta, undefined, "read_output must not advertise any app/widget metadata");
   assert.equal(byName.upload_local_file?._meta?.["openai/outputTemplate"], FILE_TRANSFER_WIDGET_URI, "upload_local_file alone may mount the HTTPS Library app template");
 
   const expectedUris = [FILE_TRANSFER_WIDGET_URI, ...LEGACY_PROCESS_LIBRARY_UPLOAD_WIDGET_URIS, LEGACY_VISUAL_PROOF_WIDGET_URI];

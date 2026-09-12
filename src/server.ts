@@ -28,6 +28,36 @@ const activityTargetSchema = z.object({
 }).strict();
 const actionClassSchema = z.string().min(1).max(64).regex(activityToken);
 
+const startProcessCommonShape = {
+  working_directory: z.string().optional(),
+  wait_ms: z.number().int().min(0).max(10_000).optional(),
+  activity_target: activityTargetSchema.optional(),
+  action_class: actionClassSchema.optional(),
+};
+const startProcessInputSchema = z.object({
+  command: z.string().min(1).optional(),
+  executable: z.string().min(1).optional(),
+  args: z.array(z.string()).max(512).optional(),
+  stdin: z.string().max(1_000_000).optional(),
+  ...startProcessCommonShape,
+}).strict().superRefine((value, ctx) => {
+  const legacy = value.command !== undefined;
+  const structured = value.executable !== undefined;
+  if (legacy === structured) ctx.addIssue({ code: "custom", message: "provide exactly one of command or executable" });
+  if (legacy && value.args !== undefined) ctx.addIssue({ code: "custom", path: ["args"], message: "args is only valid with executable" });
+  if (legacy && value.stdin !== undefined) ctx.addIssue({ code: "custom", path: ["stdin"], message: "stdin is only valid with executable" });
+});
+
+const repairAttemptSchema = z.object({
+  reason: z.string(),
+  command: z.string(),
+  stdout: z.string(),
+  stderr: z.string(),
+  exit_code: z.number().int(),
+  started_at: z.string(),
+  finished_at: z.string(),
+}).strict();
+
 const outputPageSchema = z.object({
   stdout_start: z.number().int().nonnegative(),
   stdout_end: z.number().int().nonnegative(),
@@ -65,6 +95,9 @@ const processOutputSchema = z.object({
   launching: z.literal(true).optional(),
   activity_target: activityTargetSchema.optional(),
   action_class: actionClassSchema.optional(),
+  execution_mode: z.enum(["powershell", "native", "explicit_shell", "native_sequence", "native_pipeline"]).optional(),
+  execution_reason: z.string().optional(),
+  repair_attempts: z.array(repairAttemptSchema).optional(),
   command: z.string().optional(),
   command_truncated: z.literal(true).optional(),
   submitted_command: z.string().optional(),
@@ -171,24 +204,24 @@ export function createServer(callerId: string): McpServer {
   server.registerTool(
     "start_process",
     {
-      description: "Start a noninteractive PowerShell process. wait_ms controls how long the call may wait for completion before returning a process_id; the default is 750 ms and the supported range is 0 to 10 seconds.",
+      description: "Execute a local process. Prefer executable plus args (and optional stdin) for exact process execution without shell parsing. Legacy command remains supported for shell programs; the runner routes plain native commands directly and uses PowerShell only when the command actually needs PowerShell syntax. wait_ms defaults to 750 ms and is bounded to 0..10000 ms.",
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-      inputSchema: z.object({
-        command: z.string().min(1),
-        working_directory: z.string().optional(),
-        wait_ms: z.number().int().min(0).max(10_000).optional(),
-        activity_target: activityTargetSchema.optional(),
-        action_class: actionClassSchema.optional(),
-      }),
+      inputSchema: startProcessInputSchema,
       outputSchema: processOutputSchema,
     },
-    async ({ command, working_directory, wait_ms, activity_target, action_class }) => structuredTextResult(await processManager.startWithWait(command, working_directory, callerId, wait_ms ?? 750, activity_target, action_class), callerId),
+    async (input) => {
+      const { working_directory, wait_ms, activity_target, action_class } = input;
+      const value = input.command !== undefined
+        ? await processManager.startWithWait(input.command, working_directory, callerId, wait_ms ?? 750, activity_target, action_class)
+        : await processManager.startStructuredWithWait(input.executable!, input.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, input.stdin);
+      return structuredTextResult(value, callerId);
+    },
   );
 
   server.registerTool(
     "read_output",
     {
-      description: "Read a bounded tail of accumulated stdout and stderr for a process_id. wait_ms optionally sets the maximum wait for output or process exit; 0 is nonblocking. An unchanged timed wait returns no_change=true. elapsed_ms is process age. Each stream is limited to 32,000 characters.",
+      description: "Read process stdout/stderr or a named bootstrap snapshot. Returns structured data only; it never mounts an app/widget template. wait_ms may wait up to 10000 ms for output or exit, and each stream is bounded to 32000 characters.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: z.object({
         process_id: z.string().min(1),

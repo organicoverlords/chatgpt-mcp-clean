@@ -173,6 +173,20 @@ assert.match(invalidActivityTarget.body.result.content?.[0]?.text || "", /activi
 const readOutputTool = listed.body.result.tools.find((tool) => tool.name === "read_output");
 assert.equal(readOutputTool.inputSchema.properties.wait_ms.maximum, 10_000);
 assert.equal(readOutputTool.inputSchema.properties.wait_ms.minimum, 0);
+assert.equal(startProcessTool._meta, undefined, "start_process must stay widget/app metadata free over MCP transport");
+assert.equal(readOutputTool._meta, undefined, "read_output must stay widget/app metadata free over MCP transport");
+assert.ok(startProcessTool.inputSchema.properties.executable, "start_process must advertise structured executable input over MCP transport");
+assert.ok(startProcessTool.inputSchema.properties.args, "start_process must advertise structured argv input over MCP transport");
+assert.ok(startProcessTool.inputSchema.properties.stdin, "start_process must advertise structured stdin input over MCP transport");
+const structuredTransport = await callTool(sessionA, "start_process", {
+  executable: process.execPath,
+  args: ["-e", "process.stdin.pipe(process.stdout)"],
+  stdin: "MCPV4_STRUCTURED_OK\n",
+  wait_ms: 10_000,
+});
+assert.equal(structuredTransport.exit_code, 0, JSON.stringify(structuredTransport));
+assert.equal(structuredTransport.execution_mode, "native", JSON.stringify(structuredTransport));
+assert.equal(structuredTransport.stdout, "MCPV4_STRUCTURED_OK\n", JSON.stringify(structuredTransport));
 
 const startedAt = Date.now();
 let jobOne;

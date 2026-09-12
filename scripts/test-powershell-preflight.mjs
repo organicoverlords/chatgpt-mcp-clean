@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProcessManager } from "../dist/lib/process-manager.js";
@@ -28,9 +28,74 @@ assert.equal(valid.exit_code, 0, JSON.stringify(valid));
 assert.match(valid.stdout, /2/);
 
 const nativeFailure = await run("cmd.exe /c exit 7", "caller_pwsh_preflight_native_failure");
-assert.equal(nativeFailure.exit_code, 1, "guard must preserve powershell.exe -Command failure semantics");
+assert.equal(nativeFailure.exit_code, 7, "explicit cmd.exe must execute directly and preserve its native exit code");
 const explicitExit = await run("exit 42", "caller_pwsh_preflight_explicit_exit");
 assert.equal(explicitExit.exit_code, 42, "explicit PowerShell exit codes must pass through");
+
+const cmdNativeDirectory = mkdtempSync(join(tmpdir(), "mcp-cmd-native-"));
+try {
+  const cmdInput = join(cmdNativeDirectory, "input.txt");
+  writeFileSync(cmdInput, "CMD_NATIVE_REDIRECT_OK\r\n", "utf8");
+  const nativeCmd = await run(`cmd.exe /d /c more < "${cmdInput}"`, "caller_cmd_native_redirect");
+  assert.equal(nativeCmd.exit_code, 0, JSON.stringify(nativeCmd));
+  assert.match(nativeCmd.stdout, /CMD_NATIVE_REDIRECT_OK/);
+} finally {
+  rmSync(cmdNativeDirectory, { recursive: true, force: true });
+}
+
+const busyActorDirectory = mkdtempSync(join(tmpdir(), "mcp-busy-actor-"));
+try {
+  writeFileSync(join(busyActorDirectory, "busy-python.cmd"), `@echo off\r\nset actor=%~2\r\nif /i "%actor:~0,8%"=="ChatGPT:" goto ok\r\nif /i "%actor:~0,8%"=="ChatGPT-" goto ok\r\nif /i "%actor:~0,8%"=="ChatGPT/" goto ok\r\necho claim actor must be ^<harness^>^<separator^>^<task/session suffix^>\r\nexit /b 2\r\n:ok\r\necho ACTOR=%actor%\r\n`, "utf8");
+  const busyActorSubmitted = `& '.\\busy-python.cmd' claim 'chatgpt-test-normalized' scope`;
+  const busyActor = await manager.startWithWait(busyActorSubmitted, busyActorDirectory, "caller_busy_actor_normalized", commandWaitMs);
+  assert.equal(busyActor.exit_code, 0, JSON.stringify(busyActor));
+  assert.match(busyActor.stdout, /ACTOR=ChatGPT-test-normalized/);
+  assert.match(busyActor.command, /claim 'ChatGPT-test-normalized'/);
+  assert.equal(busyActor.submitted_command, busyActorSubmitted);
+  const arbitrarySubmitted = `& '.\\busy-python.cmd' claim 'rowan-test-repaired' scope`;
+  const arbitraryActor = await manager.startWithWait(arbitrarySubmitted, busyActorDirectory, "caller_busy_actor_arbitrary", commandWaitMs);
+  assert.equal(arbitraryActor.exit_code, 0, JSON.stringify(arbitraryActor));
+  assert.match(arbitraryActor.stdout, /ACTOR=ChatGPT:rowan-test-repaired/);
+  assert.equal(arbitraryActor.submitted_command, arbitrarySubmitted);
+  assert.equal(arbitraryActor.repair_attempts, undefined, JSON.stringify(arbitraryActor));
+  assert.match(arbitraryActor.command, /claim 'ChatGPT:rowan-test-repaired'/);
+} finally {
+  rmSync(busyActorDirectory, { recursive: true, force: true });
+}
+
+const atlasRepairDirectory = mkdtempSync(join(tmpdir(), "mcp-stack-atlas-repair-"));
+try {
+  const atlasScript = join(atlasRepairDirectory, "stack_atlas.py");
+  writeFileSync(atlasScript, [
+    "import sys",
+    "if len(sys.argv) > 1 and sys.argv[1] == 'lookup':",
+    "    print('usage: stack_atlas.py [-h]', file=sys.stderr)",
+    "    print('stack_atlas.py: error: unknown Atlas lookup target: p3', file=sys.stderr)",
+    "    raise SystemExit(2)",
+    "print('ATLAS_FIND_OK ' + ' '.join(sys.argv[1:]))",
+  ].join("\n"), "utf8");
+  const atlasSubmitted = `python "${atlasScript}" lookup p3`;
+  const atlasResult = await manager.startWithWait(atlasSubmitted, atlasRepairDirectory, "caller_stack_atlas_runtime_repair", commandWaitMs);
+  assert.equal(atlasResult.exit_code, 0, JSON.stringify(atlasResult));
+  assert.match(atlasResult.stdout, /ATLAS_FIND_OK find p3/);
+  assert.equal(atlasResult.submitted_command, atlasSubmitted);
+  assert.equal(atlasResult.repair_attempts?.length, 1, JSON.stringify(atlasResult));
+  assert.equal(atlasResult.repair_attempts[0].reason, "stack_atlas_lookup_fallback_to_find");
+  assert.match(atlasResult.repair_attempts[0].stderr, /unknown Atlas lookup target/);
+} finally {
+  rmSync(atlasRepairDirectory, { recursive: true, force: true });
+}
+
+const pytestModuleDirectory = mkdtempSync(join(tmpdir(), "mcp-pytest-module-"));
+try {
+  writeFileSync(join(pytestModuleDirectory, "pytest.py"), "import os\nprint('PYTEST_ROOT=' + os.environ.get('PYTEST_DEBUG_TEMPROOT',''))\n", "utf8");
+  const escaped = pytestModuleDirectory.replaceAll("'", "''");
+  const isolatedPytest = await run(`$env:PYTHONPATH='${escaped}'; python -m pytest`, "caller_pytest_isolated_temp_root");
+  assert.equal(isolatedPytest.exit_code, 0, JSON.stringify(isolatedPytest));
+  assert.match(isolatedPytest.stdout, /PYTEST_ROOT=.*mcp-pytest/i);
+} finally {
+  rmSync(pytestModuleDirectory, { recursive: true, force: true });
+}
 
 const runtime = await run("Write-Output $PSVersionTable.PSEdition; Write-Output $PSVersionTable.PSVersion.ToString(); Write-Output (Get-Process -Id $PID).Path", "caller_pwsh_runtime");
 assert.match(runtime.stdout, /Core/);
@@ -42,19 +107,49 @@ assert.match(operators.stdout, /AND_OK/);
 assert.match(operators.stdout, /OR_OK/);
 assert.match(operators.stdout, /NULL_OK/);
 
-rejects("$PID = 123", /automatic/);
-rejects("$PID++", /automatic/);
+const pidAssignmentSubmitted = "$PID = 123; Write-Output $PID";
+const pidAssignment = await run(pidAssignmentSubmitted, "caller_pwsh_pid_assignment_normalized");
+assert.equal(pidAssignment.exit_code, 0, JSON.stringify(pidAssignment));
+assert.match(pidAssignment.stdout, /123/);
+assert.match(pidAssignment.command, /\$mcpPid = 123/);
+assert.equal(pidAssignment.submitted_command, pidAssignmentSubmitted);
+const pidIncrement = await run("$PID++; Write-Output $PID", "caller_pwsh_pid_increment_normalized");
+assert.equal(pidIncrement.exit_code, 0, JSON.stringify(pidIncrement));
+assert.match(pidIncrement.command, /\$mcpPid\+\+/);
+const hostParameterSubmitted = "function Probe([string]$host){ Write-Output $host }; Probe 'HOST_OK'";
+const hostParameter = await run(hostParameterSubmitted, "caller_pwsh_host_parameter_normalized");
+assert.equal(hostParameter.exit_code, 0, JSON.stringify(hostParameter));
+assert.match(hostParameter.stdout, /HOST_OK/);
+assert.match(hostParameter.command, /\$mcpHost/);
+assert.equal(hostParameter.submitted_command, hostParameterSubmitted);
 const writableArgs = await run("$args = @('good'); Write-Output ($args -join ',')", "caller_pwsh_args_assignment_allowed");
 assert.equal(writableArgs.exit_code, 0, JSON.stringify(writableArgs));
 assert.match(writableArgs.stdout, /good/);
 
+const headResult = await run("git rev-parse HEAD", "caller_git_revspec_head");
+assert.equal(headResult.exit_code, 0, JSON.stringify(headResult));
+const headCommit = headResult.stdout.trim();
+assert.match(headCommit, /^[0-9a-f]{40}$/);
+const peelSubmitted = `git cat-file -e ${headCommit}^{commit}; if($LASTEXITCODE -eq 0){ Write-Output 'GIT_COMMIT_PEEL_OK' }`;
+const peelResult = await run(peelSubmitted, "caller_git_revspec_peel_normalized");
+assert.equal(peelResult.exit_code, 0, JSON.stringify(peelResult));
+assert.match(peelResult.stdout, /GIT_COMMIT_PEEL_OK/);
+assert.match(peelResult.command, /git cat-file -e '[0-9a-f]{40}\^\{commit\}'/);
+assert.equal(peelResult.submitted_command, peelSubmitted);
+
 const historicalNestedExpansion = String.raw`$childOnlyPath=''; powershell.exe -Command "Test-Path -LiteralPath \"$childOnlyPath\""`;
 rejects(historicalNestedExpansion, /Invoke-LiteralScript\.ps1/);
-rejects(String.raw`pwsh.exe -NoProfile -Command "Write-Output $env:TEMP"`, /parent-expandable/);
+const directNestedShell = await run(String.raw`pwsh.exe -NoProfile -Command "Write-Output $env:TEMP"`, "caller_nested_pwsh_direct");
+assert.equal(directNestedShell.exit_code, 0, JSON.stringify(directNestedShell));
+assert.equal(directNestedShell.execution_mode, "explicit_shell", JSON.stringify(directNestedShell));
+assert.match(directNestedShell.stdout, /\\Temp/i);
 const parentLiteralExpansion = await run(String.raw`$wt='C:\safe-parent'; pwsh.exe -NoProfile -Command "Write-Output '$wt\child'"`, "caller_nested_parent_literal_expansion_allowed");
 assert.equal(parentLiteralExpansion.exit_code, 0, JSON.stringify(parentLiteralExpansion));
 assert.match(parentLiteralExpansion.stdout, /C:\\safe-parent\\child/);
-rejects(String.raw`$wt='C:\\unsafe-parent'; pwsh.exe -NoProfile -Command "Write-Output '$wt\\child \\"quoted\\"'"`, /parent-expandable/);
+const repairedNestedQuotes = await run(String.raw`$wt='C:\\unsafe-parent'; pwsh.exe -NoProfile -Command "Write-Output '$wt\\child \\"quoted\\"'"`, "caller_nested_cstyle_quotes_repaired");
+assert.equal(repairedNestedQuotes.exit_code, 0, JSON.stringify(repairedNestedQuotes));
+assert.equal(repairedNestedQuotes.repair_attempts, undefined, JSON.stringify(repairedNestedQuotes));
+assert.match(repairedNestedQuotes.stdout, /unsafe-parent/);
 
 const nestedSingleQuoted = await run(String.raw`pwsh.exe -NoProfile -Command 'Write-Output $env:TEMP'`, "caller_nested_single_quoted_allowed");
 assert.equal(nestedSingleQuoted.exit_code, 0, JSON.stringify(nestedSingleQuoted));
@@ -157,8 +252,9 @@ assert.match(literals.stdout, /&& \$PID = 1/);
 const rejectionReceiptDirectory = mkdtempSync(join(tmpdir(), "mcp-preflight-rejection-"));
 try {
   const durableManager = new ProcessManager({ receiptDirectory: rejectionReceiptDirectory });
+  const durableRejectedCommand = "if ($true) { Write-Output 'broken'";
   assert.throws(
-    () => durableManager.start("$PID = 123", "C:\\Users\\Example", "caller_durable_preflight_reject"),
+    () => durableManager.start(durableRejectedCommand, "C:\\Users\\Example", "caller_durable_preflight_reject"),
     /start_process_preflight_failed:/,
   );
   const day = new Date().toISOString().slice(0, 10);
@@ -176,8 +272,8 @@ try {
   const rejection = JSON.parse(readFileSync(join(dayDirectory, files[0]), "utf8"));
   assert.equal(rejection.kind, "process_preflight_rejection");
   assert.equal(rejection.caller_id, "caller_durable_preflight_reject");
-  assert.equal(rejection.command, "$PID = 123");
-  assert.match(rejection.reason, /automatic/);
+  assert.equal(rejection.command, durableRejectedCommand);
+  assert.match(rejection.reason, /unbalanced/);
   assert.ok(rejection.rejection_id);
 } finally {
   rmSync(rejectionReceiptDirectory, { recursive: true, force: true });
