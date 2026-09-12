@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
+import { isIP } from "node:net";
 import { resolve } from "node:path";
 import express, { type Request, type Response } from "express";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
@@ -85,6 +86,27 @@ const authorizationHost = OWNER_AUTH_MODE === "local-edge" ? publicOrigin.host.t
 const resource = publicUrl("mcp");
 const oauth = new LocalOAuthProvider(resource, OWNER, STORE);
 const bearer = requireBearerAuth({ verifier: oauth, requiredScopes: ["mcp"], resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resource) });
+
+function isPrivateOrLocalClientAddress(raw: string | undefined): boolean {
+  let address = (raw || "").trim().toLowerCase();
+  if (!address) return false;
+  if (address.startsWith("::ffff:")) address = address.slice(7);
+  if (address === "::1") return true;
+  const version = isIP(address);
+  if (version === 4) {
+    const parts = address.split(".").map(Number);
+    if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+    const [a, b] = parts;
+    return a === 10
+      || a === 127
+      || (a === 169 && b === 254)
+      || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 168)
+      || (a === 100 && b >= 64 && b <= 127);
+  }
+  if (version === 6) return address.startsWith("fc") || address.startsWith("fd") || /^fe[89ab]/.test(address);
+  return false;
+}
 
 const transportLogPath = resolve(process.env.MCP_TRANSPORT_LOG_PATH || ".state/transport.jsonl");
 const transportLogWriter = new BoundedJsonlWriter(transportLogPath, {
@@ -216,9 +238,16 @@ app.use("/authorize", (req, res, next) => {
       res.status(403).send("Owner authorization required");
       return;
     }
-  } else if (authorizationHost && host !== authorizationHost) {
-    res.status(403).send("Owner authorization required");
-    return;
+  } else {
+    const directLocalAuthorizationHosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, frontDoorHost]);
+    const directLocal = directLocalAuthorizationHosts.has(host) && isPrivateOrLocalClientAddress(req.ip);
+    const forwardedPrivate = Boolean(req.header("x-forwarded-for"))
+      && authorizationHost === host
+      && isPrivateOrLocalClientAddress(req.ip);
+    if (!directLocal && !forwardedPrivate) {
+      res.status(403).send("Owner authorization required");
+      return;
+    }
   }
   if (req.method === "GET") {
     const clientId = typeof req.query.client_id === "string" ? req.query.client_id : "";

@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 const origin = (process.env.MCP_SMOKE_ORIGIN || process.env.MCP_PUBLIC_ORIGIN || "http://127.0.0.1:3000").replace(/\/$/, "");
 const publicOrigin = (process.env.MCP_SMOKE_PUBLIC_ORIGIN || origin).replace(/\/$/, "");
 const ownerLogin = (process.env.TAILSCALE_OWNER_LOGIN || "owner@example.com").trim();
+const ownerAuthMode = (process.env.MCP_OWNER_AUTH_MODE || "tailscale").trim().toLowerCase();
 const redirectUri = "https://chatgpt.com/connector/oauth/smoke";
 const resource = `${publicOrigin}/mcp`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -48,7 +49,10 @@ for (const [key, value] of Object.entries({
   scope: "mcp offline_access",
   state: "shell-mcp-smoke",
 })) authorizationUrl.searchParams.set(key, value);
-const authorization = await fetch(authorizationUrl, { redirect: "manual", headers: { "tailscale-user-login": ownerLogin } });
+const authorizationHeaders = ownerAuthMode === "local-edge"
+  ? { host: new URL(publicOrigin).host, "x-forwarded-for": "192.168.1.50" }
+  : { "tailscale-user-login": ownerLogin };
+const authorization = await fetch(authorizationUrl, { redirect: "manual", headers: authorizationHeaders });
 assert.equal(authorization.status, 302, await authorization.text());
 const code = new URL(authorization.headers.get("location")).searchParams.get("code");
 assert.ok(code);
@@ -187,6 +191,48 @@ const structuredTransport = await callTool(sessionA, "start_process", {
 assert.equal(structuredTransport.exit_code, 0, JSON.stringify(structuredTransport));
 assert.equal(structuredTransport.execution_mode, "native", JSON.stringify(structuredTransport));
 assert.equal(structuredTransport.stdout, "MCPV4_STRUCTURED_OK\n", JSON.stringify(structuredTransport));
+
+const authBenchCount = Math.max(0, Number(process.env.MCP_SMOKE_BENCH_COUNT || 0));
+if (authBenchCount > 0) {
+  const percentile = (values, ratio) => {
+    const sorted = [...values].sort((left, right) => left - right);
+    return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * ratio))] ?? 0;
+  };
+  const summarize = (values) => ({
+    n: values.length,
+    p50_ms: Number(percentile(values, 0.50).toFixed(3)),
+    p95_ms: Number(percentile(values, 0.95).toFixed(3)),
+    avg_ms: Number((values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length)).toFixed(3)),
+    min_ms: Number(Math.min(...values).toFixed(3)),
+    max_ms: Number(Math.max(...values).toFixed(3)),
+  });
+  const startLatencies = [];
+  const readLatencies = [];
+  for (let index = 0; index < authBenchCount; index += 1) {
+    const marker = `AUTH_MCP_${index}`;
+    const startAt = performance.now();
+    const started = await callTool(sessionA, "start_process", {
+      executable: process.execPath,
+      args: ["-e", `process.stdout.write(${JSON.stringify(marker)})`],
+      wait_ms: 10_000,
+    });
+    startLatencies.push(performance.now() - startAt);
+    assert.equal(started.execution_outcome, "success", JSON.stringify(started));
+    assert.equal(started.exit_code, 0, JSON.stringify(started));
+    assert.equal(started.stdout, marker, JSON.stringify(started));
+    const readAt = performance.now();
+    const read = await callTool(sessionA, "read_output", { process_id: started.process_id, wait_ms: 0 });
+    readLatencies.push(performance.now() - readAt);
+    assert.equal(read.execution_outcome, "success", JSON.stringify(read));
+    assert.equal(read.stdout, marker, JSON.stringify(read));
+  }
+  console.log(`AUTHENTICATED_MCP_BENCH ${JSON.stringify({
+    oauth_bypassed: false,
+    calls: { start_process: authBenchCount, read_output: authBenchCount },
+    start_process: summarize(startLatencies),
+    read_output: summarize(readLatencies),
+  })}`);
+}
 
 const startedAt = Date.now();
 let jobOne;
