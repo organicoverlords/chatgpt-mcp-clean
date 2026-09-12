@@ -178,7 +178,7 @@
   },
   {
     "name": "read_output",
-    "description": "Read a bounded tail of accumulated stdout and stderr for a process_id. wait_ms optionally sets the maximum wait for output or process exit; 0 is nonblocking. An unchanged timed wait returns no_change=true. elapsed_ms is process age. Each stream is limited to 32,000 characters.",
+    "description": "Read process stdout/stderr or a named bootstrap snapshot. Returns structured data only; it never mounts an app/widget template. wait_ms may wait up to 10000 ms for output or exit, and each stream is bounded to 32000 characters.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -289,6 +289,59 @@
           "minLength": 1,
           "maxLength": 64,
           "pattern": "^[A-Za-z0-9._/:_-]+$"
+        },
+        "execution_mode": {
+          "type": "string",
+          "enum": [
+            "powershell",
+            "native",
+            "explicit_shell",
+            "native_sequence"
+          ]
+        },
+        "execution_reason": {
+          "type": "string"
+        },
+        "repair_attempts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "stdout": {
+                "type": "string"
+              },
+              "stderr": {
+                "type": "string"
+              },
+              "exit_code": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "started_at": {
+                "type": "string"
+              },
+              "finished_at": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "command",
+              "stdout",
+              "stderr",
+              "exit_code",
+              "started_at",
+              "finished_at"
+            ],
+            "additionalProperties": false
+          }
         },
         "command": {
           "type": "string"
@@ -553,7 +606,7 @@
   },
   {
     "name": "start_process",
-    "description": "Start a noninteractive PowerShell process. wait_ms controls how long the call may wait for completion before returning a process_id; the default is 750 ms and the supported range is 0 to 10 seconds.",
+    "description": "Execute a local process. Prefer executable plus args for exact argv execution without shell parsing. Legacy command remains supported for shell programs; the runner routes plain native commands directly and uses PowerShell only when the command actually needs PowerShell syntax. wait_ms defaults to 750 ms and is bounded to 0..10000 ms.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -561,6 +614,17 @@
         "command": {
           "type": "string",
           "minLength": 1
+        },
+        "executable": {
+          "type": "string",
+          "minLength": 1
+        },
+        "args": {
+          "maxItems": 512,
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "working_directory": {
           "type": "string"
@@ -607,9 +671,6 @@
           "pattern": "^[A-Za-z0-9._/:_-]+$"
         }
       },
-      "required": [
-        "command"
-      ],
       "additionalProperties": false
     },
     "outputSchema": {
@@ -698,6 +759,59 @@
           "minLength": 1,
           "maxLength": 64,
           "pattern": "^[A-Za-z0-9._/:_-]+$"
+        },
+        "execution_mode": {
+          "type": "string",
+          "enum": [
+            "powershell",
+            "native",
+            "explicit_shell",
+            "native_sequence"
+          ]
+        },
+        "execution_reason": {
+          "type": "string"
+        },
+        "repair_attempts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "stdout": {
+                "type": "string"
+              },
+              "stderr": {
+                "type": "string"
+              },
+              "exit_code": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "started_at": {
+                "type": "string"
+              },
+              "finished_at": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "command",
+              "stdout",
+              "stderr",
+              "exit_code",
+              "started_at",
+              "finished_at"
+            ],
+            "additionalProperties": false
+          }
         },
         "command": {
           "type": "string"

@@ -18,6 +18,16 @@ function rejects(command) {
   );
 }
 
+function rejectsStructured(executable, args) {
+  assert.throws(
+    () => manager.startStructured(executable, args, undefined, "caller_structured_production_mutation_reject"),
+    (error) => error instanceof Error
+      && error.message.startsWith("start_process_preflight_failed:")
+      && /direct MCP production ingress mutation/.test(error.message),
+    `expected structured production mutation rejection: ${executable} ${args.join(" ")}`,
+  );
+}
+
 function rejectsRawVpsWithGuidance(command) {
   assert.throws(
     () => manager.start(command, undefined, "caller_production_vps_read_route_reject"),
@@ -59,6 +69,8 @@ async function run(command) {
   return result;
 }
 
+rejectsStructured("ssh.exe", [`root@${productionVpsIp}`, "true"]);
+rejectsStructured("node.exe", ["dist/index.js", "--port", "3011"]);
 rejects(`& ssh.exe root@5.61.91.127 "cp /tmp/Caddyfile /etc/caddy/Caddyfile; systemctl reload caddy"`);
 rejects(`& ssh.exe root@${productionVpsIp} "python3 -c 'print(1)'"`);
 rejects(`scp.exe C:\tmp\Caddyfile root@${productionVpsIp}:${caddyPath}`);
@@ -208,4 +220,4 @@ assert.equal(benign.exit_code, 0);
 assert.match(benign.stdout, /Caddyfile/);
 assert.match(benign.stdout, /3012/);
 
-console.log("PASS production_mutation_preflight direct_serving_mutations_blocked=true raw_production_vps_transport_blocked=true windows_production_controls_blocked=true direct_serving_starts_blocked=true supported_edge_wrappers_allowed=true offpath_reference_allowed=true");
+console.log("PASS production_mutation_preflight direct_serving_mutations_blocked=true raw_production_vps_transport_blocked=true windows_production_controls_blocked=true direct_serving_starts_blocked=true supported_edge_wrappers_allowed=true structured_argv_policy_guarded=true offpath_reference_allowed=true");

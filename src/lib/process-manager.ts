@@ -4,6 +4,7 @@ import { mkdir as mkdirAsync, readFile as readFileAsync, readdir as readdirAsync
 import { isAbsolute, join, resolve } from "node:path";
 import { Worker } from "node:worker_threads";
 import { currentTelemetryContext, emitTelemetry, withTelemetryContext, type TelemetryContext } from "./transport-telemetry.js";
+import { planCommandExecution, planStructuredExecution, type CommandExecutionMode, type CommandExecutionPlan } from "./command-execution-plan.js";
 
 const MAX_CAPTURE_CHARS = 100_000;
 // Current live MCPv3 capability was revalidated on 2026-09-04 with a single 31,000+
@@ -44,6 +45,29 @@ export type ActivityTarget = {
   project?: string;
 };
 
+type StartResult = {
+  mcp_status: "OK";
+  process_state: "RUNNING" | "COMPLETED";
+  elapsed_ms: number;
+  next_action: "READ_SAME_PROCESS_ID" | "STOP_READING";
+  process_id: string;
+  pid: number;
+  cwd: string;
+  running: boolean;
+  launching?: boolean;
+};
+
+function quoteStructuredArgument(value: string): string {
+  if (/^[A-Za-z0-9_./:@%+=,\\-]+$/.test(value)) return value;
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+function structuredCommandDisplay(executable: string, args: string[]): string {
+  const quotedExecutable = quoteStructuredArgument(executable);
+  const head = /\s/.test(executable) ? `& ${quotedExecutable}` : quotedExecutable;
+  return [head, ...args.map(quoteStructuredArgument)].join(" ");
+}
+
 function sameActivityTarget(left?: ActivityTarget, right?: ActivityTarget): boolean {
   return left?.type === right?.type && left?.id === right?.id && left?.project === right?.project;
 }
@@ -55,6 +79,8 @@ type CompletedProcessReceipt = {
   caller_id: string;
   activity_target?: ActivityTarget;
   action_class?: string;
+  execution_mode?: CommandExecutionMode;
+  execution_reason?: string;
   request_id?: string;
   audit_schema?: "process-output-evidence.v1";
   retained_stdout_chars?: number;
@@ -81,6 +107,17 @@ type CompletedProcessReceipt = {
   started_at: string;
   finished_at: string;
   error?: string;
+  repair_attempts?: ProcessRepairAttempt[];
+};
+
+type ProcessRepairAttempt = {
+  reason: string;
+  command: string;
+  stdout: string;
+  stderr: string;
+  exit_code: number;
+  started_at: string;
+  finished_at: string;
 };
 
 type ProcessControlRequest = {
@@ -161,6 +198,12 @@ class BoundedCapture {
   full(): { text: string; truncated: boolean } {
     return { text: this.chunks.join(""), truncated: this.truncated };
   }
+
+  reset(): void {
+    this.chunks.length = 0;
+    this.length = 0;
+    this.truncated = false;
+  }
 }
 
 type OutputCursor = { stdout: number; stderr: number };
@@ -198,6 +241,10 @@ type ProcessState = {
   revision: number;
   lastReadRevisionByCaller: Map<string, number>;
   waiters: Set<() => void>;
+  attemptStartedAt: string;
+  repairAttempts: ProcessRepairAttempt[];
+  executionMode?: CommandExecutionMode;
+  executionReason?: string;
 };
 
 // PowerShell 7 is the single supported shell runtime. Keep an absolute deterministic
@@ -679,6 +726,224 @@ function mcpProductionMutationError(command: string, code: string): string | und
 
 type PowerShellCommandNormalization = { command: string; changed: boolean };
 
+const BUSY_ACTOR_HARNESSES = ["ChatGPT", "Codex", "Claude", "OpenCode", "CommandCode", "Traycer"] as const;
+
+function canonicalBusyHarness(value: string): string {
+  for (const harness of BUSY_ACTOR_HARNESSES) {
+    if (value.length > harness.length + 1
+      && value.slice(0, harness.length).toLowerCase() === harness.toLowerCase()
+      && "-:/".includes(value[harness.length]!)) {
+      return `${harness}${value.slice(harness.length)}`;
+    }
+  }
+  return value;
+}
+
+function normalizeCanonicalToolEntrypoints(command: string): PowerShellCommandNormalization {
+  let normalized = command;
+  const profile = (process.env.USERPROFILE || "").trim();
+  const atlas = profile ? join(profile, "Desktop", "vault", "tools", "stack_atlas.py") : "";
+  if (atlas && existsSync(atlas)) {
+    const quoted = `'${atlas.replaceAll("'", "''")}'`;
+    normalized = normalized.replace(
+      /(^|[;\r\n]\s*)(?:&\s*)?stack_atlas\.py(?=\s|$)/gim,
+      (_whole, prefix: string) => `${prefix}python ${quoted}`,
+    );
+  }
+  return { command: normalized, changed: normalized !== command };
+}
+
+function normalizeBusyCoordinatorActorHarness(command: string): PowerShellCommandNormalization {
+  if (!/(?:BusyCoordinator[\\/](?:python[\\/])?busy(?:-python)?\.(?:cmd|py)|\bbusy-python\.cmd\b)/i.test(command)) {
+    return { command, changed: false };
+  }
+  if (!/\b(?:claim|heartbeat)\b/i.test(command)) return { command, changed: false };
+
+  let normalized = command;
+  // Literal actor passed directly to claim/heartbeat. Only canonicalize an already
+  // recognizable harness; never invent identity for an arbitrary actor string.
+  normalized = normalized.replace(
+    /(\b(?:claim|heartbeat)\s+)(['"])([^'"\r\n]+)\2/gi,
+    (whole, prefix: string, quote: string, actor: string) => `${prefix}${quote}${canonicalBusyHarness(actor)}${quote}`,
+  );
+  normalized = normalized.replace(
+    /(\b(?:claim|heartbeat)\s+)([A-Za-z][^\s;'"|&]+)/gi,
+    (whole, prefix: string, actor: string) => `${prefix}${canonicalBusyHarness(actor)}`,
+  );
+
+  // The common generated form assigns the actor to a variable first. Restrict this
+  // rewrite to variables that are visibly consumed as the claim/heartbeat actor.
+  const assignments = [...normalized.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(['"])([^'"\r\n]+)\2/gi)];
+  for (const match of assignments.reverse()) {
+    const variable = match[1]!;
+    if (!new RegExp(`\\b(?:claim|heartbeat)\\s+\\$${variable}\\b`, "i").test(normalized)) continue;
+    const actor = match[3]!;
+    const canonical = canonicalBusyHarness(actor);
+    if (canonical === actor) continue;
+    const actorStart = (match.index ?? 0) + match[0].lastIndexOf(actor);
+    normalized = `${normalized.slice(0, actorStart)}${canonical}${normalized.slice(actorStart + actor.length)}`;
+  }
+  return { command: normalized, changed: normalized !== command };
+}
+
+function replaceVisiblePowerShellVariable(command: string, code: string, variable: string, replacement: string): string {
+  const pattern = new RegExp(`\\$(?:(global|script|local|private):)?${variable}\\b`, "gi");
+  const replacements: Array<{ start: number; end: number; text: string }> = [];
+  for (const match of code.matchAll(pattern)) {
+    const start = match.index ?? 0;
+    const scope = match[1] ? `${match[1]}:` : "";
+    replacements.push({ start, end: start + match[0].length, text: `$${scope}${replacement}` });
+  }
+  let normalized = command;
+  for (const item of replacements.reverse()) normalized = `${normalized.slice(0, item.start)}${item.text}${normalized.slice(item.end)}`;
+  return normalized;
+}
+
+function normalizeInlinePowerShellHereStringNewlines(command: string): PowerShellCommandNormalization {
+  let normalized = command;
+  // Generated one-liners often encode the required here-string line breaks as PowerShell
+  // escape text. Here-string delimiters are grammar, so materialize only the delimiter
+  // boundaries; content remains untouched.
+  normalized = normalized.replace(/(@["'])(?:`r`n|`n)/g, "$1\n");
+  normalized = normalized.replace(/(?:`r`n|`n)(["']@)/g, "\n$1");
+  return { command: normalized, changed: normalized !== command };
+}
+
+function rewritePowerShellInterpolatedSyntax(command: string): PowerShellCommandNormalization {
+  let normalized = "";
+  let changed = false;
+  let state: "normal" | "single" | "double" | "line_comment" | "block_comment" = "normal";
+  const scopes = new Set(["env", "global", "script", "local", "private", "using", "variable", "function", "alias"]);
+
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+    const next = command[index + 1];
+    if (state === "line_comment") {
+      normalized += char;
+      if (char === "\n") state = "normal";
+      continue;
+    }
+    if (state === "block_comment") {
+      normalized += char;
+      if (char === "#" && next === ">") { normalized += next; index += 1; state = "normal"; }
+      continue;
+    }
+    if (state === "single") {
+      normalized += char;
+      if (char === "'" && next === "'") { normalized += next; index += 1; continue; }
+      if (char === "'") state = "normal";
+      continue;
+    }
+    if (state === "double") {
+      if (char === '`' && next !== undefined) { normalized += char + next; index += 1; continue; }
+      if (char === '"') { normalized += char; state = "normal"; continue; }
+      if (char === '$' && next === '{' && command[index + 2] === '{') {
+        normalized += '`$';
+        changed = true;
+        continue;
+      }
+      if (char === '$') {
+        const match = /^\$([A-Za-z_][A-Za-z0-9_]*):/.exec(command.slice(index));
+        if (match && !scopes.has(match[1]!.toLowerCase())) {
+          normalized += `\${${match[1]}}:`;
+          index += match[0].length - 1;
+          changed = true;
+          continue;
+        }
+      }
+      normalized += char;
+      continue;
+    }
+
+    if (char === "#") { normalized += char; state = "line_comment"; continue; }
+    if (char === "<" && next === "#") { normalized += char + next; index += 1; state = "block_comment"; continue; }
+    if (char === "'") { normalized += char; state = "single"; continue; }
+    if (char === '"') { normalized += char; state = "double"; continue; }
+    if (char === '$') {
+      const match = /^\$([A-Za-z_][A-Za-z0-9_]*):/.exec(command.slice(index));
+      if (match && !scopes.has(match[1]!.toLowerCase())) {
+        normalized += `\${${match[1]}}:`;
+        index += match[0].length - 1;
+        changed = true;
+        continue;
+      }
+    }
+    normalized += char;
+  }
+  return { command: normalized, changed };
+}
+
+function repairPowerShellCStyleDoubleQuotes(command: string): string | undefined {
+  let normalized = "";
+  let changed = false;
+  let state: "normal" | "single" | "double" | "line_comment" = "normal";
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+    const next = command[index + 1];
+    if (state === "line_comment") {
+      normalized += char;
+      if (char === "\n") state = "normal";
+      continue;
+    }
+    if (state === "single") {
+      normalized += char;
+      if (char === "'" && next === "'") { normalized += next; index += 1; continue; }
+      if (char === "'") state = "normal";
+      continue;
+    }
+    if (state === "double") {
+      if (char === '`' && next !== undefined) { normalized += char + next; index += 1; continue; }
+      if (char === "\\" && next === '"') {
+        normalized += '`"';
+        index += 1;
+        changed = true;
+        continue;
+      }
+      normalized += char;
+      if (char === '"') state = "normal";
+      continue;
+    }
+    normalized += char;
+    if (char === "#") state = "line_comment";
+    else if (char === "'") state = "single";
+    else if (char === '"') state = "double";
+  }
+  return changed ? normalized : undefined;
+}
+
+function normalizePowerShellAutomaticVariableWrites(command: string): PowerShellCommandNormalization {
+  let normalized = command;
+  let changed = false;
+  for (const [variable, replacement] of [["PID", "mcpPid"], ["Host", "mcpHost"]] as const) {
+    const code = powershellCodeMask(normalized);
+    const token = String.raw`\$(?:(?:global|script|local|private):)?${variable}`;
+    const writePattern = new RegExp(`${token}\\s*(?:\\+\\+|--|[+*/%?-]?=)|(?:\\+\\+|--)\\s*${token}`, "i");
+    const parameterBinding = variable === "Host" && (
+      new RegExp(String.raw`\bparam\s*\([^)]*${token}\b`, "i").test(code)
+      || new RegExp(String.raw`\bfunction\b[^{}\r\n]*\([^)]*${token}\b`, "i").test(code)
+    );
+    if (!writePattern.test(code) && !parameterBinding) continue;
+    const next = replaceVisiblePowerShellVariable(normalized, code, variable, replacement);
+    if (next !== normalized) { normalized = next; changed = true; }
+  }
+  return { command: normalized, changed };
+}
+
+function normalizeGitCommitPeelRevspec(command: string): PowerShellCommandNormalization {
+  const code = powershellCodeMask(command);
+  const pattern = /\b[0-9a-f]{7,40}\^\{commit\}/gi;
+  const replacements: Array<{ start: number; end: number; text: string }> = [];
+  for (const match of code.matchAll(pattern)) {
+    const start = match.index ?? 0;
+    const prefix = code.slice(Math.max(0, start - 80), start);
+    if (!/\bgit(?:\.exe)?\s+cat-file\s+-e\s+$/i.test(prefix)) continue;
+    replacements.push({ start, end: start + match[0].length, text: `'${command.slice(start, start + match[0].length)}'` });
+  }
+  let normalized = command;
+  for (const item of replacements.reverse()) normalized = `${normalized.slice(0, item.start)}${item.text}${normalized.slice(item.end)}`;
+  return { command: normalized, changed: normalized !== command };
+}
+
 function normalizePowerShellControlStatementPipelines(command: string): PowerShellCommandNormalization {
   const code = powershellCodeMask(command);
   const stack: Array<{ char: string; controlStart?: number; autoNormalize?: boolean }> = [];
@@ -723,10 +988,8 @@ function normalizePowerShellControlStatementPipelines(command: string): PowerShe
   return { command: normalized, changed: normalized !== command };
 }
 
-function powershellPreflightError(command: string): string | undefined {
+function commandPreflightError(command: string, executionMode: CommandExecutionMode): string | undefined {
   const code = powershellCodeMask(command);
-  const nestedCommandError = nestedPowerShellCommandExpansionError(command, code);
-  if (nestedCommandError) return nestedCommandError;
   const rootScanError = driveRootRecursiveScanError(command, code);
   if (rootScanError) return rootScanError;
   const vaultScanError = vaultRootRecursiveScanError(command, code);
@@ -737,6 +1000,11 @@ function powershellPreflightError(command: string): string | undefined {
   if (swarmRouteError) return swarmRouteError;
   const productionMutationError = mcpProductionMutationError(command, code);
   if (productionMutationError) return productionMutationError;
+  // Native argv and explicitly requested nested shells bypass the outer PowerShell
+  // interpreter, so PowerShell-only syntax/expansion checks would be false positives.
+  if (executionMode !== "powershell") return undefined;
+  const nestedCommandError = nestedPowerShellCommandExpansionError(command, code);
+  if (nestedCommandError) return nestedCommandError;
   const automaticVariable = String.raw`\$(?:(?:global|script|local|private):)?PID`;
   const writePattern = new RegExp(`${automaticVariable}\\s*(?:\\+\\+|--|[+*/%?-]?=)|(?:\\+\\+|--)\\s*${automaticVariable}`, "i");
   if (writePattern.test(code)) {
@@ -862,6 +1130,116 @@ function processOutputAudit(
     evidence_completeness: stdoutTruncated || stderrTruncated ? "bounded" : "complete",
     execution_outcome: executionOutcome,
   };
+}
+
+type RuntimeRepair = { command: string; reason: string };
+
+function replaceBusyActorWithChatGptHarness(command: string): string | undefined {
+  if (!/(?:BusyCoordinator[\\/](?:python[\\/])?busy(?:-python)?\.(?:cmd|py)|\bbusy-python\.cmd\b)/i.test(command)) return undefined;
+  let changed = false;
+  let normalized = command;
+  const ensureHarness = (actor: string) => {
+    if (BUSY_ACTOR_HARNESSES.some((harness) => actor.length > harness.length + 1
+      && actor.slice(0, harness.length).toLowerCase() === harness.toLowerCase()
+      && "-:/".includes(actor[harness.length]!))) return canonicalBusyHarness(actor);
+    if (!actor || actor.startsWith("$") || /\s/.test(actor)) return actor;
+    changed = true;
+    return `ChatGPT:${actor}`;
+  };
+  normalized = normalized.replace(
+    /(\b(?:claim|heartbeat)\s+)(['"])([^'"\r\n]+)\2/gi,
+    (whole, prefix: string, quote: string, actor: string) => `${prefix}${quote}${ensureHarness(actor)}${quote}`,
+  );
+  normalized = normalized.replace(
+    /(\b(?:claim|heartbeat)\s+)([A-Za-z][^\s;'"|&]+)/gi,
+    (whole, prefix: string, actor: string) => `${prefix}${ensureHarness(actor)}`,
+  );
+  const assignments = [...normalized.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(['"])([^'"\r\n]+)\2/gi)];
+  for (const match of assignments.reverse()) {
+    const variable = match[1]!;
+    if (!new RegExp(`\\b(?:claim|heartbeat)\\s+\\$${variable}\\b`, "i").test(normalized)) continue;
+    const actor = match[3]!;
+    const repaired = ensureHarness(actor);
+    if (repaired === actor) continue;
+    const actorStart = (match.index ?? 0) + match[0].lastIndexOf(actor);
+    normalized = `${normalized.slice(0, actorStart)}${repaired}${normalized.slice(actorStart + actor.length)}`;
+  }
+  return changed && normalized !== command ? normalized : undefined;
+}
+
+function repairStackAtlasLookup(command: string, stderr: string): string | undefined {
+  if (!/stack_atlas\.py/i.test(command) || !/usage: stack_atlas\.py/i.test(stderr)) return undefined;
+  if (!/(?:unknown Atlas lookup target:|lookup --query is supported only)/i.test(stderr)) return undefined;
+  const lookup = /\blookup\s+((?:'[^']*'|"[^"]*"|[^\s;|]+))(?:\s+--query\s+((?:'[^']*'|"[^"]*"|[^;|]+)))?/i.exec(command);
+  if (!lookup) return undefined;
+  const unquote = (value: string | undefined) => {
+    if (!value) return "";
+    const trimmed = value.trim();
+    return ((trimmed.startsWith("'") && trimmed.endsWith("'")) || (trimmed.startsWith('"') && trimmed.endsWith('"')))
+      ? trimmed.slice(1, -1) : trimmed;
+  };
+  const target = unquote(lookup[1]);
+  const query = unquote(lookup[2]);
+  const findQuery = [target, query].filter(Boolean).join(" ").replaceAll("'", "''");
+  return `${command.slice(0, lookup.index)}find '${findQuery}'${command.slice((lookup.index ?? 0) + lookup[0].length)}`;
+}
+
+function repairPythonReadTextNewline(command: string, stderr: string): string | undefined {
+  if (!/TypeError: Path\.read_text\(\) got an unexpected keyword argument ['"]newline['"]/i.test(stderr)) return undefined;
+  const repaired = command.replace(/,?\s*newline\s*=\s*(['"])[^'"]*\1\s*,?/gi, (match) => match.trim().endsWith(",") ? "" : "");
+  return repaired !== command ? repaired : undefined;
+}
+
+function repairTiny3dPythonPath(command: string, stderr: string): string | undefined {
+  if (!/No module named ['"]tiny3d['"]/i.test(stderr) || !/\bpython(?:\.exe)?\b[^;\r\n]*\s-m\s+tiny3d\b/i.test(command)) return undefined;
+  const userProfile = (process.env.USERPROFILE || "").trim();
+  if (!userProfile) return undefined;
+  const source = join(userProfile, "Desktop", "tiny3d", "src");
+  if (!existsSync(source)) return undefined;
+  const quoted = source.replaceAll("'", "''");
+  return `$env:PYTHONPATH='${quoted}'; ${command}`;
+}
+
+function runtimeRepairCommand(command: string, stdout: string, stderr: string): RuntimeRepair | undefined {
+  const combined = `${stderr}\n${stdout}`;
+  if (/claim actor must be <harness><separator><task\/session suffix>/i.test(combined)) {
+    const repaired = replaceBusyActorWithChatGptHarness(command);
+    if (repaired) return { command: repaired, reason: "busy_actor_missing_harness" };
+  }
+  const atlas = repairStackAtlasLookup(command, stderr);
+  if (atlas) return { command: atlas, reason: "stack_atlas_lookup_fallback_to_find" };
+  const readText = repairPythonReadTextNewline(command, stderr);
+  if (readText) return { command: readText, reason: "python_path_read_text_newline" };
+  const tiny3d = repairTiny3dPythonPath(command, stderr);
+  if (tiny3d) return { command: tiny3d, reason: "tiny3d_pythonpath" };
+  if (/ParserError:/i.test(combined) && /\\"/.test(command)) {
+    const cStyleQuotes = repairPowerShellCStyleDoubleQuotes(command);
+    if (cStyleQuotes && cStyleQuotes !== command) return { command: cStyleQuotes, reason: "powershell_c_style_quote_escape" };
+  }
+  return undefined;
+}
+
+export function replayNormalizeStartProcessCommand(command: string): { command: string; rewrites: string[] } {
+  const rewrites: string[] = [];
+  const canonicalTool = normalizeCanonicalToolEntrypoints(command);
+  if (canonicalTool.changed) rewrites.push("canonical_tool_entrypoint");
+  const busy = normalizeBusyCoordinatorActorHarness(canonicalTool.command);
+  if (busy.changed) rewrites.push("busy_actor_harness_case");
+  const hereString = normalizeInlinePowerShellHereStringNewlines(busy.command);
+  if (hereString.changed) rewrites.push("powershell_here_string_newline");
+  const interpolation = rewritePowerShellInterpolatedSyntax(hereString.command);
+  if (interpolation.changed) rewrites.push("powershell_interpolation_literal");
+  const automatic = normalizePowerShellAutomaticVariableWrites(interpolation.command);
+  if (automatic.changed) rewrites.push("powershell_automatic_variable_helper");
+  const gitRevspec = normalizeGitCommitPeelRevspec(automatic.command);
+  if (gitRevspec.changed) rewrites.push("git_commit_peel_revspec_quote");
+  const control = normalizePowerShellControlStatementPipelines(gitRevspec.command);
+  if (control.changed) rewrites.push("control_statement_pipeline_capture");
+  return { command: control.command, rewrites };
+}
+
+export function replayRuntimeRepair(command: string, stdout: string, stderr: string): RuntimeRepair | undefined {
+  return runtimeRepairCommand(command, stdout, stderr);
 }
 
 export class ProcessManager {
@@ -1020,6 +1398,45 @@ export class ProcessManager {
     try { unlinkSync(path); } catch { /* a concurrent stale-slot cleanup may already have removed it */ }
   }
 
+  private tryRuntimeRepair(state: ProcessState, code: number | null, signal: NodeJS.Signals | null): boolean {
+    const exitCode = code ?? -1;
+    if (exitCode === 0 || signal || state.killRequested || state.error || state.repairAttempts.length >= 1) return false;
+    const stdout = state.stdout.full().text;
+    const stderr = state.stderr.full().text;
+    const repair = runtimeRepairCommand(state.command, stdout, stderr);
+    if (!repair || repair.command === state.command) return false;
+    const normalized = replayNormalizeStartProcessCommand(repair.command).command;
+    const repairPlan = planCommandExecution(normalized, POWERSHELL_EXE);
+    const preflightError = commandPreflightError(normalized, repairPlan.mode);
+    if (preflightError) return false;
+    const finishedAt = new Date().toISOString();
+    state.repairAttempts.push({
+      reason: repair.reason,
+      command: state.command.slice(0, MAX_COMMAND_REPORT_CHARS),
+      stdout: stdout.slice(-MAX_CAPTURE_CHARS),
+      stderr: stderr.slice(-MAX_CAPTURE_CHARS),
+      exit_code: exitCode,
+      started_at: state.attemptStartedAt,
+      finished_at: finishedAt,
+    });
+    if (state.submittedCommand === undefined) state.submittedCommand = state.command;
+    state.command = normalized;
+    state.stdout.reset();
+    state.stderr.reset();
+    state.pid = 0;
+    state.launching = true;
+    state.attemptStartedAt = finishedAt;
+    emitTelemetry({ event: "process_command_retried", process_id: state.id, owner_caller_id: state.callerId, repair_reason: repair.reason, prior_exit_code: exitCode }, state.ownerContext);
+    this.markProcessChanged(state);
+    try {
+      this.launcherWorker.postMessage({ type: "launch", requestId: state.id, command: state.command, cwd: state.cwd });
+      return true;
+    } catch (error) {
+      state.error = error instanceof Error ? error.message : String(error);
+      return false;
+    }
+  }
+
   private observeTerminal(state: ProcessState, code: number | null, signal: NodeJS.Signals | null): void {
     if (state.terminalObserved) return;
     state.terminalObserved = true;
@@ -1043,11 +1460,20 @@ export class ProcessManager {
     if (!message || typeof message !== "object" || typeof message.requestId !== "string") return;
     const state = this.processes.get(message.requestId);
     if (!state || state.exitCode !== null) return;
-    if (message.type === "started" && Number.isInteger(message.pid) && message.pid > 0) {
+    if ((message.type === "started" || message.type === "step_started") && Number.isInteger(message.pid) && message.pid > 0) {
       state.pid = message.pid;
       state.launching = false;
+      if (message.executionMode === "powershell" || message.executionMode === "native" || message.executionMode === "explicit_shell" || message.executionMode === "native_sequence") state.executionMode = message.executionMode;
+      if (typeof message.executionReason === "string") state.executionReason = message.executionReason;
       this.updateHostAdmissionChildPid(state.id, state.pid);
-      emitTelemetry({ event: "process_started", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, cwd: state.cwd, started_at: state.startedAt, ...(state.activityTarget ? { activity_target: state.activityTarget } : {}), ...(state.actionClass ? { action_class: state.actionClass } : {}) }, state.ownerContext);
+      emitTelemetry({
+        event: message.type === "started" ? "process_started" : "process_step_started",
+        process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, cwd: state.cwd, started_at: state.startedAt,
+        ...(Number.isInteger(message.stepIndex) ? { step_index: message.stepIndex } : {}),
+        ...(Number.isInteger(message.stepCount) ? { step_count: message.stepCount } : {}),
+        ...(typeof message.stepReason === "string" ? { step_reason: message.stepReason } : {}),
+        ...(state.activityTarget ? { activity_target: state.activityTarget } : {}), ...(state.actionClass ? { action_class: state.actionClass } : {}),
+      }, state.ownerContext);
       if (state.killRequested) this.launcherWorker.postMessage({ type: "kill", requestId: state.id });
       return;
     }
@@ -1059,7 +1485,11 @@ export class ProcessManager {
       this.observeTerminal(state, -1, null);
       return;
     }
-    if (message.type === "exit") this.observeTerminal(state, typeof message.code === "number" ? message.code : -1, message.signal ?? null);
+    if (message.type === "exit") {
+      const code = typeof message.code === "number" ? message.code : -1;
+      const signal = message.signal ?? null;
+      if (!this.tryRuntimeRepair(state, code, signal)) this.observeTerminal(state, code, signal);
+    }
   }
 
 
@@ -1464,6 +1894,8 @@ export class ProcessManager {
       caller_id: state.callerId,
       ...(state.activityTarget ? { activity_target: state.activityTarget } : {}),
       ...(state.actionClass ? { action_class: state.actionClass } : {}),
+      ...(state.executionMode ? { execution_mode: state.executionMode } : {}),
+      ...(state.executionReason ? { execution_reason: state.executionReason } : {}),
       ...audit,
       command,
       ...(state.command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}),
@@ -1478,6 +1910,7 @@ export class ProcessManager {
       started_at: state.startedAt,
       finished_at: state.finishedAt,
       ...(state.error ? { error: state.error } : {}),
+      ...(state.repairAttempts.length > 0 ? { repair_attempts: state.repairAttempts } : {}),
     };
     const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
     try {
@@ -1527,7 +1960,7 @@ export class ProcessManager {
     const stdout = state.stdout.tail(MAX_CAPTURE_CHARS, MAX_CAPTURE_CHARS);
     const stderr = state.stderr.tail(MAX_CAPTURE_CHARS, MAX_CAPTURE_CHARS);
     const audit = processOutputAudit(stdout.text, stderr.text, stdout.truncated, stderr.truncated, exitCode, signal, state.error, state.ownerContext.request_id);
-    const receipt: CompletedProcessReceipt = { version: 1, process_id: state.id, pid: state.pid, caller_id: state.callerId, ...(state.activityTarget ? { activity_target: state.activityTarget } : {}), ...(state.actionClass ? { action_class: state.actionClass } : {}), ...audit, command, ...(state.command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}), ...(state.submittedCommand !== undefined ? { submitted_command: state.submittedCommand.slice(0, MAX_COMMAND_REPORT_CHARS), ...(state.submittedCommand.length > MAX_COMMAND_REPORT_CHARS ? { submitted_command_truncated: true as const } : {}) } : {}), cwd: state.cwd, stdout: stdout.text, stderr: stderr.text, ...(stdout.truncated ? { stdout_truncated: true as const } : {}), ...(stderr.truncated ? { stderr_truncated: true as const } : {}), exit_code: exitCode, signal, started_at: state.startedAt, finished_at: finishedAt, ...(state.error ? { error: state.error } : {}) };
+    const receipt: CompletedProcessReceipt = { version: 1, process_id: state.id, pid: state.pid, caller_id: state.callerId, ...(state.activityTarget ? { activity_target: state.activityTarget } : {}), ...(state.actionClass ? { action_class: state.actionClass } : {}), ...(state.executionMode ? { execution_mode: state.executionMode } : {}), ...(state.executionReason ? { execution_reason: state.executionReason } : {}), ...audit, command, ...(state.command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}), ...(state.submittedCommand !== undefined ? { submitted_command: state.submittedCommand.slice(0, MAX_COMMAND_REPORT_CHARS), ...(state.submittedCommand.length > MAX_COMMAND_REPORT_CHARS ? { submitted_command_truncated: true as const } : {}) } : {}), cwd: state.cwd, stdout: stdout.text, stderr: stderr.text, ...(stdout.truncated ? { stdout_truncated: true as const } : {}), ...(stderr.truncated ? { stderr_truncated: true as const } : {}), exit_code: exitCode, signal, started_at: state.startedAt, finished_at: finishedAt, ...(state.error ? { error: state.error } : {}), ...(state.repairAttempts.length > 0 ? { repair_attempts: state.repairAttempts } : {}) };
     const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
     try {
       await writeFileAsync(temporaryPath, JSON.stringify(receipt), { encoding: "utf8", flag: "wx" });
@@ -1545,7 +1978,7 @@ export class ProcessManager {
     const observerCallerId = observer.caller_id ?? "caller_unknown";
     emitTelemetry({ event: "process_receipt_read", process_id: receipt.process_id, pid: receipt.pid, owner_caller_id: receipt.caller_id, caller_id: observerCallerId }, observer);
     const audit = processOutputAudit(receipt.stdout, receipt.stderr, Boolean(receipt.stdout_truncated), Boolean(receipt.stderr_truncated), receipt.exit_code, receipt.signal, receipt.error, receipt.request_id);
-    const legacy = { ...processResponseState(receipt.started_at, false, receipt.finished_at), process_id: receipt.process_id, pid: receipt.pid, ...audit, ...(receipt.activity_target ? { activity_target: receipt.activity_target } : {}), ...(receipt.action_class ? { action_class: receipt.action_class } : {}), command: receipt.command, ...(receipt.command_truncated ? { command_truncated: true } : {}), ...(receipt.submitted_command !== undefined ? { submitted_command: receipt.submitted_command, ...(receipt.submitted_command_truncated ? { submitted_command_truncated: true } : {}) } : {}), cwd: receipt.cwd, running: false, stdout: receipt.stdout.slice(-limit), stderr: receipt.stderr.slice(-limit), exit_code: receipt.exit_code, signal: receipt.signal, started_at: receipt.started_at, finished_at: receipt.finished_at, ...(receipt.stdout_truncated || receipt.stdout.length > limit ? { stdout_truncated: true } : {}), ...(receipt.stderr_truncated || receipt.stderr.length > limit ? { stderr_truncated: true } : {}), ...(receipt.error ? { error: receipt.error } : {}) };
+    const legacy = { ...processResponseState(receipt.started_at, false, receipt.finished_at), process_id: receipt.process_id, pid: receipt.pid, ...audit, ...(receipt.activity_target ? { activity_target: receipt.activity_target } : {}), ...(receipt.action_class ? { action_class: receipt.action_class } : {}), ...(receipt.execution_mode ? { execution_mode: receipt.execution_mode } : {}), ...(receipt.execution_reason ? { execution_reason: receipt.execution_reason } : {}), command: receipt.command, ...(receipt.command_truncated ? { command_truncated: true } : {}), ...(receipt.submitted_command !== undefined ? { submitted_command: receipt.submitted_command, ...(receipt.submitted_command_truncated ? { submitted_command_truncated: true } : {}) } : {}), cwd: receipt.cwd, running: false, stdout: receipt.stdout.slice(-limit), stderr: receipt.stderr.slice(-limit), exit_code: receipt.exit_code, signal: receipt.signal, started_at: receipt.started_at, finished_at: receipt.finished_at, ...(receipt.stdout_truncated || receipt.stdout.length > limit ? { stdout_truncated: true } : {}), ...(receipt.stderr_truncated || receipt.stderr.length > limit ? { stderr_truncated: true } : {}), ...(receipt.error ? { error: receipt.error } : {}), ...(receipt.repair_attempts?.length ? { repair_attempts: receipt.repair_attempts } : {}) };
     const cursorExists = this.outputCursors.has(this.cursorKey(receipt.process_id, observerCallerId));
     const needsPaging = cursorExists || receipt.stdout.length + receipt.stderr.length > limit;
     return needsPaging ? this.pageOutput(legacy, receipt.stdout, receipt.stderr, observerCallerId, Boolean(receipt.stdout_truncated), Boolean(receipt.stderr_truncated), limit) : legacy;
@@ -1641,14 +2074,20 @@ export class ProcessManager {
     for (const state of remaining.slice(0, Math.max(0, remaining.length - this.maxCompletedProcesses))) this.processes.delete(state.id);
   }
 
-  start(command: string, workingDirectory?: string, callerId = "caller_unknown", activityTarget?: ActivityTarget, actionClass?: string): { mcp_status: "OK"; process_state: "RUNNING" | "COMPLETED"; elapsed_ms: number; next_action: "READ_SAME_PROCESS_ID" | "STOP_READING"; process_id: string; pid: number; cwd: string; running: boolean; launching?: boolean } {
-    this.pruneCompleted();
-    const normalization = normalizePowerShellControlStatementPipelines(command);
-    const effectiveCommand = normalization.command;
-    const preflightError = powershellPreflightError(effectiveCommand);
+  private startPrepared(
+    effectiveCommand: string,
+    executionPlan: CommandExecutionPlan,
+    workingDirectory: string | undefined,
+    callerId: string,
+    activityTarget: ActivityTarget | undefined,
+    actionClass: string | undefined,
+    submittedCommand: string | undefined,
+    normalizationRewrites: string[] = [],
+  ): StartResult {
+    const preflightError = commandPreflightError(effectiveCommand, executionPlan.mode);
     if (preflightError) {
       const rejectionId = randomUUID();
-      void this.persistPreflightRejectionAsync(rejectionId, command, workingDirectory, callerId, preflightError);
+      void this.persistPreflightRejectionAsync(rejectionId, submittedCommand ?? effectiveCommand, workingDirectory, callerId, preflightError);
       emitTelemetry({ event: "process_preflight_rejected", reason: preflightError, rejection_id: rejectionId });
       throw new Error(`start_process_preflight_failed: ${preflightError}`);
     }
@@ -1656,7 +2095,7 @@ export class ProcessManager {
     const duplicate = [...this.processes.values()].find((state) => state.exitCode === null && state.callerId === callerId && state.cwd === cwd && state.command === effectiveCommand && sameActivityTarget(state.activityTarget, activityTarget) && state.actionClass === actionClass);
     if (duplicate) {
       emitTelemetry({ event: "process_reused", process_id: duplicate.id, pid: duplicate.pid, owner_caller_id: duplicate.callerId });
-      return { ...processResponseState(duplicate.startedAt, true), process_id: duplicate.id, pid: duplicate.pid, cwd: duplicate.cwd, running: true, ...(duplicate.launching ? { launching: true } : {}) } as const;
+      return { ...processResponseState(duplicate.startedAt, true), process_id: duplicate.id, pid: duplicate.pid, cwd: duplicate.cwd, running: true, ...(duplicate.launching ? { launching: true } : {}) } as StartResult;
     }
     const liveForCaller = [...this.processes.values()].filter((state) => state.exitCode === null && state.callerId === callerId);
     if (liveForCaller.length >= this.maxLivePerCaller) throw new Error(`start_process_concurrency_limited: caller already has ${liveForCaller.length} live processes; active_process_ids=${liveForCaller.map((state) => state.id).join(",")}`);
@@ -1668,24 +2107,55 @@ export class ProcessManager {
     let resolveDone!: () => void;
     const done = new Promise<void>((resolve) => { resolveDone = resolve; });
     const state: ProcessState = {
-      id: processId, pid: 0, callerId, ownerContext, command: effectiveCommand, ...(normalization.changed ? { submittedCommand: command } : {}), ...(activityTarget ? { activityTarget } : {}), ...(actionClass ? { actionClass } : {}), cwd,
+      id: processId, pid: 0, callerId, ownerContext, command: effectiveCommand, ...(submittedCommand !== undefined ? { submittedCommand } : {}), ...(activityTarget ? { activityTarget } : {}), ...(actionClass ? { actionClass } : {}), cwd,
       launching: true, terminalObserved: false, resolveDone, killRequested: false,
       stdout: new BoundedCapture(), stderr: new BoundedCapture(), startedAt, exitCode: null,
       done, revision: 0, lastReadRevisionByCaller: new Map<string, number>(), waiters: new Set<() => void>(),
+      attemptStartedAt: startedAt, repairAttempts: [],
     };
     this.processes.set(state.id, state);
     sharedLauncherHandlers.set(state.id, (message) => this.handleLauncherMessage(message));
     try {
-      this.launcherWorker.postMessage({ type: "launch", requestId: state.id, command: effectiveCommand, cwd });
+      this.launcherWorker.postMessage({ type: "launch", requestId: state.id, command: effectiveCommand, cwd, plan: executionPlan });
     } catch (error) {
       sharedLauncherHandlers.delete(state.id);
       this.processes.delete(state.id);
       this.releaseHostAdmissionSlot(state.id);
       throw error;
     }
-    if (normalization.changed) emitTelemetry({ event: "process_command_normalized", process_id: state.id, rewrite: "control_statement_pipeline_capture" }, state.ownerContext);
+    for (const rewrite of normalizationRewrites) emitTelemetry({ event: "process_command_normalized", process_id: state.id, rewrite }, state.ownerContext);
     emitTelemetry({ event: "process_launch_queued", process_id: state.id, owner_caller_id: state.callerId, cwd: state.cwd, started_at: state.startedAt, ...(state.activityTarget ? { activity_target: state.activityTarget } : {}), ...(state.actionClass ? { action_class: state.actionClass } : {}) }, state.ownerContext);
-    return { ...processResponseState(state.startedAt, true), process_id: state.id, pid: 0, cwd: state.cwd, running: true, launching: true } as const;
+    return { ...processResponseState(state.startedAt, true), process_id: state.id, pid: 0, cwd: state.cwd, running: true, launching: true } as StartResult;
+  }
+
+  start(command: string, workingDirectory?: string, callerId = "caller_unknown", activityTarget?: ActivityTarget, actionClass?: string): StartResult {
+    this.pruneCompleted();
+    const normalized = replayNormalizeStartProcessCommand(command);
+    const executionPlan = planCommandExecution(normalized.command, POWERSHELL_EXE);
+    return this.startPrepared(
+      normalized.command,
+      executionPlan,
+      workingDirectory,
+      callerId,
+      activityTarget,
+      actionClass,
+      normalized.command !== command ? command : undefined,
+      normalized.rewrites,
+    );
+  }
+
+  startStructured(
+    executable: string,
+    args: string[] = [],
+    workingDirectory?: string,
+    callerId = "caller_unknown",
+    activityTarget?: ActivityTarget,
+    actionClass?: string,
+  ): StartResult {
+    this.pruneCompleted();
+    const executionPlan = planStructuredExecution(executable, args, undefined, POWERSHELL_EXE);
+    const displayCommand = structuredCommandDisplay(executable, args);
+    return this.startPrepared(displayCommand, executionPlan, workingDirectory, callerId, activityTarget, actionClass, undefined, ["structured_argv"]);
   }
 
   async startWithWait(
@@ -1744,6 +2214,8 @@ export class ProcessManager {
       pid: state.pid,
       ...(state.activityTarget ? { activity_target: state.activityTarget } : {}),
       ...(state.actionClass ? { action_class: state.actionClass } : {}),
+      ...(state.executionMode ? { execution_mode: state.executionMode } : {}),
+      ...(state.executionReason ? { execution_reason: state.executionReason } : {}),
       command,
       ...((state.command.length > MAX_COMMAND_REPORT_CHARS) ? { command_truncated: true } : {}),
       ...(state.submittedCommand !== undefined ? { submitted_command: state.submittedCommand.slice(0, MAX_COMMAND_REPORT_CHARS), ...(state.submittedCommand.length > MAX_COMMAND_REPORT_CHARS ? { submitted_command_truncated: true } : {}) } : {}),
@@ -1760,6 +2232,7 @@ export class ProcessManager {
       ...(stdout.truncated ? { stdout_truncated: true, stdout_dropped_from_start: stdout.dropped } : {}),
       ...(stderr.truncated ? { stderr_truncated: true, stderr_dropped_from_start: stderr.dropped } : {}),
       ...(state.error ? { error: state.error } : {}),
+      ...(state.repairAttempts.length > 0 ? { repair_attempts: state.repairAttempts } : {}),
     };
     // A running process owns a moving bounded capture. Keep live reads as ordinary bounded
     // tail snapshots; starting a cursor against that moving window can skip the eventual
@@ -1770,6 +2243,26 @@ export class ProcessManager {
     return needsPaging
       ? this.pageOutput(legacy, fullStdout.text, fullStderr.text, observerCallerId, fullStdout.truncated, fullStderr.truncated, limit)
       : legacy;
+  }
+
+  async startStructuredWithWait(
+    executable: string,
+    args: string[] = [],
+    workingDirectory?: string,
+    callerId = "caller_unknown",
+    waitMs = 750,
+    activityTarget?: ActivityTarget,
+    actionClass?: string,
+  ): Promise<Record<string, unknown>> {
+    const cwd = await boundedValidatedCwd(workingDirectory);
+    const started = this.startStructured(executable, args, cwd, callerId, activityTarget, actionClass);
+    const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
+    emitTelemetry({ event: "process_wait_requested", action: "start_structured", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
+    if (boundedWaitMs === 0) return started;
+    const state = this.processes.get(started.process_id);
+    if (!state || state.exitCode !== null) return this.read(started.process_id, MAX_READ_CHARS);
+    await Promise.race([state.done, delay(boundedWaitMs)]);
+    return this.read(started.process_id, MAX_READ_CHARS);
   }
 
   async readOutput(processId: string, maxChars = MAX_READ_CHARS, waitMs?: number): Promise<Record<string, unknown>> {
