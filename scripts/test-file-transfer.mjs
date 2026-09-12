@@ -228,14 +228,14 @@ try {
 const listedByName = Object.fromEntries(listed.tools.map((tool) => [tool.name, tool]));
 assert.ok(listedByName.upload_local_file.outputSchema, "upload tool must declare outputSchema for structuredContent");
 assert.ok(listedByName.download_chatgpt_file.outputSchema, "download tool must declare outputSchema for structuredContent");
-assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v3.html", "widget URI must be cache-busted after the Library/media contract change");
+assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v4.html", "widget URI must be cache-busted after restoring HTTPS Library materialization only on upload_local_file");
   const start = listed.tools.find((tool) => tool.name === "start_process");
   const read = listed.tools.find((tool) => tool.name === "read_output");
   const upload = listed.tools.find((tool) => tool.name === "upload_local_file");
   const download = listed.tools.find((tool) => tool.name === "download_chatgpt_file");
   assert.equal(start?._meta?.["openai/outputTemplate"], undefined, "start_process must not mount the file widget");
   assert.equal(read?._meta?.["openai/outputTemplate"], undefined, "read_output must not mount the file widget");
-  assert.equal(upload?._meta?.["openai/outputTemplate"], undefined, "upload_local_file must use the native file result without a widget");
+  assert.equal(upload?._meta?.["openai/outputTemplate"], FILE_TRANSFER_WIDGET_URI, "upload_local_file alone mounts the HTTPS Library widget");
   assert.equal(download?._meta?.["openai/outputTemplate"], undefined, "download_chatgpt_file should use native file params, not a widget");
   assert.deepEqual(download?._meta?.["openai/fileParams"], ["file"]);
   const fileSchema = download?.inputSchema?.properties?.file;
@@ -260,7 +260,9 @@ assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v3.html", "wi
   }
 
   const imageUpload = await client.callTool({ name: "upload_local_file", arguments: { path: pngPath } });
-  assert.equal(imageUpload._meta?.file_transfer, undefined, "native file handoff must not carry widget materialization metadata");
+  assert.equal(imageUpload._meta?.file_transfer?.delivery_mode, "library_upload", "direct image keeps native result and restores HTTPS Library upload");
+  assert.match(imageUpload._meta?.file_transfer?.transfer_url || "", /^https:\/\//);
+  assert.equal(imageUpload._meta?.file_transfer?.sha256, imageUpload.structuredContent.sha256);
   const nativeImage = imageUpload.content.find((entry) => entry.type === "image");
   assert.ok(nativeImage, "direct images must return native MCP image content for same-turn ChatGPT/Work visibility");
   assert.equal(nativeImage.mimeType, "image/png");
@@ -274,6 +276,7 @@ assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v3.html", "wi
 
   const reviewZipUpload = await client.callTool({ name: "upload_local_file", arguments: { path: reviewZipPath } });
   exactFileReference(reviewZipUpload, "visual-review_two-images.zip", "application/zip", reviewZip.length);
+  assert.equal(reviewZipUpload._meta?.file_transfer?.delivery_mode, "review_resources", "recognized review ZIP must stay resource-only and never enter Library upload");
   const reviewZipLinks = reviewZipUpload.content.filter((entry) => entry.type === "resource_link" && entry.uri !== reviewZipUpload.structuredContent.resource_uri);
   assert.equal(reviewZipLinks.length, 2, "one visual-review ZIP must expose every manifest-declared image in addition to the ZIP file reference");
   assert.deepEqual(reviewZipLinks.map((entry) => entry.name), ["asset-a.png", "asset-b.png"]);
@@ -310,25 +313,36 @@ assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v3.html", "wi
   const genericZipUpload = await client.callTool({ name: "upload_local_file", arguments: { path: genericZipPath } });
   assert.notEqual(genericZipUpload.isError, true, "generic ZIP must be allowed through the exact native file-reference path");
   exactFileReference(genericZipUpload, "generic.zip", "application/zip", genericZip.length);
+  assert.equal(genericZipUpload._meta?.file_transfer?.delivery_mode, "resource_only", "generic ZIP stays native resource-only instead of invoking unsupported Library ZIP upload");
   assert.equal(genericZipUpload.content.filter((entry) => entry.type === "resource_link").length, 1, "generic ZIP returns only its exact file reference and invents no review resources");
 
   const videoUpload = await client.callTool({ name: "upload_local_file", arguments: { path: mediaPath } });
   assert.equal(videoUpload.content.some((entry) => entry.type === "image"), false, "video upload must not masquerade as image content");
   exactFileReference(videoUpload, "proof.mp4", "video/mp4", media.length);
+  assert.equal(videoUpload._meta?.file_transfer?.delivery_mode, "library_upload", "video uses the proven HTTPS Library path while keeping its native file reference");
 
   const textUpload = await client.callTool({ name: "upload_local_file", arguments: { path: textPath } });
   exactFileReference(textUpload, "compressible.txt", "text/plain", text.length);
+  assert.equal(textUpload._meta?.file_transfer?.delivery_mode, "library_upload");
   assert.equal(textUpload.content.filter((entry) => entry.type === "resource_link").length, 1, "non-image uploads return one exact file reference without image resources");
 
   const resource = await client.readResource({ uri: FILE_TRANSFER_WIDGET_URI });
-  assert.match(String(resource.contents[0]?.text || ""), /FILE_TRANSFER_NATIVE_RESOURCE/);
+  const resourceHtml = String(resource.contents[0]?.text || "");
+  assert.match(resourceHtml, /FILE_TRANSFER_READY/);
+  assert.match(resourceHtml, /window\.openai\.uploadFile\(file,\{library:true\}\)/);
 } finally {
   await client.close();
   await server.close();
 }
 
 const widget = fileTransferWidgetHtml();
-assert.match(widget, /FILE_TRANSFER_NATIVE_RESOURCE/);
-assert.doesNotMatch(widget, /uploadFile|getFileDownloadUrl|setWidgetState|toolResponseMetadata|ui\/notifications\/tool-result/, "compatibility template must be inert and must not materialize or remount files");
+assert.match(widget, /FILE_TRANSFER_READY/);
+assert.match(widget, /BYTE_COUNT_MISMATCH/);
+assert.match(widget, /SHA256_MISMATCH/);
+assert.match(widget, /window\.openai\.uploadFile\(file,\{library:true\}\)/);
+assert.match(widget, /delivery_mode==='review_resources'/);
+assert.match(widget, /delivery_mode==='resource_only'/);
+assert.match(widget, /setWidgetState/);
+assert.match(widget, /ui\/notifications\/tool-result/);
 
-console.log("PASS lossless file transfer: widget-free native exact file refs for image/video/ZIP, native image visibility, review resources, raw bytes, zstd, native file params");
+console.log("PASS lossless file transfer: native exact file refs plus upload_local_file-only HTTPS Library persistence, native image visibility, ZIP resource-only handling, raw bytes, zstd, native file params");

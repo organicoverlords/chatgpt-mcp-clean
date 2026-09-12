@@ -206,7 +206,7 @@ try {
     assert.deepEqual(byName.kill_process.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: false });
     assert.equal(byName.start_process?._meta?.["openai/outputTemplate"], undefined);
     assert.equal(byName.read_output?._meta?.["openai/outputTemplate"], undefined);
-    assert.equal(byName.upload_local_file?._meta?.["openai/outputTemplate"], undefined);
+    assert.equal(byName.upload_local_file?._meta?.["openai/outputTemplate"], FILE_TRANSFER_WIDGET_URI);
   }
 
   const historicalTemplateUris = [
