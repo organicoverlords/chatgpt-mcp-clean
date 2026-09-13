@@ -110,6 +110,10 @@ rejects("& 'C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\production-replacement
 rejects("uv run --with asyncssh python C:\\Users\\Example\\McpVpsEdge\\provision_edge_extras.py --caddy-only --backend-port 3012");
 rejects("Start-ScheduledTask -TaskName 'McpV3ProductionReplacementGuardian'");
 rejects("schtasks.exe /Run /TN McpV3ProductionReplacementCandidate");
+rejects(`Invoke-WebRequest -Uri 'http://127.0.0.1:2019/load' -Method Post -ContentType 'application/json' -Body '{}'`);
+rejects(`Invoke-RestMethod -Uri 'http://localhost:2019/config/apps/http/servers/srv0' -Method Patch -Body '{}'`);
+rejects(`curl.exe -X DELETE http://127.0.0.1:2019/config/apps/http`);
+rejects(`curl.exe --data '{}' http://localhost:2019/load`);
 
 const guardianSourcePath = "C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\production-replacement-guardian.ps1";
 const candidateSourcePath = "C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\production-replacement-candidate.ps1";
@@ -202,6 +206,14 @@ assert.match(benignTransportReference.stdout, /BENIGN_TRANSPORT_REFERENCE_ALLOWE
 const publicHealthReference = await run(`if ($false) { Invoke-RestMethod https://${productionVpsHost}/health }; Write-Output 'PUBLIC_HEALTH_REFERENCE_ALLOWED'`);
 assert.equal(publicHealthReference.exit_code, 0);
 assert.match(publicHealthReference.stdout, /PUBLIC_HEALTH_REFERENCE_ALLOWED/);
+
+const localCaddyAdminRead = await run(`if ($false) { Invoke-RestMethod -Uri 'http://127.0.0.1:2019/config/' -Method Get }; Write-Output 'LOCAL_CADDY_ADMIN_READ_ALLOWED'`);
+assert.equal(localCaddyAdminRead.exit_code, 0);
+assert.match(localCaddyAdminRead.stdout, /LOCAL_CADDY_ADMIN_READ_ALLOWED/);
+
+const localCaddyAdminMutationReference = await run(`Write-Output "Invoke-WebRequest -Uri 'http://127.0.0.1:2019/load' -Method Post"; Write-Output 'LOCAL_CADDY_ADMIN_MUTATION_REFERENCE_ALLOWED'`);
+assert.equal(localCaddyAdminMutationReference.exit_code, 0);
+assert.match(localCaddyAdminMutationReference.stdout, /LOCAL_CADDY_ADMIN_MUTATION_REFERENCE_ALLOWED/);
 
 const benign = await run("Write-Output '/etc/caddy/Caddyfile'; Write-Output 'http://127.0.0.1:3012/health'");
 assert.equal(benign.exit_code, 0);
