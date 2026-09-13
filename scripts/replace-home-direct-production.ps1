@@ -79,6 +79,44 @@ function Load-Caddy([string]$Config){
         if($LASTEXITCODE -ne 0){ throw 'Caddy admin load failed' }
     } finally { Remove-Item -LiteralPath $json -Force -ErrorAction SilentlyContinue }
 }
+
+function Get-OwnedCaddyPid {
+    $httpsOwners=@(Get-NetTCPConnection -State Listen -LocalPort 8443 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
+    $adminOwners=@(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort 2019 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
+    $shared=@($httpsOwners | Where-Object { $adminOwners -contains $_ } | Sort-Object -Unique)
+    if($shared.Count -ne 1){ throw "cannot positively identify one Caddy owner for HTTPS/admin listeners; shared_pids=$($shared -join ',')" }
+    $proc=Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f [int]$shared[0]) -ErrorAction Stop
+    if(-not $proc -or [string]$proc.Name -ne 'caddy.exe'){ throw "listener owner is not caddy.exe: pid=$($shared[0]) name=$([string]$proc.Name)" }
+    return [int]$shared[0]
+}
+function Assert-OriginalRoute([int]$ExpectedPort,[string]$ExpectedGeneration){
+    $text=& curl.exe -ksS --max-time 4 --resolve ("{0}:8443:127.0.0.1" -f $StableHost) ("https://{0}:8443/health" -f $StableHost)
+    if($LASTEXITCODE -ne 0){ throw 'original local HTTPS route probe failed' }
+    $h=$text | ConvertFrom-Json
+    if([int]$h.port -ne $ExpectedPort -or [string]$h.backend_generation -ne $ExpectedGeneration){ throw "original route proof mismatch: expected_port=$ExpectedPort actual_port=$([int]$h.port) expected_generation=$ExpectedGeneration actual_generation=$([string]$h.backend_generation)" }
+}
+function Restart-CaddyFromPersistentConfig([string]$OriginalConfig,[int]$ExpectedPort,[string]$ExpectedGeneration){
+    if([IO.File]::ReadAllText($CaddyConfigPath) -ne $OriginalConfig){
+        [IO.File]::WriteAllText($CaddyConfigPath,$OriginalConfig,(New-Object Text.UTF8Encoding($false)))
+    }
+    & $CaddyExe validate --config $CaddyConfigPath --adapter caddyfile | Out-Null
+    if($LASTEXITCODE -ne 0){ throw 'persistent rollback Caddy configuration validation failed' }
+    $ownedPid=Get-OwnedCaddyPid
+    Stop-Process -Id $ownedPid -Force -ErrorAction Stop
+    for($i=0;$i -lt 20;$i++){
+        $still=@(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.OwningProcess -eq $ownedPid -and $_.LocalPort -in 8443,2019 })
+        if($still.Count -eq 0){ break }
+        Start-Sleep -Milliseconds 100
+    }
+    & $CaddyExe start --config $CaddyConfigPath --adapter caddyfile | Out-Null
+    if($LASTEXITCODE -ne 0){ throw "persistent rollback Caddy start failed: exit=$LASTEXITCODE" }
+    $last=''
+    for($i=0;$i -lt 30;$i++){
+        try { Assert-OriginalRoute $ExpectedPort $ExpectedGeneration; return } catch { $last=$_.Exception.Message }
+        Start-Sleep -Milliseconds 200
+    }
+    throw "persistent rollback route did not recover: $last"
+}
 if($CandidatePort -eq $currentPort){ throw 'candidate must use an alternate port' }
 if(-not (Test-Path -LiteralPath $CaddyConfigPath -PathType Leaf)){ throw "Caddy config missing: $CaddyConfigPath" }
 if(-not (Test-Path -LiteralPath $CaddyExe -PathType Leaf)){ throw "Caddy executable missing: $CaddyExe" }
@@ -110,10 +148,22 @@ try {
     Move-Item -LiteralPath $temp -Destination $CaddyConfigPath -Force
     [pscustomobject]@{status='PASS';candidate_port=$CandidatePort;candidate_generation=$CandidateGeneration;old_port=$currentPort;rollback_port=$IndependentRollbackPort;public_port=[int]$public.port;public_generation=[string]$public.backend_generation;caddy_backup=$backup;old_backend_action='PRESERVE_FOR_ROLLBACK'} | ConvertTo-Json -Compress
 } catch {
+    $primaryError=$_.Exception
+    $rollbackError=$null
     try {
         $rollbackConfig=Join-Path $env:TEMP ("mcp-home-direct-rollback-{0}.Caddyfile" -f [guid]::NewGuid().ToString('N'))
         [IO.File]::WriteAllText($rollbackConfig,$original,(New-Object Text.UTF8Encoding($false)))
         try { Load-Caddy $rollbackConfig } finally { Remove-Item -LiteralPath $rollbackConfig -Force -ErrorAction SilentlyContinue }
-    } catch { }
-    throw
+        Assert-OriginalRoute $currentPort ([string]$current.backend_generation)
+    } catch {
+        $rollbackError=$_.Exception
+        try {
+            Restart-CaddyFromPersistentConfig $original $currentPort ([string]$current.backend_generation)
+            $rollbackError=$null
+        } catch {
+            $rollbackError=$_.Exception
+        }
+    }
+    if($rollbackError){ throw "home-direct cutover failed: $($primaryError.Message); independent persistent rollback also failed: $($rollbackError.Message)" }
+    throw $primaryError
 } finally { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }

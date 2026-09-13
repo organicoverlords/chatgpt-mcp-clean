@@ -49,6 +49,14 @@ try {
   assert.doesNotMatch(wrapperSource, /adapt --config \$Config --adapter caddyfile --pretty > \$json/, "Windows PowerShell redirection must not serialize adapted JSON as UTF-16");
   assert.doesNotMatch(wrapperSource, /Invoke-WebRequest[^\n]*127\.0\.0\.1:2019\/load/, "Caddy admin load must not use the Windows PowerShell Invoke-WebRequest path that throws NullReferenceException");
   assert.doesNotMatch(wrapperSource, /\$candidateText=\$original\.Replace\(\$needle,\$replacement\)/, "replacement must stay scoped to the target host block");
+  assert.match(wrapperSource, /function Get-OwnedCaddyPid/);
+  assert.match(wrapperSource, /LocalPort 8443/);
+  assert.match(wrapperSource, /LocalAddress '127\.0\.0\.1' -LocalPort 2019/);
+  assert.match(wrapperSource, /Stop-Process -Id \$ownedPid -Force/);
+  assert.doesNotMatch(wrapperSource, /Stop-Process -Name caddy/);
+  assert.match(wrapperSource, /Restart-CaddyFromPersistentConfig \$original \$currentPort/);
+  assert.match(wrapperSource, /Assert-OriginalRoute \$currentPort/);
+  assert.match(wrapperSource, /independent persistent rollback also failed/);
 
   console.log("PASS home_direct_current_port canonical_topology=true peer_target_host=true block_local_replace=true override_mismatch_fails_closed=true");
 } finally {
