@@ -258,7 +258,16 @@ assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v5.html", "wi
   }
 
   await expectToolFailureWithoutTransferMeta("read_output", { process_id: "definitely-missing-process-id" }, "missing read_output process");
+  await expectToolFailureWithoutTransferMeta("kill_process", { process_id: "00000000-0000-4000-8000-000000000000" }, "missing kill_process process");
   await expectToolFailureWithoutTransferMeta("upload_local_file", { path: join(dir, "missing-image.png") }, "missing upload_local_file path");
+  await expectToolFailureWithoutTransferMeta("download_chatgpt_file", { file: { download_url: "https://127.0.0.1/private", file_id: "file_bad", file_name: "bad.png", mime_type: "image/png" }, destination_path: join(dir, "bad.png") }, "blocked download_chatgpt_file URL");
+
+  const missingExecutable = await client.callTool({ name: "start_process", arguments: { executable: "__definitely_missing_executable_324__", args: [], wait_ms: 10000 } });
+  assert.notEqual(missingExecutable.isError, true, "spawn failure is a completed process outcome");
+  assert.equal(missingExecutable._meta, undefined, "spawn failure must not attach app/widget metadata");
+  assert.equal(missingExecutable.structuredContent?.execution_outcome, "error");
+  assert.equal(missingExecutable.structuredContent?.failure_diagnostic?.kind, "spawn_error");
+  assert.equal(missingExecutable.content.some((entry) => entry.type === "image" || entry.type === "resource_link"), false);
 
   const structuredNonzero = await client.callTool({ name: "start_process", arguments: { executable: process.execPath, args: ["-e", "process.exit(7)"], wait_ms: 10000 } });
   assert.notEqual(structuredNonzero.isError, true, "structured child nonzero exit is a process outcome, not an MCP transport error");

@@ -72,6 +72,13 @@ try {
   assert.equal(bounded.evidence_completeness, "bounded", "truncated capture must never be presented as complete evidence");
   assert.equal(bounded.retained_stdout_chars, 100000);
   assert.equal(bounded.stdout_truncated, true);
+  let boundedPersisted = telemetry.find((event) => event.event === "process_receipt_persisted" && event.process_id === boundedStarted.process_id);
+  const boundedTelemetryDeadline = Date.now() + 5_000;
+  while (!boundedPersisted && Date.now() < boundedTelemetryDeadline) {
+    await sleep(10);
+    boundedPersisted = telemetry.find((event) => event.event === "process_receipt_persisted" && event.process_id === boundedStarted.process_id);
+  }
+  assert.ok(boundedPersisted, "bounded receipt persistence must settle before archive teardown");
 
   // Simulate an upgrade from the legacy flat-only layout, then age the hot receipt past
   // its 30-minute handoff window. Constructor pruning must migrate before deleting.
