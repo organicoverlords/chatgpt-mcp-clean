@@ -248,6 +248,34 @@ assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v5.html", "wi
   assert.deepEqual(fileSchema?.required, ["download_url", "file_id"]);
   assert.deepEqual(Object.keys(fileSchema?.properties || {}).sort(), ["download_url", "file_id", "file_name", "mime_type"]);
 
+  async function expectToolFailureWithoutTransferMeta(name, args, label) {
+    const result = await client.callTool({ name, arguments: args });
+    assert.equal(result.isError, true, `${label} must be a tool-level failure`);
+    assert.equal(result._meta, undefined, `${label} must not attach result metadata`);
+    assert.equal(result.structuredContent, undefined, `${label} must not synthesize structured success content`);
+    assert.equal(result.content.some((entry) => entry.type === "image" || entry.type === "resource_link"), false, `${label} must not expose image/resource content`);
+    return result;
+  }
+
+  await expectToolFailureWithoutTransferMeta("read_output", { process_id: "definitely-missing-process-id" }, "missing read_output process");
+  await expectToolFailureWithoutTransferMeta("upload_local_file", { path: join(dir, "missing-image.png") }, "missing upload_local_file path");
+
+  const structuredNonzero = await client.callTool({ name: "start_process", arguments: { executable: process.execPath, args: ["-e", "process.exit(7)"], wait_ms: 10000 } });
+  assert.notEqual(structuredNonzero.isError, true, "structured child nonzero exit is a process outcome, not an MCP transport error");
+  assert.equal(structuredNonzero._meta, undefined, "structured child nonzero exit must not attach app/widget metadata");
+  assert.equal(structuredNonzero.structuredContent?.exit_code, 7);
+  assert.equal(structuredNonzero.content.some((entry) => entry.type === "image" || entry.type === "resource_link"), false);
+
+  const parserNonzero = await client.callTool({ name: "start_process", arguments: { script: "if (", language: "powershell", wait_ms: 10000 } });
+  assert.notEqual(parserNonzero.isError, true, "parser failure is reported as a completed process outcome");
+  assert.equal(parserNonzero._meta, undefined, "parser failure must not attach app/widget metadata");
+  assert.equal(parserNonzero.structuredContent?.execution_outcome, "nonzero_exit");
+  assert.equal(parserNonzero.structuredContent?.failure_diagnostic?.kind, "parser_error");
+  assert.equal(parserNonzero.content.some((entry) => entry.type === "image" || entry.type === "resource_link"), false);
+  const invalidStart = await client.callTool({ name: "start_process", arguments: { command: "" } });
+  assert.equal(invalidStart.isError, true, "schema-invalid start_process must be a tool-level failure");
+  assert.equal(invalidStart._meta, undefined, "schema-invalid start_process must not attach app/widget metadata");
+  assert.equal(invalidStart.content.some((entry) => entry.type === "image" || entry.type === "resource_link"), false, "schema-invalid start_process must not expose media content");
   assert.deepEqual(upload?.annotations, { readOnlyHint: false, destructiveHint: false, openWorldHint: false }, "local file export remains a closed-domain action");
 
   function exactFileReference(result, expectedName, expectedMime, expectedBytes) {
