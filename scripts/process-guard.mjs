@@ -375,3 +375,5 @@ try {
   rmSync(eightySlotDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 console.log("PASS process guard enforces duplicate reuse, per-caller live concurrency, uncapped shared-host defaults with optional explicit host caps, protected control-plane kill refusal, restart receipts, cross-clone control, fast-start collapse, compact no-change waits, nonblocking zero-wait, and bounded-wait behavior, and time-based receipt retention");
+// Standalone guard intentionally constructs long-lived mailbox managers; all assertions are complete here.
+process.exit(0);
