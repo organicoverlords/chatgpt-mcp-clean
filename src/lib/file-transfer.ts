@@ -11,9 +11,9 @@ import type { Request, Response as ExpressResponse } from "express";
 import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-export const FILE_TRANSFER_WIDGET_URI = "ui://process/file-transfer-v5.html";
+export const FILE_TRANSFER_WIDGET_URI = "ui://process/file-transfer-v7.html";
 const MCP_APP_MIME_TYPE = "text/html;profile=mcp-app";
-const LEGACY_FILE_TRANSFER_WIDGET_URIS = ["ui://process/file-transfer-v1.html", "ui://process/file-transfer-v4.html"] as const;
+const LEGACY_FILE_TRANSFER_WIDGET_URIS = ["ui://process/file-transfer-v1.html", "ui://process/file-transfer-v4.html", "ui://process/file-transfer-v5.html"] as const;
 const LOCAL_TRANSFER_TTL_MS = 5 * 60 * 1000;
 const LOCAL_RESOURCE_TTL_MS = 8 * 60 * 60 * 1000;
 const DEFAULT_MAX_FILE_BYTES = 512 * 1024 * 1024;
@@ -732,16 +732,20 @@ export function fileTransferWidgetHtml(): string {
 <style>:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color-scheme:light dark}body{margin:0;background:transparent}html,body{margin:0;padding:0;background:transparent;overflow:hidden}.status{box-sizing:border-box;height:28px;line-height:28px;padding:0 8px;font:12px/28px ui-monospace,SFMono-Regular,Consolas,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}</style>
 <body><div id="status" class="status">FILE_TRANSFER_READY</div>
 <script>
-const statusEl=document.getElementById('status');let started='';
+const statusEl=document.getElementById('status');let started='';let closing=false;
 function setStatus(v){statusEl.textContent=v;}
 function hex(bytes){return [...new Uint8Array(bytes)].map(b=>b.toString(16).padStart(2,'0')).join('');}
 function payload(result){return result?._meta?.file_transfer||null;}
+function persistedTransfer(){const s=window.openai?.widgetState;return s?.privateContent?.file_transfer||s?.modelContent?.file_transfer||s?.file_transfer||null;}
+async function closeWidget(){if(closing)return;closing=true;if(typeof window.openai?.requestClose==='function'){try{await window.openai.requestClose();}catch{closing=false;}}}
+async function closeIfCompleted(){const done=persistedTransfer();if(done?.status!=='ok')return false;setStatus('FILE_TRANSFER_OK '+(done.fileName||'file')+' LIBRARY '+(done.fileId||''));await closeWidget();return true;}
 async function render(result){
  const p=payload(result);if(!p||p.direction!=='local_to_chatgpt')return;
  const key=p.sha256+':'+(p.delivery_mode||'library_upload');if(started===key)return;started=key;
- if(p.delivery_mode==='review_resources'){setStatus('FILE_TRANSFER_OK review media exposed from '+p.file_name);return;}
- if(p.delivery_mode==='resource_only'){setStatus('FILE_TRANSFER_OK exact resource '+p.file_name);return;}
+ if(p.delivery_mode==='review_resources'){setStatus('FILE_TRANSFER_OK review media exposed from '+p.file_name);await closeWidget();return;}
+ if(p.delivery_mode==='resource_only'){setStatus('FILE_TRANSFER_OK exact resource '+p.file_name);await closeWidget();return;}
  if(p.delivery_mode!=='library_upload')return;
+ const done=persistedTransfer();if(done?.status==='ok'&&done?.sha256===p.sha256){setStatus('FILE_TRANSFER_OK '+p.file_name+' '+p.bytes+' bytes LIBRARY '+(done.fileId||''));await closeWidget();return;}
  if(!p.transfer_url)return;setStatus('FILE_TRANSFER_RUNNING '+p.file_name);
  try{
   if(typeof window.openai?.uploadFile!=='function')throw new Error('UPLOAD_FILE_UNAVAILABLE');
@@ -753,10 +757,13 @@ async function render(result){
   const fileId=out?.fileId||'';if(!fileId)throw new Error('UPLOAD_FILE_ID_MISSING');
   window.openai?.setWidgetState?.({modelContent:{file_transfer:{status:'ok',direction:'local_to_chatgpt',fileId,fileName:p.file_name,mimeType:p.mime_type,bytes:p.bytes,sha256:p.sha256,library:true}},privateContent:{file_transfer:{status:'ok',fileId,fileName:p.file_name,mimeType:p.mime_type,bytes:p.bytes,sha256:p.sha256,library:true}}});
   setStatus('FILE_TRANSFER_OK '+p.file_name+' '+p.bytes+' bytes LIBRARY '+fileId);
+  await closeWidget();
  }catch(e){setStatus('FILE_TRANSFER_ERROR '+String(e?.message||e));}
 }
 window.addEventListener('message',event=>{if(event.source!==window.parent)return;const m=event.data;if(m?.jsonrpc!=='2.0')return;if(m.id==='file-transfer-init'&&('result'in m||'error'in m)){if(!m.error)window.parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*');return;}if(m.method==='ui/notifications/tool-result')render(m.params||{});});
+window.addEventListener('openai:set_globals',()=>{void closeIfCompleted();});
+void closeIfCompleted();
 const envelope=window.openai?.toolResponseMetadata?.mcp_tool_result;if(envelope)render(envelope);
-window.parent.postMessage({jsonrpc:'2.0',id:'file-transfer-init',method:'ui/initialize',params:{protocolVersion:'2026-01-26',appInfo:{name:'process-file-transfer',version:'4.0.0'},appCapabilities:{availableDisplayModes:['inline']}}},'*');
+window.parent.postMessage({jsonrpc:'2.0',id:'file-transfer-init',method:'ui/initialize',params:{protocolVersion:'2026-01-26',appInfo:{name:'process-file-transfer',version:'5.0.0'},appCapabilities:{availableDisplayModes:['inline']}}},'*');
 </script></body></html>`;
 }
