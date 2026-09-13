@@ -649,6 +649,8 @@ function uploadToolMeta() {
     // before they fetch the ui:// resource and mount the widget.
     "ui/resourceUri": FILE_TRANSFER_WIDGET_URI,
     "openai/outputTemplate": FILE_TRANSFER_WIDGET_URI,
+    "openai/toolInvocation/invoking": "Preparing file…",
+    "openai/toolInvocation/invoked": "File ready",
   };
 }
 
@@ -689,6 +691,7 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
   server.registerTool(
     "upload_local_file",
     {
+      title: "Share local file",
       description: "Return one exact local file as a native MCP file resource and, for supported non-ZIP files, persist the same verified bytes into ChatGPT Library through the dedicated HTTPS file-transfer widget. ZIP files remain exact resource-only transfers. start_process/read_output never mount this widget.",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       _meta: uploadToolMeta(),
@@ -714,9 +717,14 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
   server.registerTool(
     "download_chatgpt_file",
     {
+      title: "Save ChatGPT file",
       description: "Save one exact ChatGPT file onto the MCP host without transcoding. Pass the ChatGPT file in file and an absolute destination_path; overwrite defaults to false. The server streams the temporary ChatGPT download URL directly to disk and returns byte count plus SHA-256.",
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-      _meta: { "openai/fileParams": ["file"] },
+      _meta: {
+        "openai/fileParams": ["file"],
+        "openai/toolInvocation/invoking": "Saving file…",
+        "openai/toolInvocation/invoked": "File saved",
+      },
       inputSchema: z.object({
         file: ChatgptFileSchema,
         destination_path: z.string().min(1),
