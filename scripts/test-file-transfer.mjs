@@ -228,7 +228,7 @@ try {
 const listedByName = Object.fromEntries(listed.tools.map((tool) => [tool.name, tool]));
 assert.ok(listedByName.upload_local_file.outputSchema, "upload tool must declare outputSchema for structuredContent");
 assert.ok(listedByName.download_chatgpt_file.outputSchema, "download tool must declare outputSchema for structuredContent");
-assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v4.html", "widget URI must be cache-busted after restoring HTTPS Library materialization only on upload_local_file");
+assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v5.html", "widget URI must be cache-busted after restoring HTTPS Library materialization only on upload_local_file");
   const start = listed.tools.find((tool) => tool.name === "start_process");
   const read = listed.tools.find((tool) => tool.name === "read_output");
   const upload = listed.tools.find((tool) => tool.name === "upload_local_file");
@@ -350,5 +350,8 @@ assert.match(widget, /delivery_mode==='review_resources'/);
 assert.match(widget, /delivery_mode==='resource_only'/);
 assert.match(widget, /setWidgetState/);
 assert.match(widget, /ui\/notifications\/tool-result/);
+assert.doesNotMatch(widget, /<img\b/i, "file-transfer widget must not duplicate native image rendering");
+assert.doesNotMatch(widget, /notifyIntrinsicHeight/, "file-transfer widget must not trigger chat reflow");
+assert.doesNotMatch(widget, /imageIds/, "file-transfer widget must not publish duplicate imageIds");
 
 console.log("PASS lossless file transfer: native exact file refs plus upload_local_file-only HTTPS Library persistence, native image visibility, ZIP resource-only handling, raw bytes, zstd, native file params");

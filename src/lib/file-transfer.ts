@@ -11,9 +11,9 @@ import type { Request, Response as ExpressResponse } from "express";
 import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-export const FILE_TRANSFER_WIDGET_URI = "ui://process/file-transfer-v4.html";
+export const FILE_TRANSFER_WIDGET_URI = "ui://process/file-transfer-v5.html";
 const MCP_APP_MIME_TYPE = "text/html;profile=mcp-app";
-const LEGACY_FILE_TRANSFER_WIDGET_URIS = ["ui://process/file-transfer-v1.html"] as const;
+const LEGACY_FILE_TRANSFER_WIDGET_URIS = ["ui://process/file-transfer-v1.html", "ui://process/file-transfer-v4.html"] as const;
 const LOCAL_EXPORT_TTL_MS = 5 * 60 * 1000;
 const MAX_NATIVE_IMAGE_BYTES = 20 * 1024 * 1024;
 const DEFAULT_MAX_FILE_BYTES = 512 * 1024 * 1024;
@@ -635,7 +635,7 @@ function widgetResourceMeta() {
   const connectDomains = origin ? [origin] : [];
   return {
     ui: { prefersBorder: false, csp: { connectDomains, resourceDomains: connectDomains } },
-    "openai/widgetDescription": "Exact-byte local file upload into ChatGPT/Library with inline media preview.",
+    "openai/widgetDescription": "Exact-byte local file persistence into ChatGPT Library.",
     "openai/widgetPrefersBorder": false,
     "openai/widgetCSP": { connect_domains: connectDomains, resource_domains: connectDomains },
   };
@@ -737,11 +737,11 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
 export function fileTransferWidgetHtml(): string {
   return `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color-scheme:light dark}body{margin:0;background:transparent}.image{display:none;max-width:100%;height:auto;border-radius:8px}.image.on{display:block}.status{padding:6px 8px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-word}</style>
-<body><img id="image" class="image" alt="Uploaded image"><div id="status" class="status">FILE_TRANSFER_READY</div>
+<style>:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color-scheme:light dark}body{margin:0;background:transparent}html,body{margin:0;padding:0;background:transparent;overflow:hidden}.status{box-sizing:border-box;height:28px;line-height:28px;padding:0 8px;font:12px/28px ui-monospace,SFMono-Regular,Consolas,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}</style>
+<body><div id="status" class="status">FILE_TRANSFER_READY</div>
 <script>
-const statusEl=document.getElementById('status');const imageEl=document.getElementById('image');let started='';
-function setStatus(v){statusEl.textContent=v;window.openai?.notifyIntrinsicHeight?.();}
+const statusEl=document.getElementById('status');let started='';
+function setStatus(v){statusEl.textContent=v;}
 function hex(bytes){return [...new Uint8Array(bytes)].map(b=>b.toString(16).padStart(2,'0')).join('');}
 function payload(result){return result?._meta?.file_transfer||null;}
 async function render(result){
@@ -757,10 +757,9 @@ async function render(result){
   const data=await r.arrayBuffer();if(data.byteLength!==p.bytes)throw new Error('BYTE_COUNT_MISMATCH');
   const digest=hex(await crypto.subtle.digest('SHA-256',data));if(digest!==p.sha256)throw new Error('SHA256_MISMATCH');
   const blob=new Blob([data],{type:p.mime_type});
-  if(p.mime_type.startsWith('image/')){imageEl.src=URL.createObjectURL(blob);imageEl.classList.add('on');window.openai?.notifyIntrinsicHeight?.();}
   const file=new File([blob],p.file_name,{type:p.mime_type});const out=await window.openai.uploadFile(file,{library:true});
   const fileId=out?.fileId||'';if(!fileId)throw new Error('UPLOAD_FILE_ID_MISSING');
-  window.openai?.setWidgetState?.({modelContent:{file_transfer:{status:'ok',direction:'local_to_chatgpt',fileId,fileName:p.file_name,mimeType:p.mime_type,bytes:p.bytes,sha256:p.sha256,library:true}},privateContent:{file_transfer:{status:'ok',fileId,fileName:p.file_name,mimeType:p.mime_type,bytes:p.bytes,sha256:p.sha256,library:true}},imageIds:p.mime_type.startsWith('image/')?[fileId]:[]});
+  window.openai?.setWidgetState?.({modelContent:{file_transfer:{status:'ok',direction:'local_to_chatgpt',fileId,fileName:p.file_name,mimeType:p.mime_type,bytes:p.bytes,sha256:p.sha256,library:true}},privateContent:{file_transfer:{status:'ok',fileId,fileName:p.file_name,mimeType:p.mime_type,bytes:p.bytes,sha256:p.sha256,library:true}}});
   setStatus('FILE_TRANSFER_OK '+p.file_name+' '+p.bytes+' bytes LIBRARY '+fileId);
  }catch(e){setStatus('FILE_TRANSFER_ERROR '+String(e?.message||e));}
 }
