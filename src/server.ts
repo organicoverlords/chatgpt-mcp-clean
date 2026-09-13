@@ -171,8 +171,13 @@ export function createServer(callerId: string): McpServer {
   server.registerTool(
     "start_process",
     {
+      title: "Run command",
       description: "Start a noninteractive PowerShell process. wait_ms controls how long the call may wait for completion before returning a process_id; the default is 750 ms and the supported range is 0 to 10 seconds.",
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+      _meta: {
+        "openai/toolInvocation/invoking": "Running command…",
+        "openai/toolInvocation/invoked": "Command returned",
+      },
       inputSchema: z.object({
         command: z.string().min(1),
         working_directory: z.string().optional(),
@@ -188,8 +193,13 @@ export function createServer(callerId: string): McpServer {
   server.registerTool(
     "read_output",
     {
+      title: "Check command",
       description: "Read a bounded tail of accumulated stdout and stderr for a process_id. wait_ms optionally sets the maximum wait for output or process exit; 0 is nonblocking. An unchanged timed wait returns no_change=true. elapsed_ms is process age. Each stream is limited to 32,000 characters.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      _meta: {
+        "openai/toolInvocation/invoking": "Checking command…",
+        "openai/toolInvocation/invoked": "Command checked",
+      },
       inputSchema: z.object({
         process_id: z.string().min(1),
         max_chars: z.number().int().min(1).max(32_000).optional(),
@@ -205,8 +215,13 @@ export function createServer(callerId: string): McpServer {
   server.registerTool(
     "kill_process",
     {
+      title: "Stop process",
       description: "Terminate a background process and its entire Windows process tree.",
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+      _meta: {
+        "openai/toolInvocation/invoking": "Stopping process…",
+        "openai/toolInvocation/invoked": "Process stop checked",
+      },
       inputSchema: z.object({ process_id: z.string().min(1) }),
       outputSchema: killProcessOutputSchema,
     },
