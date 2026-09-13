@@ -1,7 +1,10 @@
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { open, readdir, readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
-import { replayCurrentPreflightError, replayFailureDiagnostic, replayPrepareStartProcessCommand, replayRuntimeRepair } from '../dist/lib/process-manager.js';
+import { planCommandExecution } from '../dist/lib/command-execution-plan.js';
+import { replayCurrentPolicyError, replayCurrentPreflightError, replayFailureDiagnostic, replayPrepareStartProcessCommand, replayRuntimeRepair } from '../dist/lib/process-manager.js';
 
 const receiptRoot = process.env.MCP_PROCESS_RECEIPT_DIR
   || join(process.env.LOCALAPPDATA || '', 'ChatGPTMcpClean', 'minimal-connectors', 'shared-process-receipts');
@@ -15,6 +18,8 @@ const SAMPLE_MATCH_RAW = (process.env.MCP_REPLAY_SAMPLE_MATCH || '').trim();
 const SAMPLE_MATCH = SAMPLE_MATCH_RAW ? new RegExp(SAMPLE_MATCH_RAW, 'i') : undefined;
 const SAMPLE_LIMIT = Math.max(1, Math.min(100, Number(process.env.MCP_REPLAY_SAMPLE_LIMIT || 20)));
 const INCLUDE_CANDIDATE_IDS = (process.env.MCP_REPLAY_INCLUDE_CANDIDATE_IDS || '').trim() === '1';
+const HASH_SAMPLE_SEED = (process.env.MCP_REPLAY_HASH_SAMPLE_SEED || '').trim();
+const HASH_SAMPLE_LIMIT = Math.max(1, Math.min(500, Number(process.env.MCP_REPLAY_HASH_SAMPLE_LIMIT || 100)));
 
 function jsonString(text, key) {
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -57,7 +62,7 @@ function expectedFailure(row) {
   const reason = String(row.reason || row.preflight_reason || '');
   const action = String(row.action_class || '');
   if (row.kind === 'process_preflight_rejection') {
-    if (/production ingress mutation|protected MCP\/Commander|recursive (?:native search|enumeration)|drive-root|P3 build wait|swarm_route\.py route must run/i.test(reason)) return 'policy_or_safety_gate';
+    if (/production ingress mutation|protected MCP\/Commander|recursive (?:native search|enumeration)|drive-root|P3 build wait|swarm_route\.py route must run|interactive P3 build-slot|resident polling loops are blocked/i.test(reason)) return 'policy_or_safety_gate';
     return undefined;
   }
   if (/P3_PR_MERGE_BLOCKED|P3_GATE_NOT_SUCCESS|CONTRACT_GATE_NOT_SUCCESS|P3_PR_CONTRACT_GATE_MARKER_MISSING|Invoke-P3PrMergeGuard/i.test(output)) return 'domain_gate';
@@ -79,11 +84,20 @@ function expectedFailure(row) {
   if (/cmd: Can't find service: package/i.test(output)) return 'android_package_state';
   if (/\b(?:pending|queued)\b/i.test(output) && /github\.com.*actions/i.test(output)) return 'ci_pending';
   if (/report is not finalized|premature RUN_FINISHED|current report .*not a valid ISO/i.test(output)) return 'worker_report_contract';
-  if (/\b(?:FAILED \(|FAILED \[|AssertionError|tests? failed|FAILURES|FAIL:)/i.test(output) && /(?:pytest|unittest|test|assert)/i.test(`${command}\n${output}`)) return 'test_failure';
+  if (/\b(?:FAILED \(|FAILED \[|AssertionError|tests? failed|FAILURES|FAIL:)|=+ ERRORS =+|ERROR at (?:setup|teardown)|ERROR collecting/i.test(output) && /(?:pytest|unittest|test|assert)/i.test(`${command}\n${output}`)) return 'test_failure';
+  if (/\bgh\s+run\s+watch\b/i.test(command) && /--exit-status\b/i.test(command) && row.exit_code !== 0) return 'ci_failed';
+  if (/shell-mcp listening on http:\/\/127\.0\.0\.1:/i.test(output) && /(?:test|smoke|supertest|frozen)/i.test(command) && row.exit_code !== 0) return 'test_harness_failure';
+  if (/\[rejected\][^\r\n]*non-fast-forward/i.test(output) && /\bgit\s+fetch\b/i.test(command)) return 'remote_git_ref_state';
   if (/SWARM_EXEC_ROUTE/i.test(output) && /SWARM_EXEC_(?:OMEN_DONE|DONE)/i.test(output)) return 'routed_job_failure';
   if (/(?:^|[;&|\s])(?:rg(?:\.exe)?|git\s+grep|findstr(?:\.exe)?)\b/i.test(command) && !output.trim()) return 'no_match_probe';
   if (/\bgit\s+(?:diff\s+--quiet|merge-base\s+--is-ancestor)\b/i.test(command) && !output.trim()) return 'boolean_git_probe';
   if (/smoke|kill_tree/i.test(action) && /CHILD_PID=/i.test(output)) return 'intentional_kill_smoke';
+  if (row.exit_code === 1 && !output.trim() && (
+      /\bgit(?:\s+-C\s+(?:'[^']+'|"[^"]+"|\S+))?\s+grep\b/i.test(command)
+      || /(?:^|[;|&(\s])rg(?:\.exe)?\b/i.test(command)
+      || /\bSelect-String\b/i.test(command)
+      || /\bGet-NetTCPConnection\b/i.test(command)
+  )) return 'no_match_probe';
   return undefined;
 }
 function isLegacyShellSurfaceCoverage(coverage) {
@@ -109,6 +123,107 @@ function residualCandidate(row) {
   return undefined;
 }
 
+function pythonInlinePayloads(command) {
+  const prepared = replayPrepareStartProcessCommand(command);
+  const plan = planCommandExecution(prepared.command, process.env.MCP_POWERSHELL_EXE || 'pwsh');
+  const units = plan.steps?.length ? plan.steps : [plan];
+  const payloads = [];
+  for (const unit of units) {
+    const executable = String(unit.executable || '').replaceAll('/', '\\').split('\\').at(-1)?.toLowerCase() || '';
+    if (!['python', 'python.exe', 'python3', 'python3.exe', 'py', 'py.exe'].includes(executable)) continue;
+    const index = unit.args?.findIndex((value) => value === '-c') ?? -1;
+    if (index >= 0 && typeof unit.args[index + 1] === 'string') payloads.push(unit.args[index + 1]);
+  }
+  return payloads;
+}
+
+async function compilePythonInlineEvidence(rows) {
+  const candidates = [];
+  for (const row of rows) {
+    if (!isFailure(row) || row.command_truncated === true) continue;
+    const diagnostic = replayFailureDiagnostic(row);
+    if (diagnostic?.kind !== 'parser_error' || diagnostic.origin !== 'python' || diagnostic.boundary !== 'legacy_command') continue;
+    const payloads = pythonInlinePayloads(String(row.command || ''));
+    payloads.forEach((code, index) => candidates.push({ id: `${row.id}:${index}`, row_id: row.id, code }));
+  }
+  const evidence = new Map();
+  if (!candidates.length) return evidence;
+  const helper = [
+    'import json,sys',
+    'for line in sys.stdin:',
+    ' r=json.loads(line)',
+    ' try:',
+    '  compile(r["code"], "<string>", "exec"); o={"id":r["id"],"valid":True}',
+    ' except (SyntaxError,IndentationError,TabError) as e:',
+    '  o={"id":r["id"],"valid":False,"kind":type(e).__name__}',
+    ' print(json.dumps(o,separators=(",",":")))',
+  ].join('\n');
+  const child = spawn('python', ['-c', helper], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  let stdout = '', stderr = '';
+  child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { stdout += chunk; }); child.stderr.on('data', (chunk) => { stderr += chunk; });
+  for (const candidate of candidates) child.stdin.write(`${JSON.stringify({ id: candidate.id, code: candidate.code })}\n`);
+  child.stdin.end();
+  const exitCode = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
+  if (exitCode !== 0) throw new Error(`python syntax evidence helper failed exit=${exitCode}: ${stderr.slice(-2000)}`);
+  const byId = new Map(stdout.split(/\r?\n/).filter(Boolean).map((line) => { const result = JSON.parse(line); return [result.id, result]; }));
+  const grouped = new Map();
+  for (const candidate of candidates) {
+    if (!grouped.has(candidate.row_id)) grouped.set(candidate.row_id, []);
+    grouped.get(candidate.row_id).push(byId.get(candidate.id));
+  }
+  for (const [rowId, results] of grouped) evidence.set(rowId, {
+    payload_count: results.length,
+    all_valid: results.length > 0 && results.every((result) => result?.valid === true),
+    invalid_count: results.filter((result) => result?.valid === false).length,
+  });
+  return evidence;
+}
+
+async function parsePowerShellLegacyEvidence(rows) {
+  const candidates = [];
+  for (const row of rows) {
+    if (!isFailure(row) || row.command_truncated === true) continue;
+    const diagnostic = replayFailureDiagnostic(row);
+    const reason = String(row.reason || row.preflight_reason || '');
+    const runtimeParserFailure = diagnostic?.kind === 'parser_error' && diagnostic.origin === 'powershell' && diagnostic.boundary === 'legacy_command';
+    const legacySyntaxPreflight = row.kind === 'process_preflight_rejection' && /^(?:unbalanced PowerShell delimiter|capture foreach\/for\/while\/if\/switch statement output before piping it)/i.test(reason);
+    if (!runtimeParserFailure && !legacySyntaxPreflight) continue;
+    const prepared = replayPrepareStartProcessCommand(String(row.command || ''));
+    if (prepared.execution_mode !== 'powershell') continue;
+    candidates.push({ id: row.id, command: prepared.command });
+  }
+  const evidence = new Map();
+  if (!candidates.length) return evidence;
+  const helper = [
+    "$ErrorActionPreference='Stop'",
+    'while (($line=[Console]::In.ReadLine()) -ne $null) {',
+    ' $row=$line | ConvertFrom-Json',
+    ' $tokens=$null; $errors=$null',
+    ' [System.Management.Automation.Language.Parser]::ParseInput([string]$row.command,[ref]$tokens,[ref]$errors) | Out-Null',
+    ' $out=[pscustomobject]@{id=[string]$row.id;valid=(@($errors).Count -eq 0);error_ids=@($errors | ForEach-Object {[string]$_.ErrorId})}',
+    ' $out | ConvertTo-Json -Compress -Depth 4',
+    '}',
+  ].join('; ');
+  const powershellExe = process.env.MCP_POWERSHELL_EXE || 'pwsh';
+  const child = spawn(powershellExe, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', helper], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  let stdout = '', stderr = '';
+  child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { stdout += chunk; }); child.stderr.on('data', (chunk) => { stderr += chunk; });
+  for (const candidate of candidates) child.stdin.write(`${JSON.stringify(candidate)}\n`);
+  child.stdin.end();
+  const exitCode = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
+  if (exitCode !== 0) throw new Error(`powershell syntax evidence helper failed exit=${exitCode}: ${stderr.slice(-2000)}`);
+  for (const line of stdout.split(/\r?\n/).filter(Boolean)) {
+    const result = JSON.parse(line);
+    evidence.set(result.id, { valid: result.valid === true, error_ids: Array.isArray(result.error_ids) ? result.error_ids : [] });
+  }
+  return evidence;
+}
+
+let pythonInlineSyntaxEvidence = new Map();
+let powershellSyntaxEvidence = new Map();
+
 function currentCoverage(row) {
   const command = String(row.command || '');
   const stdout = String(row.stdout || '');
@@ -116,6 +231,16 @@ function currentCoverage(row) {
   const output = `${row.error || ''}\n${stderr}\n${stdout}`;
   const prepared = replayPrepareStartProcessCommand(command);
   if (prepared.rewrites.length) return { class: 'pre_spawn', reason: prepared.rewrites.join('+') };
+  const pythonSyntax = pythonInlineSyntaxEvidence.get(row.id);
+  if (pythonSyntax?.all_valid) return { class: 'pre_spawn', reason: 'python_inline_argv_parser_valid' };
+  const powershellSyntax = powershellSyntaxEvidence.get(row.id);
+  const rejectionReason = String(row.reason || row.preflight_reason || '');
+  if (row.kind === 'process_preflight_rejection'
+      && powershellSyntax?.valid
+      && /^(?:unbalanced PowerShell delimiter|capture foreach\/for\/while\/if\/switch statement output before piping it)/i.test(rejectionReason)
+      && replayCurrentPolicyError(command) === undefined) {
+    return { class: 'pre_spawn', reason: 'structured_script_bypasses_legacy_syntax_preflight' };
+  }
   if (row.kind === 'process_preflight_rejection' && replayCurrentPreflightError(command) === undefined) {
     return { class: 'pre_spawn', reason: 'current_preflight_accepts' };
   }
@@ -215,6 +340,8 @@ for (const directory of directories) {
 const started = Date.now();
 const rows = (await pool([...files.values()], (item) => readMeta(item.path, item.id))).filter(Boolean);
 rows.sort((a, b) => a.time_ms - b.time_ms);
+pythonInlineSyntaxEvidence = await compilePythonInlineEvidence(rows);
+powershellSyntaxEvidence = await parsePowerShellLegacyEvidence(rows);
 const byCaller = new Map();
 for (const row of rows) {
   if (!row.caller_id) continue;
@@ -245,9 +372,10 @@ for (const group of byCaller.values()) {
 
 const counts = new Map();
 const bump = (key) => counts.set(key, (counts.get(key) || 0) + 1);
-let failures = 0, expected = 0, coveredPreSpawn = 0, coveredRetry = 0, coveredLegacyShellSurface = 0, pairedFailures = 0, insufficientEvidence = 0, residual = 0;
+let failures = 0, expected = 0, coveredPreSpawn = 0, coveredRetry = 0, coveredLegacyShellSurface = 0, pairedFailures = 0, insufficientEvidence = 0, intrinsicSyntaxInvalid = 0, callerContractError = 0, residual = 0;
 const residualSamples = [];
 const matchedSamples = [];
+const hashSamplePool = [];
 const residualCandidates = new Map();
 const residualCandidateIds = new Map();
 const silentNonzeroByExitCode = new Map();
@@ -270,6 +398,24 @@ for (const row of rows) {
   if (row.command_truncated === true) {
     insufficientEvidence += 1;
     bump('insufficient_evidence:command_truncated');
+    continue;
+  }
+  const pythonSyntax = pythonInlineSyntaxEvidence.get(row.id);
+  const powershellSyntax = powershellSyntaxEvidence.get(row.id);
+  if (pythonSyntax && !pythonSyntax.all_valid) {
+    intrinsicSyntaxInvalid += 1;
+    bump('intrinsic_syntax_invalid:python');
+    continue;
+  }
+  if (powershellSyntax && !powershellSyntax.valid) {
+    intrinsicSyntaxInvalid += 1;
+    bump('intrinsic_syntax_invalid:powershell');
+    continue;
+  }
+  const diagnostic = replayFailureDiagnostic(row);
+  if (diagnostic?.kind === 'cli_usage') {
+    callerContractError += 1;
+    bump(`caller_contract_error:${diagnostic.origin}`);
     continue;
   }
   residual += 1;
@@ -295,9 +441,9 @@ for (const row of rows) {
   const first = `${row.error || ''}\n${row.stderr || ''}\n${row.stdout || ''}`.replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/).map((x) => x.trim()).find(Boolean) || String(row.reason || '<NO_OUTPUT>');
   bump(`residual:${first.replace(/[0-9a-f]{16,40}/ig, '<sha>').replace(/\d{4,}/g, '<n>').slice(0, 140)}`);
   if (residualSamples.length < 20 && paired.has(row.id)) residualSamples.push({ bad: row.command.slice(0, 220), good: paired.get(row.id).command.slice(0, 220), first: first.slice(0, 180) });
-  if (SAMPLE_MATCH && matchedSamples.length < SAMPLE_LIMIT && SAMPLE_MATCH.test(`${first}\n${row.error || ''}\n${row.stderr || ''}\n${row.stdout || ''}\n${row.command || ''}`)) {
-    matchedSamples.push({ id: row.id, kind: row.kind, exit_code: row.exit_code, signal: row.signal, execution_mode: row.execution_mode, execution_reason: row.execution_reason, command: row.command, first, stderr: String(row.stderr || '').slice(0, 2000), stdout: String(row.stdout || '').slice(0, 1200) });
-  }
+  const sampleRow = { id: row.id, kind: row.kind, exit_code: row.exit_code, signal: row.signal, execution_mode: row.execution_mode, execution_reason: row.execution_reason, command: row.command, first, stderr: String(row.stderr || '').slice(0, 2000), stdout: String(row.stdout || '').slice(0, 1200) };
+  if (SAMPLE_MATCH && matchedSamples.length < SAMPLE_LIMIT && SAMPLE_MATCH.test(`${first}\n${row.error || ''}\n${row.stderr || ''}\n${row.stdout || ''}\n${row.command || ''}`)) matchedSamples.push(sampleRow);
+  if (HASH_SAMPLE_SEED) hashSamplePool.push(sampleRow);
 }
 const avoidableCovered = coveredPreSpawn + coveredRetry;
 const resolvedOrExpected = expected + avoidableCovered;
@@ -321,10 +467,20 @@ const summary = {
   legacy_shell_surface_rate_pct_of_all_attempts: Number((100 * coveredLegacyShellSurface / Math.max(1, rows.length)).toFixed(3)),
   insufficient_evidence: insufficientEvidence,
   insufficient_evidence_share_of_raw_failures_pct: Number((100 * insufficientEvidence / Math.max(1, failures)).toFixed(3)),
+  intrinsic_syntax_invalid: intrinsicSyntaxInvalid,
+  intrinsic_syntax_invalid_share_of_raw_failures_pct: Number((100 * intrinsicSyntaxInvalid / Math.max(1, failures)).toFixed(3)),
+  caller_contract_error: callerContractError,
+  caller_contract_error_share_of_raw_failures_pct: Number((100 * callerContractError / Math.max(1, failures)).toFixed(3)),
   unclassified_or_avoidable_residual: residual,
   residual_rate_pct: Number((100 * residual / Math.max(1, rows.length)).toFixed(3)),
   failure_diagnostic_matches: failureDiagnosticMatches,
   failure_diagnostic_input_targets: failureDiagnosticInputTargets,
+  python_inline_syntax_evidence_rows: pythonInlineSyntaxEvidence.size,
+  python_inline_syntax_valid_rows: [...pythonInlineSyntaxEvidence.values()].filter((value) => value.all_valid).length,
+  python_inline_syntax_invalid_rows: [...pythonInlineSyntaxEvidence.values()].filter((value) => !value.all_valid).length,
+  powershell_syntax_evidence_rows: powershellSyntaxEvidence.size,
+  powershell_syntax_valid_rows: [...powershellSyntaxEvidence.values()].filter((value) => value.valid).length,
+  powershell_syntax_invalid_rows: [...powershellSyntaxEvidence.values()].filter((value) => !value.valid).length,
   silent_nonzero_by_exit_code: Object.fromEntries([...silentNonzeroByExitCode].sort((a, b) => b[1] - a[1])),
   silent_nonzero_by_execution_reason: Object.fromEntries([...silentNonzeroByExecutionReason].sort((a, b) => b[1] - a[1]).slice(0, 20)),
   residual_candidate_breakdown: Object.fromEntries([...residualCandidates].sort((a, b) => b[1] - a[1])),
@@ -342,4 +498,12 @@ if (residualSamples.length) {
 if (matchedSamples.length) {
   console.log(`\nMATCHED_RESIDUAL_SAMPLES pattern=${JSON.stringify(SAMPLE_MATCH_RAW)}`);
   for (const sample of matchedSamples) console.log(JSON.stringify(sample));
+}
+if (HASH_SAMPLE_SEED && hashSamplePool.length) {
+  const sampled = hashSamplePool
+    .map((sample) => ({ sample, rank: createHash('sha256').update(`${HASH_SAMPLE_SEED}:${sample.id}`).digest('hex') }))
+    .sort((a, b) => a.rank.localeCompare(b.rank))
+    .slice(0, HASH_SAMPLE_LIMIT);
+  console.log(`\nHASHED_RESIDUAL_SAMPLES seed=${JSON.stringify(HASH_SAMPLE_SEED)} limit=${HASH_SAMPLE_LIMIT}`);
+  for (const item of sampled) console.log(JSON.stringify(item.sample));
 }

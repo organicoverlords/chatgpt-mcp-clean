@@ -193,6 +193,11 @@ const structuredPs7PipelineChain = await manager.startScriptWithWait("powershell
 assert.equal(structuredPs7PipelineChain.exit_code, 0, JSON.stringify(structuredPs7PipelineChain));
 assert.match(structuredPs7PipelineChain.stdout, /PS7_OR_OK/, JSON.stringify(structuredPs7PipelineChain));
 
+const structuredNulScriptSource = "$literal='A" + "\u0000" + "B'; [Console]::Out.Write($literal.Length)";
+const structuredNulScript = await manager.startScriptWithWait("powershell", structuredNulScriptSource, process.cwd(), "caller_execution_plan_structured_nul_script", waitMs);
+assert.equal(structuredNulScript.exit_code, 0, JSON.stringify(structuredNulScript));
+assert.equal(structuredNulScript.stdout, "3", JSON.stringify(structuredNulScript));
+
 const structuredEnv = await manager.startStructuredWithWait(process.execPath, ["-e", "process.stdout.write(process.env.MCP_STRUCTURED_ENV_TEST || '')"], process.cwd(), "caller_execution_plan_structured_env", waitMs, undefined, undefined, undefined, { MCP_STRUCTURED_ENV_TEST: "ENV_OK" });
 assert.equal(structuredEnv.exit_code, 0, JSON.stringify(structuredEnv));
 assert.equal(structuredEnv.stdout, "ENV_OK", JSON.stringify(structuredEnv));
@@ -253,5 +258,5 @@ assert.equal(missingStructuredExecutable.error_code, "ENOENT", JSON.stringify(mi
 assert.deepEqual(missingStructuredExecutable.failure_diagnostic, { kind: "spawn_error", origin: "process", boundary: "spawn", code: "ENOENT" });
 assert.equal(missingStructuredExecutable.stdout, "");
 
-console.log("PASS command_execution_plan native_argv=true inline_code_opaque=true worker_execargv_sanitized=true native_sequence=true native_pipeline=true python_heredoc_stdin=true structured_stdin=true cmd_wrapper_elision=true explicit_shell_direct=true powershell_repairs=true structured_script_stdin=true powershell_fallback=true cmd_multiline_guard=true spawn_error_code=true structured_env=true nested_powershell_direct=true structured_cmd_composition=true structured_ps7_chain=true");
+console.log("PASS command_execution_plan native_argv=true inline_code_opaque=true worker_execargv_sanitized=true native_sequence=true native_pipeline=true python_heredoc_stdin=true structured_stdin=true cmd_wrapper_elision=true explicit_shell_direct=true powershell_repairs=true structured_script_stdin=true powershell_fallback=true cmd_multiline_guard=true spawn_error_code=true structured_env=true nested_powershell_direct=true structured_cmd_composition=true structured_ps7_chain=true structured_nul_script=true");
 

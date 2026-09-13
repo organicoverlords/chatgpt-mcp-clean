@@ -1499,6 +1499,11 @@ export function replayCurrentPreflightError(command: string): string | undefined
   return commandPreflightError(prepared.command, prepared.execution_mode);
 }
 
+export function replayCurrentPolicyError(command: string): string | undefined {
+  return commandPolicyError(command);
+}
+
+
 export class ProcessManager {
   private readonly processes = new Map<string, ProcessState>();
   private readonly outputCursors = new Map<string, OutputCursor>();
