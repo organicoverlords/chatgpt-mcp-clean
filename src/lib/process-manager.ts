@@ -11,10 +11,6 @@ const MAX_CAPTURE_CHARS = 100_000;
 // character read_output response. Keep the logical read/page contract at 32k; do not
 // reintroduce the stale August 6k transport assumption.
 const MAX_READ_CHARS = 32_000;
-// Keep ordinary ChatGPT transcript pages small by default. Callers that genuinely need a
-// larger slice can still opt in up to MAX_READ_CHARS, preserving the validated 32k
-// transport capability without paying that token cost on every process call.
-const DEFAULT_READ_CHARS = 8_000;
 const ADAPTIVE_READ_WAIT_MS = [2_000, 5_000, 10_000] as const;
 const MAX_COMMAND_REPORT_CHARS = 4_000;
 const COMPLETED_RETENTION_MS = 30 * 60 * 1000;
@@ -2074,7 +2070,7 @@ export class ProcessManager {
     processId: string,
     action: "read" | "kill",
     observer: TelemetryContext,
-    maxChars = DEFAULT_READ_CHARS,
+    maxChars = MAX_READ_CHARS,
     waitMs = 0,
   ): Promise<Record<string, unknown>> {
     if (!this.controlRequestDirectory || !this.controlResponseDirectory || !PROCESS_ID_PATTERN.test(processId)) {
@@ -2485,12 +2481,12 @@ export class ProcessManager {
     });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
-    if (!state || state.exitCode !== null) return this.read(started.process_id, DEFAULT_READ_CHARS);
+    if (!state || state.exitCode !== null) return this.read(started.process_id, MAX_READ_CHARS);
     await Promise.race([state.done, delay(boundedWaitMs)]);
-    return this.read(started.process_id, DEFAULT_READ_CHARS);
+    return this.read(started.process_id, MAX_READ_CHARS);
   }
 
-  read(processId: string, maxChars = DEFAULT_READ_CHARS, markRead = true): Record<string, unknown> {
+  read(processId: string, maxChars = MAX_READ_CHARS, markRead = true): Record<string, unknown> {
     this.pruneCompleted();
     const limit = Math.max(1, Math.min(maxChars, MAX_READ_CHARS));
     const state = this.processes.get(processId);
@@ -2574,9 +2570,9 @@ export class ProcessManager {
     emitTelemetry({ event: "process_wait_requested", action: "start_script", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
-    if (!state || state.exitCode !== null) return this.read(started.process_id, DEFAULT_READ_CHARS);
+    if (!state || state.exitCode !== null) return this.read(started.process_id, MAX_READ_CHARS);
     await Promise.race([state.done, delay(boundedWaitMs)]);
-    return this.read(started.process_id, DEFAULT_READ_CHARS);
+    return this.read(started.process_id, MAX_READ_CHARS);
   }
 
   async startStructuredWithWait(
@@ -2596,12 +2592,12 @@ export class ProcessManager {
     emitTelemetry({ event: "process_wait_requested", action: "start_structured", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
-    if (!state || state.exitCode !== null) return this.read(started.process_id, DEFAULT_READ_CHARS);
+    if (!state || state.exitCode !== null) return this.read(started.process_id, MAX_READ_CHARS);
     await Promise.race([state.done, delay(boundedWaitMs)]);
-    return this.read(started.process_id, DEFAULT_READ_CHARS);
+    return this.read(started.process_id, MAX_READ_CHARS);
   }
 
-  async readOutput(processId: string, maxChars = DEFAULT_READ_CHARS, waitMs?: number): Promise<Record<string, unknown>> {
+  async readOutput(processId: string, maxChars = MAX_READ_CHARS, waitMs?: number): Promise<Record<string, unknown>> {
     const observerCallerId = currentTelemetryContext().caller_id ?? "caller_unknown";
     const adaptiveKey = `${processId}:${observerCallerId}`;
     if (waitMs !== undefined) {
@@ -2624,7 +2620,7 @@ export class ProcessManager {
     }
   }
 
-  async readWithWait(processId: string, maxChars = DEFAULT_READ_CHARS, waitMs = 0): Promise<Record<string, unknown>> {
+  async readWithWait(processId: string, maxChars = MAX_READ_CHARS, waitMs = 0): Promise<Record<string, unknown>> {
     const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
     emitTelemetry({
       event: "process_wait_requested",

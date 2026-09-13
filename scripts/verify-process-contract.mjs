@@ -37,12 +37,7 @@ async function assertStructuredProcessResult(name, args) {
   const tool = server._registeredTools[name];
   const result = await tool.handler(args, {});
   assert.ok(result.structuredContent, `${name} must return structuredContent`);
-  const textSummary = JSON.parse(result.content[0].text);
-  assert.equal(textSummary.structured_content, true, `${name} text fallback must advertise structured content`);
-  assert.equal(textSummary.process_id, result.structuredContent.process_id, `${name} text fallback must preserve process identity`);
-  assert.ok(result.content[0].text.length < 1_500, `${name} text fallback must stay transcript-compact`);
-  assert.equal(Object.hasOwn(textSummary, "stdout"), false, `${name} text fallback must not duplicate stdout`);
-  assert.equal(Object.hasOwn(textSummary, "stderr"), false, `${name} text fallback must not duplicate stderr`);
+  assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent, `${name} text and structured results must stay compatible`);
   const parsed = await tool.outputSchema.safeParseAsync(result.structuredContent);
   assert.ok(parsed.success, `${name} structuredContent must validate against outputSchema: ${parsed.error || "unknown error"}`);
   return result.structuredContent;
