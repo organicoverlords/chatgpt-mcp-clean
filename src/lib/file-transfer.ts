@@ -619,11 +619,36 @@ function widgetResourceMeta() {
   };
 }
 
-function uploadToolMeta() {
+const LOCAL_FILE_TOOL_NAMES = ["upload_local_file", "read_local_file"] as const;
+type LocalFileToolName = typeof LOCAL_FILE_TOOL_NAMES[number];
+
+function localFileToolName(): LocalFileToolName {
+  const raw = (process.env.MCP_LOCAL_FILE_TOOL_NAME || "upload_local_file").trim();
+  if ((LOCAL_FILE_TOOL_NAMES as readonly string[]).includes(raw)) return raw as LocalFileToolName;
+  throw new Error(`MCP_LOCAL_FILE_TOOL_NAME must be one of ${LOCAL_FILE_TOOL_NAMES.join(",")}`);
+}
+
+function localFileToolPresentation(name: LocalFileToolName) {
+  if (name === "read_local_file") {
+    return {
+      title: "Read local file",
+      description: "Read one exact local file and return its unchanged bytes as a native MCP file resource for ChatGPT. This read-only tool does not modify local state, mount an app/widget, or invoke the Library upload API. Transfers preserve exact bytes and SHA-256; images remain compact lazy resources and ZIP review members remain exact resource links.",
+      invoking: "Reading file…",
+    };
+  }
+  return {
+    title: "Share local file",
+    description: "Return one exact local file as a native MCP file resource for ChatGPT to materialize as a native conversation file. This tool never mounts an app/widget or invokes the Library upload API. Transfers preserve exact bytes and SHA-256; images remain compact lazy resources and ZIP review members remain exact resource links.",
+    invoking: "Preparing file…",
+  };
+}
+
+function uploadToolMeta(name: LocalFileToolName) {
+  const presentation = localFileToolPresentation(name);
   return {
     // Invocation status text is presentation-only. Deliberately omit every
-    // widget/app binding key so upload_local_file stays a native MCP handoff.
-    "openai/toolInvocation/invoking": "Preparing file…",
+    // widget/app binding key so both supported local-file tool identities stay native MCP handoffs.
+    "openai/toolInvocation/invoking": presentation.invoking,
     "openai/toolInvocation/invoked": "File ready",
   };
 }
@@ -663,13 +688,15 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
     }));
   }
 
+  const localFileName = localFileToolName();
+  const localFilePresentation = localFileToolPresentation(localFileName);
   server.registerTool(
-    "upload_local_file",
+    localFileName,
     {
-      title: "Share local file",
-      description: "Return one exact local file as a native MCP file resource for ChatGPT to materialize as a native conversation file. This tool never mounts an app/widget or invokes the Library upload API. Transfers preserve exact bytes and SHA-256; images remain compact lazy resources and ZIP review members remain exact resource links.",
+      title: localFilePresentation.title,
+      description: localFilePresentation.description,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-      _meta: uploadToolMeta(),
+      _meta: uploadToolMeta(localFileName),
       inputSchema: z.object({ path: z.string().min(1) }),
       outputSchema: UploadLocalFileOutputSchema,
     },

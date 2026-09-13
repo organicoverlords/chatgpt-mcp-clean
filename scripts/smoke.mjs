@@ -10,9 +10,11 @@ const redirectUri = "https://chatgpt.com/connector/oauth/smoke";
 const resource = `${publicOrigin}/mcp`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const toolProfile = (process.env.MCP_TOOL_PROFILE || "process").trim().toLowerCase();
+const expectedLocalFileTool = (process.env.MCP_EXPECTED_LOCAL_FILE_TOOL_NAME || "upload_local_file").trim();
+if (!["upload_local_file", "read_local_file"].includes(expectedLocalFileTool)) throw new Error(`invalid MCP_EXPECTED_LOCAL_FILE_TOOL_NAME=${expectedLocalFileTool}`);
 const expectedTools = toolProfile === "process"
-  ? ["download_chatgpt_file", "kill_process", "read_output", "start_process", "upload_local_file"]
-  : ["busy_claim", "busy_list", "busy_release", "download_chatgpt_file", "kill_process", "read_output", "start_process", "upload_local_file", "view_image"];
+  ? ["download_chatgpt_file", "kill_process", "read_output", "start_process", expectedLocalFileTool]
+  : ["busy_claim", "busy_list", "busy_release", "download_chatgpt_file", "kill_process", "read_output", "start_process", expectedLocalFileTool, "view_image"];
 
 async function jsonFetch(url, options = {}) {
   const response = await fetch(url, options);
@@ -226,8 +228,8 @@ const missingReadOverHttp = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.n
 assertToolErrorWithoutAppMeta(missingReadOverHttp, "missing read_output over HTTP");
 const missingKillOverHttp = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: "kill_process", arguments: { process_id: "00000000-0000-4000-8000-000000000000" } } });
 assertToolErrorWithoutAppMeta(missingKillOverHttp, "missing kill_process over HTTP");
-const missingUploadOverHttp = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: "upload_local_file", arguments: { path: "C:\\definitely-missing\\image.png" } } });
-assertToolErrorWithoutAppMeta(missingUploadOverHttp, "missing upload_local_file over HTTP");
+const missingUploadOverHttp = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: expectedLocalFileTool, arguments: { path: "C:\\definitely-missing\\image.png" } } });
+assertToolErrorWithoutAppMeta(missingUploadOverHttp, `missing ${expectedLocalFileTool} over HTTP`);
 
 const structuredTransport = await callTool(sessionA, "start_process", {
   executable: process.execPath,

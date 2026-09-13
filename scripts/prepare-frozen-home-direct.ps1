@@ -9,6 +9,7 @@ param(
     [string]$PublicOrigin = 'https://91-159-12-133.sslip.io',
     [string]$OAuthStoreRelative = 'home-direct-test\\oauth.json',
     [string]$ReceiptStoreRelative = 'shared-process-receipts',
+    [ValidateSet('upload_local_file','read_local_file')][string]$LocalFileToolName = 'upload_local_file',
     [string]$CurrentTopologyPath = 'C:\Users\Lauri\Desktop\vault\04 Operating Contracts\mcp-current-topology.json',
     [switch]$ExplicitUserAuthorization,
     [switch]$Plan
@@ -49,7 +50,7 @@ if(Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue){ Fail "c
 if(Test-Path -LiteralPath $DeploymentRoot){ Fail "deployment root already exists: $DeploymentRoot" }
 $planResult=[ordered]@{
     status='PLAN'; commit=$commit; source_root=$root; deployment_root=$DeploymentRoot; runtime_root=(Join-Path $DeploymentRoot 'runtime');
-    task_name=$TaskName; port=$Port; instance_id=$InstanceId; public_origin=$PublicOrigin; oauth_store_relative=$OAuthStoreRelative; receipt_store_relative=$ReceiptStoreRelative;
+    task_name=$TaskName; port=$Port; instance_id=$InstanceId; public_origin=$PublicOrigin; oauth_store_relative=$OAuthStoreRelative; receipt_store_relative=$ReceiptStoreRelative; local_file_tool_name=$LocalFileToolName;
     current_serving_listen=[string]$topology.serving.backend.listen; current_frozen_root=$currentFrozen; route_mutation=$false
 }
 if($Plan){ $planResult | ConvertTo-Json -Depth 5 -Compress; exit 0 }
@@ -89,7 +90,7 @@ try {
         schema='mcp-frozen-deployment.v1'; frozen_at=[DateTimeOffset]::UtcNow.ToString('o'); source_repo='organicoverlords/chatgpt-mcp-clean'; canonical_branch='master'; merge_commit=$commit;
         runtime_root=(Join-Path $DeploymentRoot 'runtime'); runtime_tracked_clean=$true; hashes=[ordered]@{dist_index_sha256=$hashes.dist_index_sha256;dist_server_sha256=$hashes.dist_server_sha256};
         routes=[ordered]@{stable=[ordered]@{public_origin=$PublicOrigin;port=$Port;instance=$InstanceId;oauth_store=(Join-Path $env:LOCALAPPDATA ("ChatGPTMcpClean\\minimal-connectors\\$OAuthStoreRelative"));rollback_port=([int](([string]$topology.recovery.stable_rollback.listen -split ':')[-1]));rollback_instance=[string]$topology.recovery.stable_rollback.instance}};
-        tool_contract=@('start_process','read_output','kill_process','upload_local_file','download_chatgpt_file'); self_contained_runtime=(Join-Path $DeploymentRoot 'runtime'); runtime_commit=$commit;
+        tool_contract=@('start_process','read_output','kill_process',$LocalFileToolName,'download_chatgpt_file'); local_file_tool_name=$LocalFileToolName; self_contained_runtime=(Join-Path $DeploymentRoot 'runtime'); runtime_commit=$commit;
         process_manager_sha256=$hashes.process_manager_sha256; package_lock_sha256=$hashes.package_lock_sha256
     }
     $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $staging 'deployment.json') -Encoding utf8
@@ -108,7 +109,7 @@ Assert-Hash 'dist\\server.js' ([string]`$m.hashes.dist_server_sha256)
 Assert-Hash 'dist\\lib\\process-manager.js' ([string]`$m.process_manager_sha256)
 Assert-Hash 'package-lock.json' ([string]`$m.package_lock_sha256)
 `$owner=(Get-Content -LiteralPath (Join-Path `$root 'owner-login.txt') -Raw).Trim();if([string]::IsNullOrWhiteSpace(`$owner)){throw 'protected owner-login identity empty'}
-`$env:TAILSCALE_OWNER_LOGIN=`$owner;`$env:MCP_OWNER_AUTH_ORIGIN='';`$env:MCP_OWNER_AUTH_MODE='local-edge'
+`$env:TAILSCALE_OWNER_LOGIN=`$owner;`$env:MCP_OWNER_AUTH_ORIGIN='';`$env:MCP_OWNER_AUTH_MODE='local-edge';`$env:MCP_LOCAL_FILE_TOOL_NAME='$LocalFileToolName'
 `$stateRoot=Join-Path `$env:LOCALAPPDATA 'ChatGPTMcpClean\\minimal-connectors';`$oauth=Join-Path `$stateRoot '$OAuthStoreRelative';`$receipts=Join-Path `$stateRoot '$ReceiptStoreRelative'
 & (Join-Path `$runtime 'scripts\\start-minimal-clone.ps1') -InstanceId '$InstanceId' -Port $Port -PublicOrigin '$PublicOrigin' -StateRoot `$stateRoot -OAuthStorePath `$oauth -SharedReceiptDirectory `$receipts -SkipBuild -RestartOnUnexpectedExit -RestartBackoffSeconds 2 -RestartLimit 0
 exit `$LASTEXITCODE
