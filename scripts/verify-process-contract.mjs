@@ -11,6 +11,9 @@ delete process.env.MCP_TOOL_PROFILE;
 process.env.MCP_VISUAL_PROOF_UI = "1";
 process.env.MCP_VISUAL_PROOF_REVIEW = "1";
 process.env.MCP_PROCESS_RECEIPT_DIR = resolve(".state/process-contract-verifier-receipts");
+const localFileToolName = (process.env.MCP_LOCAL_FILE_TOOL_NAME || "upload_local_file").trim();
+assert.ok(["upload_local_file", "read_local_file"].includes(localFileToolName), `unsupported MCP_LOCAL_FILE_TOOL_NAME=${localFileToolName}`);
+const readLocalFileDescription = "Read one exact local file and return its unchanged bytes as a native MCP file resource for ChatGPT. This read-only tool does not modify local state, mount an app/widget, or invoke the Library upload API. Transfers preserve exact bytes and SHA-256; images remain compact lazy resources and ZIP review members remain exact resource links.";
 const { createServer } = await import("../dist/server.js");
 const { registerOptionalVisualProofTools } = await import("../dist/lib/visual-proof-registration.js");
 const server = createServer("contract-verifier");
@@ -23,7 +26,9 @@ const expectedInvocationUi = {
   start_process: { title: "Run command", invoking: "Running command…", invoked: "Command returned" },
   read_output: { title: "Check command", invoking: "Checking command…", invoked: "Command checked" },
   kill_process: { title: "Stop process", invoking: "Stopping process…", invoked: "Process stop checked" },
-  upload_local_file: { title: "Share local file", invoking: "Preparing file…", invoked: "File ready" },
+  [localFileToolName]: localFileToolName === "read_local_file"
+    ? { title: "Read local file", invoking: "Reading file…", invoked: "File ready" }
+    : { title: "Share local file", invoking: "Preparing file…", invoked: "File ready" },
   download_chatgpt_file: { title: "Save ChatGPT file", invoking: "Saving file…", invoked: "File saved" },
 };
 for (const [name, expected] of Object.entries(expectedInvocationUi)) {
@@ -39,7 +44,7 @@ for (const name of structuredProcessToolNames) {
   assert.ok(server._registeredTools[name]?.outputSchema, `${name} must declare outputSchema`);
 }
 
-for (const name of ["start_process", "read_output", "upload_local_file"]) {
+for (const name of ["start_process", "read_output", localFileToolName]) {
   const meta = server._registeredTools[name]?._meta;
   assert.equal(meta?.["openai/outputTemplate"], undefined, `${name} must not mount an app/widget template`);
   assert.equal(meta?.["ui/resourceUri"], undefined, `${name} must not advertise an app resource URI`);
@@ -86,13 +91,18 @@ const killStructured = await assertStructuredProcessResult("kill_process", { pro
 assert.equal(killStructured.already_exited, true, "kill_process structured regression probe should exercise already-exited variant");
 const contractPath = resolve("config/process-tool-contract.json");
 const contractBytes = readFileSync(contractPath);
-const expectedTools = JSON.parse(contractBytes.toString("utf8"));
+const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
 const acceptedContractSha256 = "388cf4d2c672c027b380733c613799e58f6a2ee9b99467eaf0d384843d773af6";
-const actualContractSha256 = createHash("sha256").update(JSON.stringify(expectedTools)).digest("hex");
+const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
+const expectedTools = baseExpectedTools
+  .map((tool) => localFileToolName === "read_local_file" && tool.name === "upload_local_file"
+    ? { ...tool, name: "read_local_file", description: readLocalFileDescription }
+    : tool)
+  .sort((a, b) => a.name.localeCompare(b.name));
 assert.deepEqual(actualTools, expectedTools, "connector tool contract changed; do not replace a stable connector identity without an explicit contract migration");
 const serverBytes = readFileSync(resolve("dist/server.js"));
 const actualHash = createHash("sha256").update(serverBytes).digest("hex");

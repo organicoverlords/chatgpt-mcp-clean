@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 
 process.env.MCP_TOOL_PROFILE = "process";
 process.env.MCP_PROCESS_RECEIPT_DIR = ".state/local-file-tool-alias-receipts";
@@ -23,4 +24,12 @@ assert.equal(defaultServer._registeredTools.read_local_file, undefined, "default
 process.env.MCP_LOCAL_FILE_TOOL_NAME = "bogus";
 assert.throws(() => createServer("invalid-test"), /MCP_LOCAL_FILE_TOOL_NAME must be one of upload_local_file,read_local_file/);
 delete process.env.MCP_LOCAL_FILE_TOOL_NAME;
-console.log("PASS local_file_tool_alias default=upload_local_file isolated=read_local_file widget_free=true read_only=true");
+const aliasVerifier = spawnSync(process.execPath, ["scripts/verify-process-contract.mjs"], {
+  cwd: process.cwd(),
+  env: { ...process.env, MCP_LOCAL_FILE_TOOL_NAME: "read_local_file" },
+  encoding: "utf8",
+});
+assert.equal(aliasVerifier.status, 0, `read_local_file frozen contract verifier must pass: ${aliasVerifier.stderr || aliasVerifier.stdout}`);
+assert.match(aliasVerifier.stdout, /tools=.*read_local_file/, "alias verifier must report read_local_file in the frozen tool surface");
+
+console.log("PASS local_file_tool_alias default=upload_local_file isolated=read_local_file widget_free=true read_only=true verifier_alias=true");
