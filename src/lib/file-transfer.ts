@@ -14,7 +14,8 @@ import { z } from "zod";
 export const FILE_TRANSFER_WIDGET_URI = "ui://process/file-transfer-v5.html";
 const MCP_APP_MIME_TYPE = "text/html;profile=mcp-app";
 const LEGACY_FILE_TRANSFER_WIDGET_URIS = ["ui://process/file-transfer-v1.html", "ui://process/file-transfer-v4.html"] as const;
-const LOCAL_EXPORT_TTL_MS = 5 * 60 * 1000;
+const LOCAL_TRANSFER_TTL_MS = 5 * 60 * 1000;
+const LOCAL_RESOURCE_TTL_MS = 8 * 60 * 60 * 1000;
 const MAX_NATIVE_IMAGE_BYTES = 20 * 1024 * 1024;
 const DEFAULT_MAX_FILE_BYTES = 512 * 1024 * 1024;
 const ZSTD_MIN_BYTES = 64 * 1024;
@@ -94,7 +95,8 @@ export type LocalFileTransfer = {
   bytes: number;
   sha256: string;
   mtime_ms: number;
-  expires_at: number;
+  transfer_expires_at: number;
+  resource_expires_at: number;
 };
 
 type LocalImageResource = {
@@ -106,7 +108,7 @@ type LocalImageResource = {
   mime_type: string;
   bytes: number;
   sha256: string;
-  expires_at: number;
+  resource_expires_at: number;
   data_offset?: number;
 };
 
@@ -126,9 +128,9 @@ function maxFileBytes(): number {
   return Number.isSafeInteger(configured) && configured > 0 ? configured : DEFAULT_MAX_FILE_BYTES;
 }
 
-function cleanupExpired(now = Date.now()): void {
-  for (const [token, item] of localExports) if (item.expires_at <= now) localExports.delete(token);
-  for (const [token, item] of localImageResources) if (item.expires_at <= now) localImageResources.delete(token);
+function cleanupExpiredResources(now = Date.now()): void {
+  for (const [token, item] of localExports) if (item.resource_expires_at <= now) localExports.delete(token);
+  for (const [token, item] of localImageResources) if (item.resource_expires_at <= now) localImageResources.delete(token);
 }
 
 function mimeTypeFor(path: string): string {
@@ -174,7 +176,7 @@ function localTransferUrl(token: string): string {
 }
 
 export async function prepareLocalFileTransfer(path: string): Promise<LocalFileTransfer> {
-  cleanupExpired();
+  cleanupExpiredResources();
   if (!isAbsolute(path)) throw new Error("upload_local_file path must be absolute");
   const info = await stat(path);
   const maxBytes = maxFileBytes();
@@ -187,13 +189,14 @@ export async function prepareLocalFileTransfer(path: string): Promise<LocalFileT
     bytes: info.size,
     sha256: await sha256File(path),
     mtime_ms: info.mtimeMs,
-    expires_at: Date.now() + LOCAL_EXPORT_TTL_MS,
+    transfer_expires_at: Date.now() + LOCAL_TRANSFER_TTL_MS,
+    resource_expires_at: Date.now() + LOCAL_RESOURCE_TTL_MS,
   };
   localExports.set(item.token, item);
   if (item.mime_type.startsWith("image/")) {
     localImageResources.set(item.token, {
       token: item.token, source_path: item.path, source_bytes: item.bytes, source_mtime_ms: item.mtime_ms,
-      file_name: item.file_name, mime_type: item.mime_type, bytes: item.bytes, sha256: item.sha256, expires_at: item.expires_at,
+      file_name: item.file_name, mime_type: item.mime_type, bytes: item.bytes, sha256: item.sha256, resource_expires_at: item.resource_expires_at,
     });
   }
   return item;
@@ -433,7 +436,7 @@ async function visualReviewZipResources(item: LocalFileTransfer): Promise<LocalI
       mime_type: mimeType,
       bytes,
       sha256,
-      expires_at: item.expires_at,
+      resource_expires_at: item.resource_expires_at,
       data_offset: await storedZipDataOffset(item.path, item.bytes, entry),
     };
     localImageResources.set(token, resource);
@@ -444,7 +447,7 @@ async function visualReviewZipResources(item: LocalFileTransfer): Promise<LocalI
 }
 
 async function localFileResourceContents(uri: string) {
-  cleanupExpired();
+  cleanupExpiredResources();
   const parsed = new URL(uri);
   if (parsed.protocol !== "mcp-upload:" || parsed.hostname !== "file-transfer") throw new Error("unsupported file-transfer resource URI");
   const token = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
@@ -487,10 +490,10 @@ function zstdStream() {
 }
 
 export async function serveLocalFileTransfer(req: Request, res: ExpressResponse): Promise<void> {
-  cleanupExpired();
+  cleanupExpiredResources();
   const token = typeof req.query.token === "string" ? req.query.token : "";
   const item = token ? localExports.get(token) : undefined;
-  if (!item) {
+  if (!item || item.transfer_expires_at <= Date.now()) {
     res.status(404).send("File transfer token is invalid or expired");
     return;
   }
@@ -522,9 +525,9 @@ export async function serveLocalFileTransfer(req: Request, res: ExpressResponse)
     res.setHeader("X-File-Transfer-Encoding", "identity");
     await pipeline(createReadStream(item.path), res);
   }
-  // Keep the bounded capability replayable until its short TTL expires. ChatGPT can
-  // remount the MCP app after a successful upload; that remount receives the same
-  // tool result and must be able to fetch the exact immutable bytes again.
+  // The browser-facing transfer capability stays short-lived. The authenticated MCP
+  // resource has a separate longer lifetime so Chat/Work can revisit the exact bytes
+  // without re-uploading or materializing the image for each inspection.
 }
 
 function isPrivateIpv4(address: string): boolean {

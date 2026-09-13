@@ -196,6 +196,10 @@ assert.equal(replay.statusCode, 200, "upload capability must survive a normal wi
 assert.equal(replay.headers.get("x-file-sha256"), mediaItem.sha256, "replayed upload must preserve the prepared hash");
 assert.equal(replay.body.compare(media), 0, "replayed upload must preserve exact bytes");
 
+mediaItem.transfer_expires_at = Date.now() - 1;
+const expiredTransfer = await serve(mediaItem, "identity");
+assert.equal(expiredTransfer.statusCode, 404, "browser transfer capability must expire independently of the MCP resource");
+
 const incoming = randomBytes(1024 * 1024 + 17);
 const destination = join(dir, "received", "generated.glb");
 let fetchCalls = 0;
@@ -244,6 +248,9 @@ assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v5.html", "wi
   assert.equal(upload?._meta?.["openai/outputTemplate"], FILE_TRANSFER_WIDGET_URI, "upload_local_file alone mounts the HTTPS Library widget");
   assert.equal(download?._meta?.["openai/outputTemplate"], undefined, "download_chatgpt_file should use native file params, not a widget");
   assert.deepEqual(download?._meta?.["openai/fileParams"], ["file"]);
+  const expiredTransferResource = await client.readResource({ uri: `mcp-upload://file-transfer/${mediaItem.token}` });
+  assert.equal(Buffer.from(expiredTransferResource.contents[0]?.blob || "", "base64").compare(media), 0, "expired browser transfer must not invalidate the authenticated MCP resource");
+
   const fileSchema = download?.inputSchema?.properties?.file;
   assert.deepEqual(fileSchema?.required, ["download_url", "file_id"]);
   assert.deepEqual(Object.keys(fileSchema?.properties || {}).sort(), ["download_url", "file_id", "file_name", "mime_type"]);
