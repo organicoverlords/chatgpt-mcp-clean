@@ -279,6 +279,12 @@ assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v5.html", "wi
   const originalBlob = originalResource.contents[0]?.blob;
   assert.ok(originalBlob, "image resource must expose original bytes");
   assert.equal(Buffer.from(originalBlob, "base64").compare(png), 0, "model vision resource must be byte-for-byte the original image, not a thumbnail");
+  for (let pass = 0; pass < 32; pass += 1) {
+    const repeated = await client.readResource({ uri: imageFileRef.uri });
+    const repeatedBlob = repeated.contents[0]?.blob;
+    assert.ok(repeatedBlob, `repeat image resource read ${pass} must remain available without rematerialization`);
+    assert.equal(Buffer.from(repeatedBlob, "base64").compare(png), 0, `repeat image resource read ${pass} must preserve exact full-resolution bytes`);
+  }
 
   const reviewZipUpload = await client.callTool({ name: "upload_local_file", arguments: { path: reviewZipPath } });
   exactFileReference(reviewZipUpload, "visual-review_two-images.zip", "application/zip", reviewZip.length);
