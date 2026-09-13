@@ -607,7 +607,16 @@ function mcpProductionMutationError(command: string, code: string): string | und
     || destructivePowerShellFileMutation
   );
   const reloadsCaddy = /\b(?:systemctl\s+(?:reload|restart)\s+caddy|caddy\s+(?:reload|stop))\b/i.test(command);
-  if (mutatesCaddy || reloadsCaddy) return productionIngressError;
+  const localCaddyAdminReference = /(?:https?:\/\/)?(?:127[.]0[.]0[.]1|localhost|\[::1\]):2019(?:\/|\b)/i.test(command);
+  const mutatesLocalCaddyAdmin = localCaddyAdminReference && (
+    (/\b(?:Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b/i.test(code)
+      && /(?:^|\s)-Method\s+(?:Post|Put|Patch|Delete)\b/i.test(command))
+    || (/\bcurl(?:[.]exe)?\b/i.test(code) && (
+      /(?:^|\s)(?:-X|--request)\s+(?:POST|PUT|PATCH|DELETE)\b/i.test(command)
+      || /(?:^|\s)(?:-d|--data(?:-raw|-binary|-urlencode)?|--json|--upload-file|-T)(?:\s|=)/i.test(command)
+    ))
+  );
+  if (mutatesCaddy || reloadsCaddy || mutatesLocalCaddyAdmin) return productionIngressError;
 
   const mutatesProductionPortProxy = /\bnetsh(?:\.exe)?\s+interface\s+portproxy\s+(?:add|set|delete|reset)\b/i.test(command)
     && /(?:10\.203\.0\.2|(?:listen|connect)port\s*=\s*3011|\b3011\b)/i.test(command);
