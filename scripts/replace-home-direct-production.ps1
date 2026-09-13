@@ -118,6 +118,33 @@ function Load-Caddy([string]$Config){
         if($LASTEXITCODE -ne 0){ throw 'Caddy admin load failed' }
     } finally { Remove-Item -LiteralPath $json -Force -ErrorAction SilentlyContinue }
 }
+function Wait-CandidateLocalRoute([string]$HostName,[int]$ExpectedPort,[string]$ExpectedGeneration){
+    $last='not attempted'
+    for($i=0;$i -lt 40;$i++){
+        $text=& curl.exe -ksS --max-time 2 --resolve ("{0}:8443:127.0.0.1" -f $HostName) ("https://{0}:8443/health" -f $HostName) 2>$null
+        if($LASTEXITCODE -eq 0){
+            try {
+                $h=$text | ConvertFrom-Json
+                if([int]$h.port -eq $ExpectedPort -and [string]$h.backend_generation -eq $ExpectedGeneration){ return $h }
+                $last="route mismatch: port=$([int]$h.port) generation=$([string]$h.backend_generation)"
+            } catch { $last=$_.Exception.Message }
+        } else { $last="curl_exit=$LASTEXITCODE" }
+        Start-Sleep -Milliseconds 500
+    }
+    throw "local HTTPS candidate route did not become ready: $last"
+}
+function Wait-CandidatePublicRoute([string]$Origin,[int]$ExpectedPort,[string]$ExpectedGeneration){
+    $last='not attempted'
+    for($i=0;$i -lt 40;$i++){
+        try {
+            $h=Invoke-RestMethod -Uri ($Origin.TrimEnd('/') + '/health') -TimeoutSec 3
+            if([int]$h.port -eq $ExpectedPort -and [string]$h.backend_generation -eq $ExpectedGeneration){ return $h }
+            $last="route mismatch: port=$([int]$h.port) generation=$([string]$h.backend_generation)"
+        } catch { $last=$_.Exception.Message }
+        Start-Sleep -Milliseconds 500
+    }
+    throw "public candidate route did not become ready: $last"
+}
 function Get-OwnedCaddyPid {
     $httpsOwners=@(Get-NetTCPConnection -State Listen -LocalPort 8443 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
     $adminOwners=@(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort 2019 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
@@ -195,13 +222,8 @@ $backup="$CaddyConfigPath.pre-home-direct-replace-$(Get-Date -Format yyyyMMddHHm
 [IO.File]::WriteAllText($temp,$candidateText,(New-Object Text.UTF8Encoding($false)))
 try {
     Load-Caddy $temp
-    Start-Sleep -Milliseconds 300
-    $localText=& curl.exe -ksS --max-time 4 --resolve ("{0}:8443:127.0.0.1" -f $StableHost) ("https://{0}:8443/health" -f $StableHost)
-    if($LASTEXITCODE -ne 0){ throw 'local HTTPS route probe failed' }
-    $local=$localText | ConvertFrom-Json
-    if([int]$local.port -ne $CandidatePort -or [string]$local.backend_generation -ne $CandidateGeneration){ throw 'local HTTPS route did not reach candidate' }
-    $public=Invoke-RestMethod -Uri ($PublicOrigin.TrimEnd('/') + '/health') -TimeoutSec 6
-    if([int]$public.port -ne $CandidatePort -or [string]$public.backend_generation -ne $CandidateGeneration){ throw 'public route did not reach candidate' }
+    $local=Wait-CandidateLocalRoute $StableHost $CandidatePort $CandidateGeneration
+    $public=Wait-CandidatePublicRoute $PublicOrigin $CandidatePort $CandidateGeneration
     Copy-Item -LiteralPath $CaddyConfigPath -Destination $backup
     Move-Item -LiteralPath $temp -Destination $CaddyConfigPath -Force
     [pscustomobject]@{status='PASS';operation=$(if($CreateTargetHost){'ADD_ISOLATED_ROUTE'}else{'REPLACE_ROUTE'});candidate_port=$CandidatePort;candidate_generation=$CandidateGeneration;old_port=$currentPort;rollback_port=$IndependentRollbackPort;public_port=[int]$public.port;public_generation=[string]$public.backend_generation;caddy_backup=$backup;old_backend_action=$(if($CreateTargetHost){'NO_EXISTING_TARGET_ROUTE'}else{'PRESERVE_FOR_ROLLBACK'})} | ConvertTo-Json -Compress

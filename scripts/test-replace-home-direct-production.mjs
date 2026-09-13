@@ -69,6 +69,9 @@ try {
   assert.match(wrapperSource, /Add-CaddyTargetHost/);
   assert.match(wrapperSource, /CreateTargetHost/);
   assert.match(wrapperSource, /if\(\$Plan\)/);
+  assert.match(wrapperSource, /Wait-CandidateLocalRoute/);
+  assert.match(wrapperSource, /Wait-CandidatePublicRoute/);
+  assert.match(wrapperSource, /for\(\$i=0;\$i -lt 40;\$i\+\+\)/, "new-host readiness must retry with a finite bound");
   assert.match(wrapperSource, /remote_ip private_ranges/, "new isolated host must preserve the owner authorization boundary");
   assert.match(wrapperSource, /curl\.exe -fsS --max-time 5 .*--data-binary/, "Caddy admin load must use curl exact-body POST instead of Windows PowerShell Invoke-WebRequest");
   assert.match(wrapperSource, /Text\.UTF8Encoding\(\$false\)/, "adapted Caddy JSON must be written explicitly as UTF-8 without BOM for Windows PowerShell compatibility");
