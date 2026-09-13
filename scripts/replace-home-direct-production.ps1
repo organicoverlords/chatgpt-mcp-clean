@@ -12,7 +12,9 @@ param(
     [string]$CaddyExe = (Join-Path $env:LOCALAPPDATA 'Caddy\mcp-home-test\caddy.exe'),
     [string]$StackAtlasPath = 'C:\Users\Lauri\Desktop\vault\tools\stack_atlas.py',
     [string]$CurrentTopologyPath = 'C:\Users\Lauri\Desktop\vault\04 Operating Contracts\mcp-current-topology.json',
-    [switch]$CurrentPortFromTargetHost
+    [switch]$CurrentPortFromTargetHost,
+    [switch]$CreateTargetHost,
+    [switch]$Plan
 )
 $ErrorActionPreference='Stop'
 function Health([int]$Port){ Invoke-RestMethod -Uri ("http://127.0.0.1:{0}/health" -f $Port) -TimeoutSec 3 }
@@ -37,6 +39,31 @@ function Get-CaddyTargetPort([string]$ConfigText,[string]$HostName){
     if($ports[0] -lt 1024 -or $ports[0] -gt 65535){ throw "target host backend port is invalid: $($ports[0])" }
     return [int]$ports[0]
 }
+function Test-CaddyTargetHostExists([string]$ConfigText,[string]$HostName){
+    return [regex]::IsMatch($ConfigText,"(?m)^\s*"+[regex]::Escape($HostName)+"\s*\{\s*\r?$")
+}
+function Add-CaddyTargetHost([string]$ConfigText,[string]$HostName,[int]$CandidatePort){
+    if($HostName -notmatch '^[A-Za-z0-9.-]+$' -or $HostName.StartsWith('.') -or $HostName.EndsWith('.')){ throw "target host is invalid: $HostName" }
+    if(Test-CaddyTargetHostExists $ConfigText $HostName){ throw "Caddy config already contains target host block: $HostName" }
+    $block=@"
+
+$HostName {
+	@local_authorize {
+		path /authorize
+		remote_ip private_ranges
+	}
+	handle @local_authorize {
+		reverse_proxy 127.0.0.1:$CandidatePort
+	}
+	@authorize path /authorize
+	respond @authorize "Owner authorization required" 403
+	handle {
+		reverse_proxy 127.0.0.1:$CandidatePort
+	}
+}
+"@
+    return $ConfigText.TrimEnd()+$block+"`r`n"
+}
 function Replace-CaddyTargetUpstream([string]$ConfigText,[string]$HostName,[int]$CurrentPort,[int]$CandidatePort){
     $range=Get-CaddySiteBlockRange $ConfigText $HostName
     $block=$ConfigText.Substring([int]$range.Start,[int]$range.Length)
@@ -47,8 +74,14 @@ function Replace-CaddyTargetUpstream([string]$ConfigText,[string]$HostName,[int]
     return $ConfigText.Substring(0,[int]$range.Start)+$next+$ConfigText.Substring([int]$range.Start+[int]$range.Length)
 }
 if(-not (Test-Path -LiteralPath $CaddyConfigPath -PathType Leaf)){ throw "Caddy config missing: $CaddyConfigPath" }
-if($CurrentPortFromTargetHost){
-    $currentPort=Get-CaddyTargetPort (Get-Content -LiteralPath $CaddyConfigPath -Raw) $StableHost
+$initialConfig=Get-Content -LiteralPath $CaddyConfigPath -Raw
+if($CreateTargetHost){
+    if($CurrentPortFromTargetHost){ throw 'CreateTargetHost cannot be combined with CurrentPortFromTargetHost' }
+    if($null -ne $ExpectedCurrentPort){ throw 'CreateTargetHost cannot be combined with ExpectedCurrentPort' }
+    if(Test-CaddyTargetHostExists $initialConfig $StableHost){ throw "Caddy config already contains target host block: $StableHost" }
+    $currentPort=$null
+}elseif($CurrentPortFromTargetHost){
+    $currentPort=Get-CaddyTargetPort $initialConfig $StableHost
     if($null -ne $ExpectedCurrentPort -and [int]$ExpectedCurrentPort -ne $currentPort){ throw "ExpectedCurrentPort disagrees with target host route: expected=$([int]$ExpectedCurrentPort) caddy=$currentPort host=$StableHost" }
 }else{
     if(-not (Test-Path -LiteralPath $CurrentTopologyPath -PathType Leaf)){ throw "current topology missing: $CurrentTopologyPath" }
@@ -66,6 +99,12 @@ if($CurrentPortFromTargetHost){
         $currentPort=$requestedCurrentPort
     }
 }
+if($Plan){
+    $planOriginal=[IO.File]::ReadAllText($CaddyConfigPath)
+    $planCandidateText=if($CreateTargetHost){ Add-CaddyTargetHost $planOriginal $StableHost $CandidatePort }else{ Replace-CaddyTargetUpstream $planOriginal $StableHost ([int]$currentPort) $CandidatePort }
+    [pscustomobject]@{status='PLAN';operation=$(if($CreateTargetHost){'ADD_ISOLATED_ROUTE'}else{'REPLACE_ROUTE'});target_host=$StableHost;candidate_port=$CandidatePort;old_port=$currentPort;candidate_config=$planCandidateText} | ConvertTo-Json -Depth 4 -Compress
+    exit 0
+}
 function Load-Caddy([string]$Config){
     & $CaddyExe validate --config $Config --adapter caddyfile | Out-Null
     if($LASTEXITCODE -ne 0){ throw "Caddy validation failed: $Config" }
@@ -79,13 +118,16 @@ function Load-Caddy([string]$Config){
         if($LASTEXITCODE -ne 0){ throw 'Caddy admin load failed' }
     } finally { Remove-Item -LiteralPath $json -Force -ErrorAction SilentlyContinue }
 }
-if($CandidatePort -eq $currentPort){ throw 'candidate must use an alternate port' }
+if($null -ne $currentPort -and $CandidatePort -eq [int]$currentPort){ throw 'candidate must use an alternate port' }
+if($CandidatePort -eq $IndependentRollbackPort){ throw 'candidate must not reuse the independent rollback port' }
 if(-not (Test-Path -LiteralPath $CaddyConfigPath -PathType Leaf)){ throw "Caddy config missing: $CaddyConfigPath" }
 if(-not (Test-Path -LiteralPath $CaddyExe -PathType Leaf)){ throw "Caddy executable missing: $CaddyExe" }
-$current=Health $currentPort
+if($null -ne $currentPort){
+    $current=Health ([int]$currentPort)
+    if($current.status -ne 'ok' -or [int]$current.port -ne [int]$currentPort){ throw 'current backend health proof failed' }
+}
 $candidate=Health $CandidatePort
 $rollback=Health $IndependentRollbackPort
-if($current.status -ne 'ok' -or [int]$current.port -ne $currentPort){ throw 'current backend health proof failed' }
 if($candidate.status -ne 'ok' -or [int]$candidate.port -ne $CandidatePort -or [string]$candidate.backend_generation -ne $CandidateGeneration){ throw 'candidate health/generation proof failed' }
 if($rollback.status -ne 'ok' -or [int]$rollback.port -ne $IndependentRollbackPort){ throw 'independent rollback health proof failed' }
 $gateText = & python $StackAtlasPath production-change-gate mcp --actor $Actor --busy-scope $BusyScope --explicit-user-authorization --independent-rollback-verified --offpath-proof-verified
@@ -93,7 +135,7 @@ if($LASTEXITCODE -ne 0){ throw 'production change gate execution failed' }
 $gate=$gateText | ConvertFrom-Json
 if($gate.verdict -ne 'PASS'){ throw ("production change gate blocked: " + (($gate.reasons) -join ',')) }
 $original=[IO.File]::ReadAllText($CaddyConfigPath)
-$candidateText=Replace-CaddyTargetUpstream $original $StableHost $currentPort $CandidatePort
+$candidateText=if($CreateTargetHost){ Add-CaddyTargetHost $original $StableHost $CandidatePort }else{ Replace-CaddyTargetUpstream $original $StableHost ([int]$currentPort) $CandidatePort }
 $temp=Join-Path (Split-Path -Parent $CaddyConfigPath) ("Caddyfile.issue274-{0}.tmp" -f [guid]::NewGuid().ToString('N'))
 $backup="$CaddyConfigPath.pre-home-direct-replace-$(Get-Date -Format yyyyMMddHHmmss)"
 [IO.File]::WriteAllText($temp,$candidateText,(New-Object Text.UTF8Encoding($false)))
@@ -108,7 +150,7 @@ try {
     if([int]$public.port -ne $CandidatePort -or [string]$public.backend_generation -ne $CandidateGeneration){ throw 'public route did not reach candidate' }
     Copy-Item -LiteralPath $CaddyConfigPath -Destination $backup
     Move-Item -LiteralPath $temp -Destination $CaddyConfigPath -Force
-    [pscustomobject]@{status='PASS';candidate_port=$CandidatePort;candidate_generation=$CandidateGeneration;old_port=$currentPort;rollback_port=$IndependentRollbackPort;public_port=[int]$public.port;public_generation=[string]$public.backend_generation;caddy_backup=$backup;old_backend_action='PRESERVE_FOR_ROLLBACK'} | ConvertTo-Json -Compress
+    [pscustomobject]@{status='PASS';operation=$(if($CreateTargetHost){'ADD_ISOLATED_ROUTE'}else{'REPLACE_ROUTE'});candidate_port=$CandidatePort;candidate_generation=$CandidateGeneration;old_port=$currentPort;rollback_port=$IndependentRollbackPort;public_port=[int]$public.port;public_generation=[string]$public.backend_generation;caddy_backup=$backup;old_backend_action=$(if($CreateTargetHost){'NO_EXISTING_TARGET_ROUTE'}else{'PRESERVE_FOR_ROLLBACK'})} | ConvertTo-Json -Compress
 } catch {
     try {
         $rollbackConfig=Join-Path $env:TEMP ("mcp-home-direct-rollback-{0}.Caddyfile" -f [guid]::NewGuid().ToString('N'))

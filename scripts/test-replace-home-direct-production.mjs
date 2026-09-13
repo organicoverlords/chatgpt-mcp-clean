@@ -42,8 +42,34 @@ try {
   assert.notEqual(peerMismatch.status, 0);
   assert.match(`${peerMismatch.stdout}\n${peerMismatch.stderr}`, /ExpectedCurrentPort disagrees with target host route/);
 
+  const isolatedHost = "supertest9000.91-159-12-133.sslip.io";
+  const createPlan = run(["-StableHost", isolatedHost, "-PublicOrigin", `https://${isolatedHost}`, "-CreateTargetHost", "-Plan"], peerPort + 5);
+  assert.equal(createPlan.status, 0, `${createPlan.stdout}\n${createPlan.stderr}`);
+  const plan = JSON.parse(createPlan.stdout.trim());
+  assert.equal(plan.status, "PLAN");
+  assert.equal(plan.operation, "ADD_ISOLATED_ROUTE");
+  assert.equal(plan.target_host, isolatedHost);
+  assert.match(plan.candidate_config, new RegExp(`${isolatedHost.replaceAll(".", "\\.")} \\{`));
+  assert.equal((plan.candidate_config.match(new RegExp(`reverse_proxy 127\\.0\\.0\\.1:${peerPort + 5}`, "g")) || []).length, 2);
+  assert.match(plan.candidate_config, /remote_ip private_ranges/);
+  assert.match(plan.candidate_config, /respond @authorize "Owner authorization required" 403/);
+  assert.match(plan.candidate_config, /91-159-12-133\.sslip\.io/);
+  assert.match(plan.candidate_config, /pr237\.91-159-12-133\.sslip\.io/);
+
+  const createExisting = run(["-StableHost", "pr237.91-159-12-133.sslip.io", "-CreateTargetHost"], peerPort + 5);
+  assert.notEqual(createExisting.status, 0);
+  assert.match(`${createExisting.stdout}\n${createExisting.stderr}`, /already contains target host block/);
+
+  const createWithCurrent = run(["-StableHost", "supertest9000.91-159-12-133.sslip.io", "-CreateTargetHost", "-CurrentPortFromTargetHost"], peerPort + 5);
+  assert.notEqual(createWithCurrent.status, 0);
+  assert.match(`${createWithCurrent.stdout}\n${createWithCurrent.stderr}`, /cannot be combined with CurrentPortFromTargetHost/);
+
   const wrapperSource = readFileSync(wrapper, "utf8");
   assert.match(wrapperSource, /Replace-CaddyTargetUpstream/);
+  assert.match(wrapperSource, /Add-CaddyTargetHost/);
+  assert.match(wrapperSource, /CreateTargetHost/);
+  assert.match(wrapperSource, /if\(\$Plan\)/);
+  assert.match(wrapperSource, /remote_ip private_ranges/, "new isolated host must preserve the owner authorization boundary");
   assert.match(wrapperSource, /curl\.exe -fsS --max-time 5 .*--data-binary/, "Caddy admin load must use curl exact-body POST instead of Windows PowerShell Invoke-WebRequest");
   assert.match(wrapperSource, /Text\.UTF8Encoding\(\$false\)/, "adapted Caddy JSON must be written explicitly as UTF-8 without BOM for Windows PowerShell compatibility");
   assert.doesNotMatch(wrapperSource, /adapt --config \$Config --adapter caddyfile --pretty > \$json/, "Windows PowerShell redirection must not serialize adapted JSON as UTF-16");
