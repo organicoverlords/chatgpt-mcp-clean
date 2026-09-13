@@ -1,7 +1,7 @@
 ﻿#!/usr/bin/env node
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -36,10 +36,39 @@ async function waitHealth(origin, expectedPort, predicate = () => true, timeoutM
 }
 
 const temporary = mkdtempSync(join(tmpdir(), "minimal-clone-identity-"));
+const repositoryRoot = resolve(".");
+const isolatedRoot = join(temporary, "source");
+const clone = spawnSync("git.exe", ["clone", "--shared", "--no-checkout", repositoryRoot, isolatedRoot], { encoding: "utf8", windowsHide: true });
+assert.equal(clone.status, 0, `failed to create isolated source clone: ${clone.stderr}`);
+const head = spawnSync("git.exe", ["-C", repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8", windowsHide: true });
+assert.equal(head.status, 0, head.stderr);
+const checkout = spawnSync("git.exe", ["-C", isolatedRoot, "checkout", "--detach", head.stdout.trim()], { encoding: "utf8", windowsHide: true });
+assert.equal(checkout.status, 0, checkout.stderr);
+
+// Reproduce the exact tracked working-tree snapshot under test, but commit it in the
+// isolated clone so launcher source_dirty reflects candidate mutations rather than
+// unrelated feature work in the developer's real worktree.
+const trackedPatch = spawnSync("git.exe", ["-C", repositoryRoot, "diff", "--binary", "HEAD", "--"], { encoding: null, windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
+assert.equal(trackedPatch.status, 0, trackedPatch.stderr?.toString() || "git diff failed");
+if (trackedPatch.stdout.length > 0) {
+  const apply = spawnSync("git.exe", ["-C", isolatedRoot, "apply", "--binary", "-"], { input: trackedPatch.stdout, encoding: null, windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
+  assert.equal(apply.status, 0, apply.stderr?.toString() || "git apply failed");
+  const add = spawnSync("git.exe", ["-C", isolatedRoot, "add", "-A"], { encoding: "utf8", windowsHide: true });
+  assert.equal(add.status, 0, add.stderr);
+  const commit = spawnSync("git.exe", ["-C", isolatedRoot, "-c", "user.name=MCP Test", "-c", "user.email=mcp-test@example.invalid", "-c", "core.hooksPath=NUL", "commit", "--no-gpg-sign", "-m", "test snapshot"], { encoding: "utf8", windowsHide: true });
+  assert.equal(commit.status, 0, commit.stderr);
+}
+const isolatedStatus = spawnSync("git.exe", ["-C", isolatedRoot, "status", "--porcelain=v1", "--untracked-files=no"], { encoding: "utf8", windowsHide: true });
+assert.equal(isolatedStatus.status, 0, isolatedStatus.stderr);
+assert.equal(isolatedStatus.stdout.trim(), "", "isolated launcher source snapshot must start clean");
+symlinkSync(join(repositoryRoot, "node_modules"), join(isolatedRoot, "node_modules"), "junction");
+const build = spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "npm.cmd run build --silent"], { cwd: isolatedRoot, encoding: "utf8", windowsHide: true, env: process.env, maxBuffer: 32 * 1024 * 1024 });
+assert.equal(build.status, 0, `isolated source build failed: ${build.error?.message || build.stderr || build.stdout}`);
+
 const stableStore = join(temporary, "clone-a", "oauth.json");
 mkdirSync(join(temporary, "clone-a"), { recursive: true });
 writeFileSync(stableStore, "{}", "utf8");
-const script = resolve("scripts/start-minimal-clone.ps1");
+const script = join(isolatedRoot, "scripts", "start-minimal-clone.ps1");
 const scriptSource = readFileSync(script, "utf8");
 assert.match(scriptSource, /canonicalStateRoot = \[IO\.Path\]::GetFullPath\(\(Join-Path \$Root 'minimal-connectors'\)\)/, "canonical state guard must follow the explicit repo root, not the runtime account profile");
 function preflight(instanceId = "clone-a-next", extra = []) {
@@ -59,9 +88,9 @@ try {
   assert.equal(correct.status, 0, correct.stderr);
   assert.match(correct.stdout, /IDENTITY_PREFLIGHT_OK/);
 
-  const distIndex = resolve("dist/index.js");
+  const distIndex = join(isolatedRoot, "dist", "index.js");
   const originalDist = readFileSync(distIndex);
-  const distServer = resolve("dist/server.js");
+  const distServer = join(isolatedRoot, "dist", "server.js");
   const originalServer = readFileSync(distServer);
   for (const reload of [false, true]) {
   const runtimeState = join(temporary, "runtime-state");
@@ -78,7 +107,7 @@ try {
     "-RestartOnUnexpectedExit",
     ...(reload ? ["-ReloadOnGenerationChange"] : []),
   ], {
-    cwd: resolve("."),
+    cwd: isolatedRoot,
     env: { ...process.env, MCP_OWNER_AUTH_ORIGIN: "", MCP_OWNER_AUTH_MODE: "tailscale", TAILSCALE_OWNER_LOGIN: "owner@example.com" },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
