@@ -309,16 +309,24 @@ assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v5.html", "wi
     return ref;
   }
 
+  const largeImagePath = join(dir, "large-noise.jpg");
+  const largeImage = Buffer.alloc(9 * 1024 * 1024, 0x5a);
+  await writeFile(largeImagePath, largeImage);
+  const largeImageUpload = await client.callTool({ name: "upload_local_file", arguments: { path: largeImagePath } });
+  assert.equal(largeImageUpload.content.some((entry) => entry.type === "image"), false, "multi-megabyte image must never inline base64 into CallToolResult");
+  assert.ok(JSON.stringify(largeImageUpload).length < 32_000, "multi-megabyte image result must remain metadata-sized");
+  const largeImageRef = exactFileReference(largeImageUpload, "large-noise.jpg", "image/jpeg", largeImage.length);
+  const largeImageResource = await client.readResource({ uri: largeImageRef.uri });
+  assert.equal(Buffer.from(largeImageResource.contents[0]?.blob || "", "base64").compare(largeImage), 0, "large image lazy resource must preserve exact full-resolution bytes");
+
   const imageUpload = await client.callTool({ name: "upload_local_file", arguments: { path: pngPath } });
   assert.equal(imageUpload._meta?.file_transfer?.delivery_mode, "library_upload", "direct image keeps native result and restores HTTPS Library upload");
   assert.match(imageUpload._meta?.file_transfer?.transfer_url || "", /^https:\/\//);
   assert.equal(imageUpload._meta?.file_transfer?.sha256, imageUpload.structuredContent.sha256);
-  const nativeImage = imageUpload.content.find((entry) => entry.type === "image");
-  assert.ok(nativeImage, "direct images must return native MCP image content for same-turn ChatGPT/Work visibility");
-  assert.equal(nativeImage.mimeType, "image/png");
-  assert.equal(Buffer.from(nativeImage.data, "base64").compare(png), 0, "native MCP image content must remain byte-for-byte exact");
+  assert.equal(imageUpload.content.some((entry) => entry.type === "image"), false, "direct images must not inline base64 bytes into the tool result/transcript");
   const imageFileRef = exactFileReference(imageUpload, "original.png", "image/png", png.length);
-  assert.equal(imageUpload.content.filter((entry) => entry.type === "resource_link").length, 1, "direct image should expose one exact file resource plus native image content");
+  assert.equal(imageUpload.content.filter((entry) => entry.type === "resource_link").length, 1, "direct image should expose one exact lazy resource link");
+  assert.ok(JSON.stringify(imageUpload).length < 32_000, "direct image tool result must stay metadata-sized regardless of source pixels");
   const originalResource = await client.readResource({ uri: imageFileRef.uri });
   const originalBlob = originalResource.contents[0]?.blob;
   assert.ok(originalBlob, "image resource must expose original bytes");
@@ -404,4 +412,4 @@ assert.doesNotMatch(widget, /<img\b/i, "file-transfer widget must not duplicate 
 assert.doesNotMatch(widget, /notifyIntrinsicHeight/, "file-transfer widget must not trigger chat reflow");
 assert.doesNotMatch(widget, /imageIds/, "file-transfer widget must not publish duplicate imageIds");
 
-console.log("PASS lossless file transfer: native exact file refs plus upload_local_file-only HTTPS Library persistence, native image visibility, ZIP resource-only handling, raw bytes, zstd, native file params");
+console.log("PASS lossless file transfer: compact lazy resource links plus upload_local_file-only HTTPS Library persistence, full-resolution resource visibility, ZIP resource-only handling, raw bytes, zstd, native file params");

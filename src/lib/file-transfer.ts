@@ -16,7 +16,6 @@ const MCP_APP_MIME_TYPE = "text/html;profile=mcp-app";
 const LEGACY_FILE_TRANSFER_WIDGET_URIS = ["ui://process/file-transfer-v1.html", "ui://process/file-transfer-v4.html"] as const;
 const LOCAL_TRANSFER_TTL_MS = 5 * 60 * 1000;
 const LOCAL_RESOURCE_TTL_MS = 8 * 60 * 60 * 1000;
-const MAX_NATIVE_IMAGE_BYTES = 20 * 1024 * 1024;
 const DEFAULT_MAX_FILE_BYTES = 512 * 1024 * 1024;
 const ZSTD_MIN_BYTES = 64 * 1024;
 const MAX_REDIRECTS = 4;
@@ -254,17 +253,6 @@ export function localImageResourceLink(item: LocalImageResource) {
     description: "Exact original local image for immediate model vision and inline preview",
     mimeType: item.mime_type,
     size: item.bytes,
-    annotations: { audience: ["assistant", "user"] as ("assistant" | "user")[] },
-  };
-}
-
-export async function localNativeImageContent(item: LocalImageResource) {
-  if (item.bytes > MAX_NATIVE_IMAGE_BYTES) return null;
-  const resource = await localFileResourceContents(localImageResourceUri(item));
-  return {
-    type: "image" as const,
-    data: resource.blob,
-    mimeType: resource.mimeType,
     annotations: { audience: ["assistant", "user"] as ("assistant" | "user")[] },
   };
 }
@@ -658,9 +646,10 @@ function uploadToolMeta() {
 export async function localFileTransferHandoff(item: LocalFileTransfer) {
   const directImage = item.mime_type.startsWith("image/") ? localImageResources.get(item.token) : undefined;
   const reviewImages = directImage ? [] : await visualReviewZipResources(item);
-  const nativeImage = directImage ? await localNativeImageContent(directImage) : null;
   const content: any[] = [localFileResourceLink(item)];
-  if (nativeImage) content.push(nativeImage);
+  // Keep large image bytes out of CallToolResult. ResourceLink is the MCP-native
+  // lazy-fetch boundary: Chat/Work can fetch the exact resource on demand without
+  // inflating the conversation transcript with base64 image payloads.
   // Preserve the MCP-readable exact image resource used by native vision and the
   // manifest-declared review resources. The first resource_link above is always the
   // original file itself and remains useful in Work/other hosts that do not mount UI.
