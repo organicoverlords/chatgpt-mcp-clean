@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { planCommandExecution, planStructuredScript } from "../dist/lib/command-execution-plan.js";
-import { ProcessManager, replayWorkerExecArgv } from "../dist/lib/process-manager.js";
+import { ProcessManager, replayStructuredArgvTransportError, replayWorkerExecArgv } from "../dist/lib/process-manager.js";
 
 const pwsh = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
 assert.deepEqual(replayWorkerExecArgv(["--trace-warnings", "--input-type=module", "--max-old-space-size=2048"]), ["--trace-warnings", "--max-old-space-size=2048"]);
@@ -198,6 +198,12 @@ try {
   assert.equal(invoked.exit_code, 0, JSON.stringify(invoked));
   assert.equal(invoked.execution_mode, "native", JSON.stringify(invoked));
   assert.match(invoked.stdout, /ARG=A B/);
+  assert.equal(replayStructuredArgvTransportError(helper, ["line1\r\nline2"]), "windows_command_shim_multiline_argument_not_lossless");
+  assert.equal(replayStructuredArgvTransportError("node.exe", ["line1\r\nline2"]), undefined);
+  await assert.rejects(
+    manager.startStructuredWithWait(helper, ["line1\r\necho SECOND_COMMAND_MUST_NOT_RUN"], cmdDir, "caller_execution_plan_cmd_multiline_guard", waitMs),
+    /windows_command_shim_multiline_argument_not_lossless/,
+  );
 } finally {
   rmSync(cmdDir, { recursive: true, force: true });
 }
@@ -216,5 +222,11 @@ assert.equal(scriptNode.mode, "native");
 assert.deepEqual(scriptNode.args, ["-"]);
 assert.equal(scriptNode.stdin, `process.stdout.write("NODE_SCRIPT")`);
 
-console.log("PASS command_execution_plan native_argv=true inline_code_opaque=true worker_execargv_sanitized=true native_sequence=true native_pipeline=true python_heredoc_stdin=true structured_stdin=true cmd_wrapper_elision=true explicit_shell_direct=true powershell_repairs=true structured_script_stdin=true powershell_fallback=true");
+const missingStructuredExecutable = await manager.startStructuredWithWait("__mcp_definitely_missing_executable__", [], process.cwd(), "caller_execution_plan_missing_executable", waitMs);
+assert.equal(missingStructuredExecutable.execution_outcome, "error", JSON.stringify(missingStructuredExecutable));
+assert.equal(missingStructuredExecutable.error_code, "ENOENT", JSON.stringify(missingStructuredExecutable));
+assert.deepEqual(missingStructuredExecutable.failure_diagnostic, { kind: "spawn_error", origin: "process", boundary: "spawn", code: "ENOENT" });
+assert.equal(missingStructuredExecutable.stdout, "");
+
+console.log("PASS command_execution_plan native_argv=true inline_code_opaque=true worker_execargv_sanitized=true native_sequence=true native_pipeline=true python_heredoc_stdin=true structured_stdin=true cmd_wrapper_elision=true explicit_shell_direct=true powershell_repairs=true structured_script_stdin=true powershell_fallback=true cmd_multiline_guard=true spawn_error_code=true");
 

@@ -227,7 +227,8 @@ async function executePlan(requestId: string, command: string, cwd: string, supp
     }
     send(requestId, { type: "exit", code: previousCode ?? 0, signal: finalSignal });
   } catch (error) {
-    send(requestId, { type: "error", error: error instanceof Error ? error.message : String(error) });
+    const errorCode = typeof (error as NodeJS.ErrnoException)?.code === "string" ? (error as NodeJS.ErrnoException).code : undefined;
+    send(requestId, { type: "error", error: error instanceof Error ? error.message : String(error), ...(errorCode ? { errorCode } : {}) });
   } finally {
     flushOutput(requestId);
     children.delete(requestId);

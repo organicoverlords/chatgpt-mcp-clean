@@ -67,9 +67,10 @@ const repairAttemptSchema = z.object({
 }).strict();
 
 const failureDiagnosticSchema = z.object({
-  kind: z.enum(["parser_error", "cli_usage"]),
-  origin: z.enum(["powershell", "python", "node", "bash", "busy_cli", "stack_atlas_cli", "swarm_route_cli"]),
-  boundary: z.enum(["source", "legacy_command", "argv_contract"]),
+  kind: z.enum(["parser_error", "cli_usage", "spawn_error"]),
+  origin: z.enum(["powershell", "python", "node", "bash", "busy_cli", "stack_atlas_cli", "swarm_route_cli", "process"]),
+  boundary: z.enum(["source", "legacy_command", "argv_contract", "spawn"]),
+  code: z.string().max(80).regex(/^[A-Za-z][A-Za-z0-9_.-]{0,79}$/).optional(),
   input_target: z.object({
     mode: z.enum(["script", "executable"]),
     language: z.enum(["powershell", "python", "node", "bash"]).optional(),
@@ -128,6 +129,7 @@ const processOutputSchema = z.object({
   started_at: z.string().optional(),
   finished_at: z.string().nullable().optional(),
   error: z.string().optional(),
+  error_code: z.string().max(80).regex(/^[A-Za-z][A-Za-z0-9_.-]{0,79}$/).optional(),
   stdout_truncated: z.literal(true).optional(),
   stderr_truncated: z.literal(true).optional(),
   stdout_dropped_from_start: z.number().int().nonnegative().optional(),

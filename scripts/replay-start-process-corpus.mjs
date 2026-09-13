@@ -244,10 +244,12 @@ for (const group of byCaller.values()) {
 
 const counts = new Map();
 const bump = (key) => counts.set(key, (counts.get(key) || 0) + 1);
-let failures = 0, expected = 0, coveredPreSpawn = 0, coveredRetry = 0, coveredLegacyShellSurface = 0, pairedFailures = 0, residual = 0;
+let failures = 0, expected = 0, coveredPreSpawn = 0, coveredRetry = 0, coveredLegacyShellSurface = 0, pairedFailures = 0, insufficientEvidence = 0, residual = 0;
 const residualSamples = [];
 const matchedSamples = [];
 const residualCandidates = new Map();
+const silentNonzeroByExitCode = new Map();
+const silentNonzeroByExecutionReason = new Map();
 let failureDiagnosticMatches = 0;
 let failureDiagnosticInputTargets = 0;
 for (const row of rows) {
@@ -263,8 +265,19 @@ for (const row of rows) {
     bump(`${coverage.class}:${coverage.reason}`);
     continue;
   }
+  if (row.command_truncated === true) {
+    insufficientEvidence += 1;
+    bump('insufficient_evidence:command_truncated');
+    continue;
+  }
   residual += 1;
   const candidate = residualCandidate(row);
+  if (!String(row.error || '').trim() && !String(row.stderr || '').trim() && !String(row.stdout || '').trim()) {
+    const exitKey = String(row.exit_code);
+    silentNonzeroByExitCode.set(exitKey, (silentNonzeroByExitCode.get(exitKey) || 0) + 1);
+    const reasonKey = String(row.execution_reason || '<none>');
+    silentNonzeroByExecutionReason.set(reasonKey, (silentNonzeroByExecutionReason.get(reasonKey) || 0) + 1);
+  }
   if (candidate) {
     const key = `${candidate.group}:${candidate.reason}`;
     residualCandidates.set(key, (residualCandidates.get(key) || 0) + 1);
@@ -277,7 +290,7 @@ for (const row of rows) {
   bump(`residual:${first.replace(/[0-9a-f]{16,40}/ig, '<sha>').replace(/\d{4,}/g, '<n>').slice(0, 140)}`);
   if (residualSamples.length < 20 && paired.has(row.id)) residualSamples.push({ bad: row.command.slice(0, 220), good: paired.get(row.id).command.slice(0, 220), first: first.slice(0, 180) });
   if (SAMPLE_MATCH && matchedSamples.length < SAMPLE_LIMIT && SAMPLE_MATCH.test(`${first}\n${row.error || ''}\n${row.stderr || ''}\n${row.stdout || ''}\n${row.command || ''}`)) {
-    matchedSamples.push({ id: row.id, kind: row.kind, command: row.command, first, stderr: String(row.stderr || '').slice(0, 2000), stdout: String(row.stdout || '').slice(0, 1200) });
+    matchedSamples.push({ id: row.id, kind: row.kind, exit_code: row.exit_code, signal: row.signal, execution_mode: row.execution_mode, execution_reason: row.execution_reason, command: row.command, first, stderr: String(row.stderr || '').slice(0, 2000), stdout: String(row.stdout || '').slice(0, 1200) });
   }
 }
 const avoidableCovered = coveredPreSpawn + coveredRetry;
@@ -300,12 +313,16 @@ const summary = {
   known_avoidable_legacy_shell_surface: coveredLegacyShellSurface,
   known_avoidable_other_runtime_or_semantic: avoidableCovered - coveredLegacyShellSurface,
   legacy_shell_surface_rate_pct_of_all_attempts: Number((100 * coveredLegacyShellSurface / Math.max(1, rows.length)).toFixed(3)),
+  insufficient_evidence: insufficientEvidence,
+  insufficient_evidence_share_of_raw_failures_pct: Number((100 * insufficientEvidence / Math.max(1, failures)).toFixed(3)),
   unclassified_or_avoidable_residual: residual,
   residual_rate_pct: Number((100 * residual / Math.max(1, rows.length)).toFixed(3)),
   failure_diagnostic_matches: failureDiagnosticMatches,
   failure_diagnostic_input_targets: failureDiagnosticInputTargets,
+  silent_nonzero_by_exit_code: Object.fromEntries([...silentNonzeroByExitCode].sort((a, b) => b[1] - a[1])),
+  silent_nonzero_by_execution_reason: Object.fromEntries([...silentNonzeroByExecutionReason].sort((a, b) => b[1] - a[1]).slice(0, 20)),
   residual_candidate_breakdown: Object.fromEntries([...residualCandidates].sort((a, b) => b[1] - a[1])),
-  residual_candidate_note: 'diagnostics are bounded routing metadata only; candidate buckets are not counted as fixed or avoidable until separately proven',
+  residual_candidate_note: 'diagnostics are bounded routing metadata only; incomplete receipts are separated from residual; diagnostic candidate buckets are not counted as fixed or avoidable until separately proven',
   scan_seconds: Number(((Date.now() - started) / 1000).toFixed(2)),
 };
 console.log(JSON.stringify(summary, null, 2));

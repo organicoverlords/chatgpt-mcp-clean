@@ -283,6 +283,14 @@ assert.notEqual(invalidPowerShellSyntax.exit_code, 0, JSON.stringify(invalidPowe
 assert.match(invalidPowerShellSyntax.stderr || "", /Missing condition|parse|if statement/i, JSON.stringify(invalidPowerShellSyntax));
 assert.deepEqual(invalidPowerShellSyntax.failure_diagnostic, { kind: "parser_error", origin: "powershell", boundary: "source" }, JSON.stringify(invalidPowerShellSyntax));
 assert.equal(expectedPythonFailure.failure_diagnostic, undefined, JSON.stringify(expectedPythonFailure));
+const missingExecutableFailure = await callTool(sessionA, "start_process", {
+  executable: "__mcp_definitely_missing_executable__",
+  args: [],
+  wait_ms: 10_000,
+});
+assert.equal(missingExecutableFailure.execution_outcome, "error", JSON.stringify(missingExecutableFailure));
+assert.equal(missingExecutableFailure.error_code, "ENOENT", JSON.stringify(missingExecutableFailure));
+assert.deepEqual(missingExecutableFailure.failure_diagnostic, { kind: "spawn_error", origin: "process", boundary: "spawn", code: "ENOENT" }, JSON.stringify(missingExecutableFailure));
 
 const authBenchCount = Math.max(0, Number(process.env.MCP_SMOKE_BENCH_COUNT || 0));
 if (authBenchCount > 0) {

@@ -406,6 +406,11 @@
         "error": {
           "type": "string"
         },
+        "error_code": {
+          "type": "string",
+          "maxLength": 80,
+          "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,79}$"
+        },
         "stdout_truncated": {
           "type": "boolean",
           "const": true
@@ -493,7 +498,8 @@
               "type": "string",
               "enum": [
                 "parser_error",
-                "cli_usage"
+                "cli_usage",
+                "spawn_error"
               ]
             },
             "origin": {
@@ -505,7 +511,8 @@
                 "bash",
                 "busy_cli",
                 "stack_atlas_cli",
-                "swarm_route_cli"
+                "swarm_route_cli",
+                "process"
               ]
             },
             "boundary": {
@@ -513,8 +520,14 @@
               "enum": [
                 "source",
                 "legacy_command",
-                "argv_contract"
+                "argv_contract",
+                "spawn"
               ]
+            },
+            "code": {
+              "type": "string",
+              "maxLength": 80,
+              "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,79}$"
             },
             "input_target": {
               "type": "object",
@@ -964,6 +977,11 @@
         "error": {
           "type": "string"
         },
+        "error_code": {
+          "type": "string",
+          "maxLength": 80,
+          "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,79}$"
+        },
         "stdout_truncated": {
           "type": "boolean",
           "const": true
@@ -1051,7 +1069,8 @@
               "type": "string",
               "enum": [
                 "parser_error",
-                "cli_usage"
+                "cli_usage",
+                "spawn_error"
               ]
             },
             "origin": {
@@ -1063,7 +1082,8 @@
                 "bash",
                 "busy_cli",
                 "stack_atlas_cli",
-                "swarm_route_cli"
+                "swarm_route_cli",
+                "process"
               ]
             },
             "boundary": {
@@ -1071,8 +1091,14 @@
               "enum": [
                 "source",
                 "legacy_command",
-                "argv_contract"
+                "argv_contract",
+                "spawn"
               ]
+            },
+            "code": {
+              "type": "string",
+              "maxLength": 80,
+              "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,79}$"
             },
             "input_target": {
               "type": "object",

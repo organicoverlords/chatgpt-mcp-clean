@@ -55,7 +55,14 @@ assert.deepEqual(structuredPsInvalid.failure_diagnostic, { kind: "parser_error",
 assert.equal(structuredPsScript.failure_diagnostic, undefined);
 const legacyPythonParser = await run(`python -c "if"`, "caller_legacy_python_parser_route");
 assert.notEqual(legacyPythonParser.exit_code, 0, JSON.stringify(legacyPythonParser));
-assert.deepEqual(legacyPythonParser.failure_diagnostic, { kind: "parser_error", origin: "python", boundary: "legacy_command" });
+assert.deepEqual(legacyPythonParser.failure_diagnostic, { kind: "parser_error", origin: "python", boundary: "legacy_command", code: "SyntaxError" });
+const legacyPowerShellParserCode = replayFailureDiagnostic({
+  command: `Write-Output before < $file`,
+  stderr: `At line:1 char:21\n+ Write-Output before < $file\n+                     ~\nThe '<' operator is reserved for future use.\n    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException\n    + FullyQualifiedErrorId : RedirectionNotSupported`,
+  exit_code: 1,
+  execution_reason: "powershell_fallback",
+});
+assert.deepEqual(legacyPowerShellParserCode, { kind: "parser_error", origin: "powershell", boundary: "legacy_command", code: "RedirectionNotSupported" });
 const busyUsageDiagnostic = replayFailureDiagnostic({ command: `busy-python.cmd claim`, stderr: `usage: busy claim [-h] actor scope`, exit_code: 2, execution_reason: "native_argv_direct" });
 assert.deepEqual(busyUsageDiagnostic, { kind: "cli_usage", origin: "busy_cli", boundary: "legacy_command", input_target: { mode: "executable" } });
 const structuredBusyUsageDiagnostic = replayFailureDiagnostic({ command: `busy-python.cmd claim`, stderr: `usage: busy claim [-h] actor scope`, exit_code: 2, execution_reason: "structured_argv" });
