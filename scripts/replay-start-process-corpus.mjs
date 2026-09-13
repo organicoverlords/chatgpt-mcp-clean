@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { open, readdir, readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
-import { replayPrepareStartProcessCommand, replayRuntimeRepair } from '../dist/lib/process-manager.js';
+import { replayCurrentPreflightError, replayPrepareStartProcessCommand, replayRuntimeRepair } from '../dist/lib/process-manager.js';
 
 const receiptRoot = process.env.MCP_PROCESS_RECEIPT_DIR
   || join(process.env.LOCALAPPDATA || '', 'ChatGPTMcpClean', 'minimal-connectors', 'shared-process-receipts');
@@ -10,6 +10,10 @@ const MAX_PAIR_MS = 5 * 60_000;
 const META_HEAD_BYTES = 12_000;
 const META_TAIL_BYTES = 6_000;
 const CONCURRENCY = Math.max(8, Math.min(128, Number(process.env.MCP_REPLAY_CONCURRENCY || 96)));
+const REPLAY_SCOPE = (process.env.MCP_REPLAY_SCOPE || 'all').trim();
+const SAMPLE_MATCH_RAW = (process.env.MCP_REPLAY_SAMPLE_MATCH || '').trim();
+const SAMPLE_MATCH = SAMPLE_MATCH_RAW ? new RegExp(SAMPLE_MATCH_RAW, 'i') : undefined;
+const SAMPLE_LIMIT = Math.max(1, Math.min(100, Number(process.env.MCP_REPLAY_SAMPLE_LIMIT || 20)));
 
 function jsonString(text, key) {
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -42,9 +46,13 @@ function isFailure(row) {
 function isSuccess(row) {
   return row.execution_outcome === 'success' && row.exit_code === 0;
 }
+function stripAnsi(value) {
+  return String(value || '').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
+}
+
 function expectedFailure(row) {
   const command = String(row.command || '');
-  const output = `${row.stderr || ''}\n${row.stdout || ''}`;
+  const output = stripAnsi(`${row.error || ''}\n${row.stderr || ''}\n${row.stdout || ''}`);
   const reason = String(row.reason || row.preflight_reason || '');
   const action = String(row.action_class || '');
   if (row.kind === 'process_preflight_rejection') {
@@ -52,6 +60,22 @@ function expectedFailure(row) {
     return undefined;
   }
   if (/P3_PR_MERGE_BLOCKED|P3_GATE_NOT_SUCCESS|CONTRACT_GATE_NOT_SUCCESS|P3_PR_CONTRACT_GATE_MARKER_MISSING|Invoke-P3PrMergeGuard/i.test(output)) return 'domain_gate';
+  if (/P3_BUILD_ROUTE_TIMEOUT/i.test(output)) return 'build_queue_admission';
+  if (/CORE_PROBE[^\r\n]*state=(?:PRESSURE_BLOCKED|RECOVERY_(?:OBSERVED|HOLD|CONFIRM))[^\r\n]*admit=False/i.test(output)) return 'resource_admission';
+  if (/run \d+ is still in progress; logs will be available when it is complete/i.test(output)) return 'ci_pending';
+  if (/GraphQL: Merge already in progress \(mergePullRequest\)/i.test(output)) return 'remote_merge_in_progress';
+  if (/(?:CONFLICT \(|Rebasing \(\d+\/\d+\)[\s\S]{0,1200}error: could not apply)/i.test(output)) return 'git_conflict_state';
+  if (/visual proof rule missing: must inspect its own actual captured pixels\/video/i.test(output)) return 'domain_gate';
+  if (/Traceback \(most recent call last\):/i.test(output)
+      && /(?:^|\n)[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception):/m.test(output)
+      && !/(?:SyntaxError|IndentationError|TabError|UnicodeEncodeError|BrokenPipeError):/i.test(output)) return 'python_runtime_or_domain_error';
+  if (/Exception:/i.test(output) && /\bthrow\b/i.test(command)) return 'explicit_domain_guard';
+  if (/(?:Get-Content|Get-Item|Get-FileHash): Cannot find path|FileNotFoundError:|The argument .* is not recognized as the name of a script file/i.test(output)) return 'missing_input_or_artifact';
+  if (/gh: Not Found \(HTTP 404\)/i.test(output)) return 'remote_resource_missing';
+  if (/tiny3d: error: (?:source reference|historical review campaign|asset|workspace|selection)/i.test(output)) return 'tiny3d_domain_error';
+  if (/reported started_at changed after timed run begin|unknown finding_tags:|literal slopwall correction requires/i.test(output)) return 'contract_validation';
+  if (/List of devices attached/i.test(output) && /\badb(?:\.exe)?\b[\s\S]*\bshell\s+pm\s+path\b/i.test(command)) return 'android_package_state';
+  if (/cmd: Can't find service: package/i.test(output)) return 'android_package_state';
   if (/\b(?:pending|queued)\b/i.test(output) && /github\.com.*actions/i.test(output)) return 'ci_pending';
   if (/report is not finalized|premature RUN_FINISHED|current report .*not a valid ISO/i.test(output)) return 'worker_report_contract';
   if (/\b(?:FAILED \(|FAILED \[|AssertionError|tests? failed|FAILURES|FAIL:)/i.test(output) && /(?:pytest|unittest|test|assert)/i.test(`${command}\n${output}`)) return 'test_failure';
@@ -61,16 +85,26 @@ function expectedFailure(row) {
   if (/smoke|kill_tree/i.test(action) && /CHILD_PID=/i.test(output)) return 'intentional_kill_smoke';
   return undefined;
 }
+function isLegacyShellSurfaceCoverage(coverage) {
+  if (!coverage || coverage.class !== 'pre_spawn') return false;
+  const reasons = String(coverage.reason || '').split('+');
+  return reasons.some((reason) => /^(?:powershell_c_style_quote_escape|powershell_interpolation_literal|powershell_here_string_newline|route_(?:native|explicit_shell|native_sequence|native_pipeline)|python_heredoc_to_stdin|cmd_wrapper_elided|inline_code_argv_direct)$/.test(reason));
+}
+
 function currentCoverage(row) {
   const command = String(row.command || '');
   const stdout = String(row.stdout || '');
   const stderr = String(row.stderr || '');
-  const output = `${stderr}\n${stdout}`;
+  const output = `${row.error || ''}\n${stderr}\n${stdout}`;
   const prepared = replayPrepareStartProcessCommand(command);
   if (prepared.rewrites.length) return { class: 'pre_spawn', reason: prepared.rewrites.join('+') };
+  if (row.kind === 'process_preflight_rejection' && replayCurrentPreflightError(command) === undefined) {
+    return { class: 'pre_spawn', reason: 'current_preflight_accepts' };
+  }
   if (/UnicodeEncodeError:.*charmap/i.test(output) || /UnicodeEncodeError:/i.test(output) && /cp1252/i.test(output)) return { class: 'pre_spawn', reason: 'python_stdio_utf8' };
   if (/pytest-of-[^\\/]+[\\/]pytest-current/i.test(output) && /PermissionError:/i.test(output)) return { class: 'pre_spawn', reason: 'pytest_per_process_temp' };
   if (/busy-python\.cmd.*(?:not recognized|not found)/i.test(output)) return { class: 'pre_spawn', reason: 'busy_coordinator_path' };
+  if (/process launcher unavailable: --input-type can only be used with string input/i.test(output)) return { class: 'pre_spawn', reason: 'worker_execargv_sanitized' };
   if (/\badb(?:\.exe)?\b.*(?:not recognized|not found)/i.test(output)) return { class: 'pre_spawn', reason: 'android_platform_tools_path' };
   if (/ParserError:|regex parse error|Invalid string escape|Unexpected token/i.test(output) && prepared.execution_mode !== 'powershell') {
     return { class: 'pre_spawn', reason: `route_${prepared.execution_mode}` };
@@ -138,9 +172,16 @@ async function pool(items, worker, concurrency = CONCURRENCY) {
   return results;
 }
 
-const directories = [{ path: receiptRoot, rank: 2 }];
-if (existsSync(archiveRoot)) {
+const directories = [];
+if (REPLAY_SCOPE === 'all' || REPLAY_SCOPE === 'current') directories.push({ path: receiptRoot, rank: 2 });
+if (REPLAY_SCOPE === 'all' && existsSync(archiveRoot)) {
   for (const entry of await readdir(archiveRoot, { withFileTypes: true })) if (entry.isDirectory()) directories.push({ path: join(archiveRoot, entry.name), rank: 1 });
+} else if (REPLAY_SCOPE.startsWith('day:')) {
+  const day = REPLAY_SCOPE.slice('day:'.length);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error(`invalid MCP_REPLAY_SCOPE day: ${REPLAY_SCOPE}`);
+  directories.push({ path: join(archiveRoot, day), rank: 1 });
+} else if (REPLAY_SCOPE !== 'all' && REPLAY_SCOPE !== 'current') {
+  throw new Error(`invalid MCP_REPLAY_SCOPE: ${REPLAY_SCOPE}`);
 }
 const files = new Map();
 for (const directory of directories) {
@@ -174,8 +215,10 @@ for (const group of byCaller.values()) {
       if (delta > MAX_PAIR_MS) break;
       if (!isSuccess(candidate)) continue;
       if (row.cwd && candidate.cwd && row.cwd !== candidate.cwd) continue;
+      if (row.action_class && candidate.action_class && row.action_class !== candidate.action_class) continue;
+      if (row.activity_target && candidate.activity_target && JSON.stringify(row.activity_target) !== JSON.stringify(candidate.activity_target)) continue;
       const score = similarity(row.command, candidate.command);
-      if (score < 0.45) continue;
+      if (score < 0.60) continue;
       paired.set(row.id, { delta_ms: delta, similarity: score, command: candidate.command });
       break;
     }
@@ -184,8 +227,9 @@ for (const group of byCaller.values()) {
 
 const counts = new Map();
 const bump = (key) => counts.set(key, (counts.get(key) || 0) + 1);
-let failures = 0, expected = 0, coveredPreSpawn = 0, coveredRetry = 0, pairedFailures = 0, residual = 0;
+let failures = 0, expected = 0, coveredPreSpawn = 0, coveredRetry = 0, coveredLegacyShellSurface = 0, pairedFailures = 0, residual = 0;
 const residualSamples = [];
+const matchedSamples = [];
 for (const row of rows) {
   if (!isFailure(row)) continue;
   failures += 1;
@@ -195,19 +239,24 @@ for (const row of rows) {
   const coverage = currentCoverage(row);
   if (coverage) {
     if (coverage.class === 'pre_spawn') coveredPreSpawn += 1; else coveredRetry += 1;
+    if (isLegacyShellSurfaceCoverage(coverage)) coveredLegacyShellSurface += 1;
     bump(`${coverage.class}:${coverage.reason}`);
     continue;
   }
   residual += 1;
-  const first = `${row.stderr || ''}\n${row.stdout || ''}`.replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/).map((x) => x.trim()).find(Boolean) || String(row.reason || '<NO_OUTPUT>');
+  const first = `${row.error || ''}\n${row.stderr || ''}\n${row.stdout || ''}`.replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/).map((x) => x.trim()).find(Boolean) || String(row.reason || '<NO_OUTPUT>');
   bump(`residual:${first.replace(/[0-9a-f]{16,40}/ig, '<sha>').replace(/\d{4,}/g, '<n>').slice(0, 140)}`);
   if (residualSamples.length < 20 && paired.has(row.id)) residualSamples.push({ bad: row.command.slice(0, 220), good: paired.get(row.id).command.slice(0, 220), first: first.slice(0, 180) });
+  if (SAMPLE_MATCH && matchedSamples.length < SAMPLE_LIMIT && SAMPLE_MATCH.test(`${first}\n${row.error || ''}\n${row.stderr || ''}\n${row.stdout || ''}\n${row.command || ''}`)) {
+    matchedSamples.push({ id: row.id, kind: row.kind, command: row.command, first, stderr: String(row.stderr || '').slice(0, 2000), stdout: String(row.stdout || '').slice(0, 1200) });
+  }
 }
 const avoidableCovered = coveredPreSpawn + coveredRetry;
-const knownAvoidableCoveragePct = avoidableCovered ? 100 : 0;
+const resolvedOrExpected = expected + avoidableCovered;
 const summary = {
   schema: 'start-process-replay.v1',
   receipt_root: receiptRoot,
+  replay_scope: REPLAY_SCOPE,
   unique_attempts: rows.length,
   raw_failures: failures,
   raw_failure_rate_pct: Number((100 * failures / Math.max(1, rows.length)).toFixed(3)),
@@ -216,7 +265,12 @@ const summary = {
   known_avoidable_covered_pre_spawn: coveredPreSpawn,
   known_avoidable_covered_internal_retry: coveredRetry,
   known_avoidable_total_covered: avoidableCovered,
-  known_avoidable_replay_coverage_pct: knownAvoidableCoveragePct,
+  known_avoidable_share_of_raw_failures_pct: Number((100 * avoidableCovered / Math.max(1, failures)).toFixed(3)),
+  resolved_or_expected_total: resolvedOrExpected,
+  resolved_or_expected_share_of_raw_failures_pct: Number((100 * resolvedOrExpected / Math.max(1, failures)).toFixed(3)),
+  known_avoidable_legacy_shell_surface: coveredLegacyShellSurface,
+  known_avoidable_other_runtime_or_semantic: avoidableCovered - coveredLegacyShellSurface,
+  legacy_shell_surface_rate_pct_of_all_attempts: Number((100 * coveredLegacyShellSurface / Math.max(1, rows.length)).toFixed(3)),
   unclassified_or_avoidable_residual: residual,
   residual_rate_pct: Number((100 * residual / Math.max(1, rows.length)).toFixed(3)),
   scan_seconds: Number(((Date.now() - started) / 1000).toFixed(2)),
@@ -227,4 +281,8 @@ for (const [key, count] of [...counts].sort((a, b) => b[1] - a[1]).slice(0, 40))
 if (residualSamples.length) {
   console.log('\nPAIRED_RESIDUAL_SAMPLES');
   for (const sample of residualSamples) console.log(JSON.stringify(sample));
+}
+if (matchedSamples.length) {
+  console.log(`\nMATCHED_RESIDUAL_SAMPLES pattern=${JSON.stringify(SAMPLE_MATCH_RAW)}`);
+  for (const sample of matchedSamples) console.log(JSON.stringify(sample));
 }

@@ -171,7 +171,7 @@ assert.deepEqual(startProcessTool.inputSchema.properties.activity_target.propert
 assert.equal(startProcessTool.inputSchema.properties.activity_target.properties.id.maxLength, 160);
 assert.equal(startProcessTool.inputSchema.properties.activity_target.properties.project.maxLength, 80);
 assert.equal(startProcessTool.inputSchema.properties.action_class.maxLength, 64);
-const invalidActivityTarget = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: "start_process", arguments: { command: "Write-Output INVALID_TARGET_MUST_NOT_RUN", activity_target: { type: "card", id: "bad id with spaces" } } } });
+const invalidActivityTarget = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: "start_process", arguments: { executable: process.execPath, args: ["-e", "process.stdout.write('INVALID_TARGET_MUST_NOT_RUN')"], activity_target: { type: "card", id: "bad id with spaces" } } } });
 assert.equal(invalidActivityTarget.body?.result?.isError, true, invalidActivityTarget.text);
 assert.match(invalidActivityTarget.body.result.content?.[0]?.text || "", /activity_target|invalid|validation/i);
 const readOutputTool = listed.body.result.tools.find((tool) => tool.name === "read_output");
@@ -182,6 +182,22 @@ assert.equal(readOutputTool._meta, undefined, "read_output must stay widget/app 
 assert.ok(startProcessTool.inputSchema.properties.executable, "start_process must advertise structured executable input over MCP transport");
 assert.ok(startProcessTool.inputSchema.properties.args, "start_process must advertise structured argv input over MCP transport");
 assert.ok(startProcessTool.inputSchema.properties.stdin, "start_process must advertise structured stdin input over MCP transport");
+assert.ok(startProcessTool.inputSchema.properties.script, "start_process must advertise structured script input over MCP transport");
+assert.deepEqual(startProcessTool.inputSchema.properties.language.enum, ["powershell", "python", "node", "bash"]);
+const startProcessPropertyOrder = Object.keys(startProcessTool.inputSchema.properties);
+const legacyCommandExpected = (process.env.MCP_START_PROCESS_LEGACY_COMMAND_VISIBLE || "1").trim() !== "0";
+assert.match(startProcessTool.inputSchema.properties.executable.description || "", /Preferred for normal process execution/i);
+assert.match(startProcessTool.inputSchema.properties.script.description || "", /Preferred for multiline generated code/i);
+if (legacyCommandExpected) {
+  assert.ok(startProcessPropertyOrder.indexOf("executable") < startProcessPropertyOrder.indexOf("command"), JSON.stringify(startProcessPropertyOrder));
+  assert.ok(startProcessPropertyOrder.indexOf("script") < startProcessPropertyOrder.indexOf("command"), JSON.stringify(startProcessPropertyOrder));
+  assert.match(startProcessTool.inputSchema.properties.command.description || "", /Legacy shell-command compatibility only/i);
+} else {
+  assert.equal(startProcessTool.inputSchema.properties.command, undefined, JSON.stringify(startProcessPropertyOrder));
+  const hiddenLegacyAttempt = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: "start_process", arguments: { command: "Write-Output LEGACY_COMMAND_MUST_NOT_RUN" } } });
+  assert.equal(hiddenLegacyAttempt.body?.result?.isError, true, hiddenLegacyAttempt.text);
+  assert.match(hiddenLegacyAttempt.body.result.content?.[0]?.text || "", /command|Unrecognized key|validation/i);
+}
 const structuredTransport = await callTool(sessionA, "start_process", {
   executable: process.execPath,
   args: ["-e", "process.stdin.pipe(process.stdout)"],
@@ -191,6 +207,51 @@ const structuredTransport = await callTool(sessionA, "start_process", {
 assert.equal(structuredTransport.exit_code, 0, JSON.stringify(structuredTransport));
 assert.equal(structuredTransport.execution_mode, "native", JSON.stringify(structuredTransport));
 assert.equal(structuredTransport.stdout, "MCPV4_STRUCTURED_OK\n", JSON.stringify(structuredTransport));
+const scriptedTransport = await callTool(sessionA, "start_process", {
+  language: "python",
+  script: `import sys\nsys.stdout.write("MCPV4_SCRIPT_OK|'quote'|\\path")\n`,
+  wait_ms: 10_000,
+});
+assert.equal(scriptedTransport.exit_code, 0, JSON.stringify(scriptedTransport));
+assert.equal(scriptedTransport.execution_mode, "native", JSON.stringify(scriptedTransport));
+assert.equal(scriptedTransport.execution_reason, "structured_script_python_stdin", JSON.stringify(scriptedTransport));
+assert.equal(scriptedTransport.stdout, "MCPV4_SCRIPT_OK|'quote'|\\path", JSON.stringify(scriptedTransport));
+const giantScriptPadding = Array.from({ length: 500 }, (_, index) => `# structured-padding-${index}-\"quote\"-$env:TEMP-{json}`).join("\n");
+const giantPowerShellScript = `${giantScriptPadding}\n$pythonSource = @'\nimport sys\nsys.stdout.write(\"GIANT_ONE_CALL|$env:TEMP|'quote'|{json}|\\\\path\")\n'@\n$pythonSource | python -\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n[Console]::Out.Write("|PS_DONE")\n`;
+const giantStructuredTransport = await callTool(sessionA, "start_process", { language: "powershell", script: giantPowerShellScript, wait_ms: 10_000 });
+assert.equal(giantStructuredTransport.execution_outcome, "success", JSON.stringify(giantStructuredTransport));
+assert.equal(giantStructuredTransport.exit_code, 0, JSON.stringify(giantStructuredTransport));
+assert.equal(giantStructuredTransport.stdout.replace(/\r\n/g, "\n"), "GIANT_ONE_CALL|$env:TEMP|'quote'|{json}|\\path|PS_DONE", JSON.stringify(giantStructuredTransport));
+assert.equal(giantStructuredTransport.execution_reason, "structured_script_powershell_stdin_scriptblock", JSON.stringify(giantStructuredTransport));
+const expectedPythonFailure = await callTool(sessionA, "start_process", {
+  language: "python",
+  script: "raise SystemExit(9)\n",
+  wait_ms: 10_000,
+});
+assert.equal(expectedPythonFailure.execution_outcome, "nonzero_exit", JSON.stringify(expectedPythonFailure));
+assert.equal(expectedPythonFailure.exit_code, 9, JSON.stringify(expectedPythonFailure));
+const expectedNodeFailure = await callTool(sessionA, "start_process", {
+  language: "node",
+  script: "process.exit(11);\n",
+  wait_ms: 10_000,
+});
+assert.equal(expectedNodeFailure.execution_outcome, "nonzero_exit", JSON.stringify(expectedNodeFailure));
+assert.equal(expectedNodeFailure.exit_code, 11, JSON.stringify(expectedNodeFailure));
+const expectedPowerShellFailure = await callTool(sessionA, "start_process", {
+  language: "powershell",
+  script: "Write-Error 'EXPECTED_NONZERO'; exit 7",
+  wait_ms: 10_000,
+});
+assert.equal(expectedPowerShellFailure.execution_outcome, "nonzero_exit", JSON.stringify(expectedPowerShellFailure));
+assert.equal(expectedPowerShellFailure.exit_code, 7, JSON.stringify(expectedPowerShellFailure));
+const invalidPowerShellSyntax = await callTool(sessionA, "start_process", {
+  language: "powershell",
+  script: "if (",
+  wait_ms: 10_000,
+});
+assert.equal(invalidPowerShellSyntax.execution_outcome, "nonzero_exit", JSON.stringify(invalidPowerShellSyntax));
+assert.notEqual(invalidPowerShellSyntax.exit_code, 0, JSON.stringify(invalidPowerShellSyntax));
+assert.match(invalidPowerShellSyntax.stderr || "", /Missing condition|parse|if statement/i, JSON.stringify(invalidPowerShellSyntax));
 
 const authBenchCount = Math.max(0, Number(process.env.MCP_SMOKE_BENCH_COUNT || 0));
 if (authBenchCount > 0) {
@@ -234,13 +295,150 @@ if (authBenchCount > 0) {
   })}`);
 }
 
+const knownSignatureCount = Math.max(0, Number(process.env.MCP_SMOKE_KNOWN_SIGNATURE_COUNT || 0));
+if (knownSignatureCount > 0) {
+  const latencies = [];
+  const modes = { structured_argv: 0, python_script: 0, powershell_script: 0, node_script: 0, observation_script: 0 };
+  for (let index = 0; index < knownSignatureCount; index += 1) {
+    const kind = index % 5;
+    let args;
+    let expectedStdout;
+    let expectedReason;
+    if (kind === 0) {
+      expectedStdout = `KNOWN_ARGV_${index}|$env:TEMP|'literal'`;
+      args = { executable: process.execPath, args: ["-e", `process.stdout.write(${JSON.stringify(expectedStdout)})`], wait_ms: 10_000 };
+      expectedReason = "structured_argv";
+      modes.structured_argv += 1;
+    } else if (kind === 1) {
+      expectedStdout = `KNOWN_PY_SCRIPT_${index}|$env:TEMP|'literal'|{json}`;
+      args = { language: "python", script: `import sys\nsys.stdout.write(${JSON.stringify(expectedStdout)})\n`, wait_ms: 10_000 };
+      expectedReason = "structured_script_python_stdin";
+      modes.python_script += 1;
+    } else if (kind === 2) {
+      expectedStdout = `KNOWN_PS_SCRIPT_${index}|$env:TEMP|'literal'|{json}`;
+      args = { language: "powershell", script: `$payload = @'\n${expectedStdout}\n'@\n[Console]::Out.Write($payload)\n`, wait_ms: 10_000 };
+      expectedReason = "structured_script_powershell_stdin_scriptblock";
+      modes.powershell_script += 1;
+    } else if (kind === 3) {
+      expectedStdout = `KNOWN_NODE_SCRIPT_${index}|$env:TEMP|\"quote\"|\\path`;
+      args = { language: "node", script: `process.stdout.write(${JSON.stringify(expectedStdout)});\n`, wait_ms: 10_000 };
+      expectedReason = "structured_script_node_stdin";
+      modes.node_script += 1;
+    } else {
+      expectedStdout = "";
+      args = { language: "powershell", script: `Get-Command __mcp_known_missing_${index}__ -ErrorAction SilentlyContinue | Out-Null\n[Console]::Out.Write('')\n`, wait_ms: 10_000 };
+      expectedReason = "structured_script_powershell_stdin_scriptblock";
+      modes.observation_script += 1;
+    }
+    const started = performance.now();
+    const result = await callTool(sessionA, "start_process", args);
+    latencies.push(performance.now() - started);
+    assert.equal(result.execution_outcome, "success", JSON.stringify({ index, kind, result }));
+    assert.equal(result.exit_code, 0, JSON.stringify({ index, kind, result }));
+    assert.equal(result.stdout.replace(/\r\n/g, "\n"), expectedStdout.replace(/\r\n/g, "\n"), JSON.stringify({ index, kind, result }));
+    assert.equal(result.execution_reason, expectedReason, JSON.stringify({ index, kind, result }));
+  }
+  const sorted = [...latencies].sort((left, right) => left - right);
+  const pct = (ratio) => sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * ratio))] ?? 0;
+  console.log(`AUTHENTICATED_KNOWN_SIGNATURE_BENCH ${JSON.stringify({
+    oauth_bypassed: false,
+    calls: knownSignatureCount,
+    failures: 0,
+    avoidable_first_attempt_failures: 0,
+    avoidable_first_attempt_failure_rate_pct: 0,
+    modes,
+    p50_ms: Number(pct(0.50).toFixed(3)),
+    p95_ms: Number(pct(0.95).toFixed(3)),
+    max_ms: Number((sorted.at(-1) ?? 0).toFixed(3)),
+  })}`);
+}
+
+const scriptMatrixCount = Math.max(0, Number(process.env.MCP_SMOKE_SCRIPT_MATRIX_COUNT || 0));
+if (scriptMatrixCount > 0) {
+  const latencies = [];
+  const modes = { python: 0, node: 0, powershell: 0 };
+  for (let index = 0; index < scriptMatrixCount; index += 1) {
+    const kind = index % 3;
+    const variant = Math.floor(index / 3) % 4;
+    const bodies = [
+      `MATRIX_${index}|$env:TEMP|'single'|"double"|{json}|\\path`,
+      `MATRIX_${index}|unicode=äö漢字🙂|percent=%TEMP%|dollar=$HOME`,
+      `MATRIX_${index}|line1\nline2|tabs=\t|brackets=[]{}()`,
+      `MATRIX_${index}|backtick=\`|amp=&|pipe=||doublepipe=||semicolon=;`,
+    ];
+    const body = bodies[variant];
+    let language;
+    let script;
+    if (kind === 0) {
+      language = "python";
+      script = `import sys\nsys.stdout.write(${JSON.stringify(body)})\n`;
+      modes.python += 1;
+    } else if (kind === 1) {
+      language = "node";
+      script = `process.stdout.write(${JSON.stringify(body)});\n`;
+      modes.node += 1;
+    } else {
+      language = "powershell";
+      script = `$payload = @'\n${body}\n'@\n[Console]::Out.Write($payload)\n`;
+      modes.powershell += 1;
+    }
+    const startedAt = performance.now();
+    const result = await callTool(sessionA, "start_process", { language, script, wait_ms: 10_000 });
+    latencies.push(performance.now() - startedAt);
+    assert.equal(result.execution_outcome, "success", JSON.stringify({ index, language, result }));
+    assert.equal(result.exit_code, 0, JSON.stringify({ index, language, result }));
+    assert.equal(result.stdout.replace(/\r\n/g, "\n"), body.replace(/\r\n/g, "\n"), JSON.stringify({ index, language, result }));
+    assert.match(result.execution_reason || "", /^structured_script_/);
+  }
+  const sorted = [...latencies].sort((left, right) => left - right);
+  const pct = (ratio) => sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * ratio))] ?? 0;
+  console.log(`AUTHENTICATED_SCRIPT_MATRIX ${JSON.stringify({
+    oauth_bypassed: false,
+    calls: scriptMatrixCount,
+    failures: 0,
+    modes,
+    p50_ms: Number(pct(0.50).toFixed(3)),
+    p95_ms: Number(pct(0.95).toFixed(3)),
+    max_ms: Number((sorted.at(-1) ?? 0).toFixed(3)),
+  })}`);
+}
+
+const scriptBenchCount = Math.max(0, Number(process.env.MCP_SMOKE_SCRIPT_BENCH_COUNT || 0));
+if (scriptBenchCount > 0) {
+  const latencies = [];
+  for (let index = 0; index < scriptBenchCount; index += 1) {
+    const marker = `SCRIPT_BENCH_${index}|$env:TEMP|'quote'|\\path|{json}`;
+    const startedAt = performance.now();
+    const result = await callTool(sessionA, "start_process", {
+      language: "python",
+      script: `import sys\nsys.stdout.write(${JSON.stringify(marker)})\n`,
+      wait_ms: 10_000,
+    });
+    latencies.push(performance.now() - startedAt);
+    assert.equal(result.execution_outcome, "success", JSON.stringify(result));
+    assert.equal(result.exit_code, 0, JSON.stringify(result));
+    assert.equal(result.stdout, marker, JSON.stringify(result));
+    assert.equal(result.execution_reason, "structured_script_python_stdin", JSON.stringify(result));
+  }
+  const sorted = [...latencies].sort((left, right) => left - right);
+  const pct = (ratio) => sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * ratio))] ?? 0;
+  console.log(`AUTHENTICATED_SCRIPT_BENCH ${JSON.stringify({
+    oauth_bypassed: false,
+    calls: scriptBenchCount,
+    failures: 0,
+    p50_ms: Number(pct(0.50).toFixed(3)),
+    p95_ms: Number(pct(0.95).toFixed(3)),
+    max_ms: Number((sorted.at(-1) ?? 0).toFixed(3)),
+  })}`);
+}
+
 const startedAt = Date.now();
 let jobOne;
 let jobTwo;
 let treeJob;
 let floodJob;
 try {
-  jobOne = await callTool(sessionA, "start_process", { command: "1..20 | ForEach-Object { Write-Output ('JOB_ONE_' + $_); Start-Sleep -Milliseconds 200 }", activity_target: { type: "card", id: "smoke-activity-target", project: "nexus" }, action_class: "smoke" });
+  jobOne = await callTool(sessionA, "start_process", { language: "powershell", script: "1..20 | ForEach-Object { Write-Output ('JOB_ONE_' + $_); Start-Sleep -Milliseconds 200 }", activity_target: { type: "card", id: "smoke-activity-target", project: "nexus" }, action_class: "smoke" });
   assert.ok(jobOne.process_id && Date.now() - startedAt < 5000);
   assert.equal(jobOne.running, true);
   const outputOne = await waitForOutput(sessionA, jobOne.process_id, /JOB_ONE_/, 20_000, jobOne);
@@ -255,7 +453,7 @@ try {
     error: outputOne.error,
   }));
 
-  jobTwo = await callTool(sessionA, "start_process", { command: "1..20 | ForEach-Object { Write-Output ('JOB_TWO_' + $_); Start-Sleep -Milliseconds 200 }" });
+  jobTwo = await callTool(sessionA, "start_process", { language: "powershell", script: "1..20 | ForEach-Object { Write-Output ('JOB_TWO_' + $_); Start-Sleep -Milliseconds 200 }" });
   assert.ok(jobTwo.process_id && jobTwo.process_id !== jobOne.process_id);
   const [readOne, readTwo] = await Promise.all([
     callTool(sessionA, "read_output", { process_id: jobOne.process_id }),
@@ -264,7 +462,7 @@ try {
   assert.equal(readOne.running, true);
   assert.equal(readTwo.running, true);
 
-  treeJob = await callTool(sessionA, "start_process", { command: "$child = Start-Process -FilePath \"$env:SystemRoot\\System32\\ping.exe\" -ArgumentList @('-t','127.0.0.1') -WindowStyle Hidden -PassThru; Write-Output ('CHILD_PID=' + $child.Id); Wait-Process -Id $child.Id" });
+  treeJob = await callTool(sessionA, "start_process", { language: "powershell", script: "$child = Start-Process -FilePath \"$env:SystemRoot\\System32\\ping.exe\" -ArgumentList @('-t','127.0.0.1') -WindowStyle Hidden -PassThru; Write-Output ('CHILD_PID=' + $child.Id); Wait-Process -Id $child.Id" });
   const treeOutput = await waitForOutput(sessionA, treeJob.process_id, /CHILD_PID=(\d+)/, 20_000, treeJob);
   const childPid = Number(treeOutput.stdout.match(/CHILD_PID=(\d+)/)?.[1]);
   assert.ok(childPid > 0, treeOutput.stdout);
@@ -272,7 +470,7 @@ try {
   assert.equal(killed.killed, true);
   execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `if (Get-Process -Id ${childPid} -ErrorAction SilentlyContinue) { exit 1 } else { exit 0 }`], { encoding: "utf8" });
 
-  floodJob = await callTool(sessionA, "start_process", { command: "$payload = 'X' * 200; 1..10000 | ForEach-Object { Write-Output (('FLOOD_{0}_{1}' -f $_,$payload)) }" });
+  floodJob = await callTool(sessionA, "start_process", { language: "powershell", script: "$payload = 'X' * 200; 1..10000 | ForEach-Object { Write-Output (('FLOOD_{0}_{1}' -f $_,$payload)) }" });
   const healthStarted = Date.now();
   const healthDuringFlood = await jsonFetch(`${origin}/health`, { signal: AbortSignal.timeout(5_000) });
   assert.equal(healthDuringFlood.response.status, 200, healthDuringFlood.text);

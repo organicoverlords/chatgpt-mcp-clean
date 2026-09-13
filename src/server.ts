@@ -34,18 +34,26 @@ const startProcessCommonShape = {
   activity_target: activityTargetSchema.optional(),
   action_class: actionClassSchema.optional(),
 };
+const legacyStartProcessCommandVisible = (process.env.MCP_START_PROCESS_LEGACY_COMMAND_VISIBLE || "1").trim() !== "0";
 const startProcessInputSchema = z.object({
-  command: z.string().min(1).optional(),
-  executable: z.string().min(1).optional(),
-  args: z.array(z.string()).max(512).optional(),
-  stdin: z.string().max(1_000_000).optional(),
+  executable: z.string().min(1).describe("Preferred for normal process execution. Program name or absolute executable path; paired with args and optional stdin.").optional(),
+  args: z.array(z.string()).max(512).describe("Argument vector passed directly to executable without shell re-parsing.").optional(),
+  stdin: z.string().max(1_000_000).describe("Optional standard input for executable; use this instead of embedding payloads in shell quoting.").optional(),
+  script: z.string().min(1).max(1_000_000).describe("Preferred for multiline generated code. Source text is sent directly to the selected language runtime.").optional(),
+  language: z.enum(["powershell", "python", "node", "bash"]).describe("Runtime for script.").optional(),
+  ...(legacyStartProcessCommandVisible ? {
+    command: z.string().min(1).describe("Legacy shell-command compatibility only. Prefer executable+args or script+language unless shell composition is genuinely required.").optional(),
+  } : {}),
   ...startProcessCommonShape,
 }).strict().superRefine((value, ctx) => {
-  const legacy = value.command !== undefined;
-  const structured = value.executable !== undefined;
-  if (legacy === structured) ctx.addIssue({ code: "custom", message: "provide exactly one of command or executable" });
-  if (legacy && value.args !== undefined) ctx.addIssue({ code: "custom", path: ["args"], message: "args is only valid with executable" });
-  if (legacy && value.stdin !== undefined) ctx.addIssue({ code: "custom", path: ["stdin"], message: "stdin is only valid with executable" });
+  const input = value as typeof value & { command?: string };
+  const legacy = input.command !== undefined;
+  const structured = input.executable !== undefined;
+  const scripted = input.script !== undefined;
+  if (Number(legacy) + Number(structured) + Number(scripted) !== 1) ctx.addIssue({ code: "custom", message: legacyStartProcessCommandVisible ? "provide exactly one of command, executable, or script" : "provide exactly one of executable or script" });
+  if (!structured && input.args !== undefined) ctx.addIssue({ code: "custom", path: ["args"], message: "args is only valid with executable" });
+  if (!structured && input.stdin !== undefined) ctx.addIssue({ code: "custom", path: ["stdin"], message: "stdin is only valid with executable" });
+  if (scripted !== (input.language !== undefined)) ctx.addIssue({ code: "custom", path: ["language"], message: "language is required exactly when script is provided" });
 });
 
 const repairAttemptSchema = z.object({
@@ -204,16 +212,19 @@ export function createServer(callerId: string): McpServer {
   server.registerTool(
     "start_process",
     {
-      description: "Execute a local process. Prefer executable plus args (and optional stdin) for exact process execution without shell parsing. Legacy command remains supported for shell programs; the runner routes plain native commands directly and uses PowerShell only when the command actually needs PowerShell syntax. wait_ms defaults to 750 ms and is bounded to 0..10000 ms.",
+      description: "Execute a local process. Use executable+args for one program, or script+language for multiline generated PowerShell/Python/Node/Bash; script is transported through stdin so do not Base64-wrap code. Use legacy command only when shell composition is genuinely required. The runner routes plain native commands directly. wait_ms defaults to 750 ms and is bounded to 0..10000 ms.",
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
       inputSchema: startProcessInputSchema,
       outputSchema: processOutputSchema,
     },
     async (input) => {
-      const { working_directory, wait_ms, activity_target, action_class } = input;
-      const value = input.command !== undefined
-        ? await processManager.startWithWait(input.command, working_directory, callerId, wait_ms ?? 750, activity_target, action_class)
-        : await processManager.startStructuredWithWait(input.executable!, input.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, input.stdin);
+      const typedInput = input as typeof input & { command?: string };
+      const { working_directory, wait_ms, activity_target, action_class } = typedInput;
+      const value = typedInput.command !== undefined
+        ? await processManager.startWithWait(typedInput.command, working_directory, callerId, wait_ms ?? 750, activity_target, action_class)
+        : typedInput.executable !== undefined
+          ? await processManager.startStructuredWithWait(typedInput.executable, typedInput.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, typedInput.stdin)
+          : await processManager.startScriptWithWait(typedInput.language!, typedInput.script!, working_directory, callerId, wait_ms ?? 750, activity_target, action_class);
       return structuredTextResult(value, callerId);
     },
   );

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProcessManager } from "../dist/lib/process-manager.js";
+import { ProcessManager, replayCurrentPreflightError, replayNormalizeStartProcessCommand } from "../dist/lib/process-manager.js";
 
 const manager = new ProcessManager();
 const commandWaitMs = 30_000;
@@ -23,9 +23,34 @@ function rejects(command, expected) {
   );
 }
 
+assert.equal(replayCurrentPreflightError(`$args=@('ONE'); Write-Output ($args -join ',')`), undefined);
+assert.match(replayCurrentPreflightError(`Get-ChildItem C:\\ -Recurse`) || "", /recursive|drive-root/i);
+
+const silentProbeSubmitted = `Get-Command __mcp_definitely_missing_command__ -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source`;
+const silentProbe = await run(silentProbeSubmitted, "caller_silent_observation_probe");
+assert.equal(silentProbe.exit_code, 0, JSON.stringify(silentProbe));
+assert.equal(silentProbe.stdout, "");
+assert.match(silentProbe.command, /; exit 0$/i);
+assert.equal(silentProbe.submitted_command, silentProbeSubmitted);
+const mutatingSilent = replayNormalizeStartProcessCommand(`Set-Content -LiteralPath 'x' -Value 'y' -ErrorAction SilentlyContinue`);
+assert.ok(!mutatingSilent.rewrites.includes("powershell_silent_observation_probe"));
+
 const valid = await run("$values = @(foreach ($x in 1,2) { $x }); $values | Measure-Object | Select-Object -ExpandProperty Count", "caller_pwsh_preflight_valid");
 assert.equal(valid.exit_code, 0, JSON.stringify(valid));
 assert.match(valid.stdout, /2/);
+
+const structuredPsScript = await manager.startScriptWithWait("powershell", `$mcpScriptValue='SCRIPT_OK'; Write-Output "VALUE=$mcpScriptValue"`, undefined, "caller_structured_ps_script", commandWaitMs);
+assert.equal(structuredPsScript.exit_code, 0, JSON.stringify(structuredPsScript));
+assert.match(structuredPsScript.stdout, /VALUE=SCRIPT_OK/);
+assert.equal(structuredPsScript.execution_reason, "structured_script_powershell_stdin_scriptblock");
+const structuredPsPid = await manager.startScriptWithWait("powershell", `$mcpPid='SCRIPT_PID'; Write-Output $mcpPid`, undefined, "caller_structured_ps_pid", commandWaitMs);
+assert.equal(structuredPsPid.exit_code, 0, JSON.stringify(structuredPsPid));
+assert.match(structuredPsPid.stdout, /SCRIPT_PID/);
+assert.match(structuredPsPid.command, /\$mcpPid/);
+assert.equal(structuredPsPid.submitted_command, undefined);
+const structuredPsInvalid = await manager.startScriptWithWait("powershell", `if (`, undefined, "caller_structured_ps_invalid", commandWaitMs);
+assert.notEqual(structuredPsInvalid.exit_code, 0, JSON.stringify(structuredPsInvalid));
+assert.match(structuredPsInvalid.stderr, /Exception calling \"Create\"|ParserError|Missing closing|Unexpected token/i);
 
 const nativeFailure = await run("cmd.exe /c exit 7", "caller_pwsh_preflight_native_failure");
 assert.equal(nativeFailure.exit_code, 7, "explicit cmd.exe must execute directly and preserve its native exit code");
@@ -43,6 +68,12 @@ try {
   rmSync(cmdNativeDirectory, { recursive: true, force: true });
 }
 
+const busyListLegacy = replayNormalizeStartProcessCommand(String.raw`& "$env:LOCALAPPDATA\BusyCoordinator\busy-python.cmd" list --json`);
+assert.match(busyListLegacy.command, /\blist\b(?!\s+--json)/i);
+assert.ok(busyListLegacy.rewrites.includes("busy_cli_contract"));
+const busyTtlLegacy = replayNormalizeStartProcessCommand(String.raw`& "$env:LOCALAPPDATA\BusyCoordinator\busy-python.cmd" claim 'ChatGPT:task' 'scope' --ttl-seconds 2400`);
+assert.match(busyTtlLegacy.command, /--lease-seconds 2400/i);
+
 const busyActorDirectory = mkdtempSync(join(tmpdir(), "mcp-busy-actor-"));
 try {
   writeFileSync(join(busyActorDirectory, "busy-python.cmd"), `@echo off\r\nset actor=%~2\r\nif /i "%actor:~0,8%"=="ChatGPT:" goto ok\r\nif /i "%actor:~0,8%"=="ChatGPT-" goto ok\r\nif /i "%actor:~0,8%"=="ChatGPT/" goto ok\r\necho claim actor must be ^<harness^>^<separator^>^<task/session suffix^>\r\nexit /b 2\r\n:ok\r\necho ACTOR=%actor%\r\n`, "utf8");
@@ -52,6 +83,13 @@ try {
   assert.match(busyActor.stdout, /ACTOR=ChatGPT-test-normalized/);
   assert.match(busyActor.command, /claim 'ChatGPT-test-normalized'/);
   assert.equal(busyActor.submitted_command, busyActorSubmitted);
+  const spacedSubmitted = `& '.\\busy-python.cmd' claim 'Repo Worker Aspen' scope`;
+  const spacedActor = await manager.startWithWait(spacedSubmitted, busyActorDirectory, "caller_busy_actor_spaced", commandWaitMs);
+  assert.equal(spacedActor.exit_code, 0, JSON.stringify(spacedActor));
+  assert.match(spacedActor.stdout, /ACTOR=ChatGPT:Repo Worker Aspen/);
+  assert.match(spacedActor.command, /claim 'ChatGPT:Repo Worker Aspen'/);
+  assert.equal(spacedActor.repair_attempts, undefined, JSON.stringify(spacedActor));
+
   const arbitrarySubmitted = `& '.\\busy-python.cmd' claim 'rowan-test-repaired' scope`;
   const arbitraryActor = await manager.startWithWait(arbitrarySubmitted, busyActorDirectory, "caller_busy_actor_arbitrary", commandWaitMs);
   assert.equal(arbitraryActor.exit_code, 0, JSON.stringify(arbitraryActor));
@@ -158,10 +196,8 @@ assert.equal(nestedLiteralDoubleQuoted.exit_code, 0, JSON.stringify(nestedLitera
 assert.match(nestedLiteralDoubleQuoted.stdout, /NESTED_LITERAL_OK/);
 const nestedEscapedVariable = await run("pwsh.exe -NoProfile -Command \"Write-Output `$env:TEMP\"", "caller_nested_escaped_variable_allowed");
 assert.equal(nestedEscapedVariable.exit_code, 0, JSON.stringify(nestedEscapedVariable));
-const encodedChild = Buffer.from("Write-Output 'NESTED_ENCODED_OK'", "utf16le").toString("base64");
-const nestedEncoded = await run(`pwsh.exe -NoProfile -EncodedCommand ${encodedChild}`, "caller_nested_encoded_allowed");
-assert.equal(nestedEncoded.exit_code, 0, JSON.stringify(nestedEncoded));
-assert.match(nestedEncoded.stdout, /NESTED_ENCODED_OK/);
+rejects(`pwsh.exe -NoProfile -EncodedCommand QQ==`, /Base64\/encoded command transport is not supported/i);
+rejects(`python -c "import base64;exec(base64.b64decode('QQ==').decode())"`, /Base64\/encoded command transport is not supported/i);
 const nestedFile = await run(String.raw`pwsh.exe -NoProfile -File C:\definitely-missing-mcp-preflight.ps1`, "caller_nested_file_allowed");
 assert.notEqual(nestedFile.exit_code, 0, "missing -File fixture should fail at execution, not preflight");
 const nestedCommandLiteral = await run(String.raw`Write-Output 'pwsh.exe -Command "$env:TEMP"'; # powershell.exe -Command "$childOnlyPath"
@@ -170,6 +206,16 @@ assert.equal(nestedCommandLiteral.exit_code, 0, JSON.stringify(nestedCommandLite
 assert.match(nestedCommandLiteral.stdout, /NESTED_COMMAND_LITERAL_ALLOWED/);
 const unrelatedLaterCommandOption = await run(String.raw`pwsh.exe -NoProfile -File C:\definitely-missing-mcp-preflight.ps1; Write-Output -Command "$env:TEMP"; Write-Output 'NESTED_SEGMENT_BOUNDARY_ALLOWED'`, "caller_nested_segment_boundary_allowed");
 assert.match(unrelatedLaterCommandOption.stdout, /NESTED_SEGMENT_BOUNDARY_ALLOWED/);
+
+const inlineHereSubmitted = `$guard=@\x27    Write-Output "INLINE_HERE_OK"\n\x27@; Invoke-Expression $guard`;
+const inlineHere = await run(inlineHereSubmitted, "caller_pwsh_inline_here_string_repair");
+assert.equal(inlineHere.exit_code, 0, JSON.stringify(inlineHere));
+assert.match(inlineHere.stdout, /INLINE_HERE_OK/);
+assert.equal(inlineHere.submitted_command, inlineHereSubmitted);
+assert.equal(inlineHere.repair_attempts?.length, 1, JSON.stringify(inlineHere));
+assert.equal(inlineHere.repair_attempts[0].reason, "powershell_inline_here_string_boundary");
+assert.match(inlineHere.command, /@\x27\r?\n/);
+assert.match(inlineHere.command, /\r?\n\x27@;/);
 
 const foreachPipelineSubmitted = "foreach ($x in 1,2) { $x } | Measure-Object | Select-Object -ExpandProperty Count";
 const foreachPipeline = await run(foreachPipelineSubmitted, "caller_pwsh_foreach_pipeline_autonormalized");
@@ -280,3 +326,4 @@ try {
 }
 
 console.log("PASS powershell_preflight pwsh=7.6.5 ps7_operators=true loop_pipeline_autonormalization=true nested_command_parent_expansion=guarded args_assignment=allowed drive_root_recursion=blocked vault_root_recursion=blocked bounded_recursion=allowed durable_rejections=true");
+process.exit(0);

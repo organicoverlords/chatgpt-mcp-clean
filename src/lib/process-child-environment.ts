@@ -48,6 +48,22 @@ export function processChildEnvironment(
     if (!containsLocalBin) child[key] = child[key] ? `${localBin}${delimiter}${child[key]}` : localBin;
   }
 
+  // Prefer a checked-out src-layout Python package from the requested working directory.
+  // This is the Python equivalent of project-local node_modules/.bin resolution: it keeps
+  // `python -m <package>` bound to the worktree the caller selected instead of a global or
+  // unrelated canonical checkout. Only activate for an actual Python project with src/.
+  const localPythonSrc = workingDirectory ? join(workingDirectory, "src") : "";
+  const localPyproject = workingDirectory ? join(workingDirectory, "pyproject.toml") : "";
+  if (localPythonSrc && localPyproject && fileExists(localPythonSrc) && fileExists(localPyproject)) {
+    const currentPythonPath = child.PYTHONPATH || "";
+    const parts = currentPythonPath.split(delimiter).filter(Boolean);
+    const containsLocalPythonSrc = parts.some((part) => {
+      try { return resolve(part).toLowerCase() === resolve(localPythonSrc).toLowerCase(); }
+      catch { return part.toLowerCase() === localPythonSrc.toLowerCase(); }
+    });
+    if (!containsLocalPythonSrc) child.PYTHONPATH = currentPythonPath ? `${localPythonSrc}${delimiter}${currentPythonPath}` : localPythonSrc;
+  }
+
   // Android's platform-tools location is deterministic on the standard Windows SDK install.
   // Add it only when adb.exe is present; callers can still override with ANDROID_SDK_ROOT/HOME.
   const androidRoots = [source.ANDROID_SDK_ROOT, source.ANDROID_HOME, localAppData ? join(localAppData, "Android", "Sdk") : ""]

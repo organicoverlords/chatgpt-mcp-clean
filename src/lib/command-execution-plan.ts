@@ -1,4 +1,5 @@
 export type CommandExecutionMode = "powershell" | "native" | "explicit_shell" | "native_sequence" | "native_pipeline";
+export type StructuredScriptLanguage = "powershell" | "python" | "node" | "bash";
 export type CommandRunCondition = "always" | "success" | "failure";
 
 export type CommandExecutionStep = {
@@ -263,6 +264,27 @@ function powershellPlan(command: string, powershellExe: string, reason: string):
   return { mode: "powershell", executable: powershellExe, args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command", command], reason };
 }
 
+/** Execute multiline generated code through stdin instead of serializing it into a shell command string. */
+export function planStructuredScript(
+  language: StructuredScriptLanguage,
+  script: string,
+  powershellExe: string,
+  env: NodeJS.ProcessEnv = process.env,
+): CommandExecutionPlan {
+  if (language === "powershell") {
+    return {
+      mode: "powershell",
+      executable: powershellExe,
+      args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command", "$source=[Console]::In.ReadToEnd(); try { $block=[scriptblock]::Create($source) } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }; & $block"],
+      stdin: script,
+      reason: "structured_script_powershell_stdin_scriptblock",
+    };
+  }
+  if (language === "python") return { mode: "native", executable: "python", args: ["-"], stdin: script, reason: "structured_script_python_stdin" };
+  if (language === "node") return { mode: "native", executable: process.execPath, args: ["-"], stdin: script, reason: "structured_script_node_stdin" };
+  return { mode: "explicit_shell", executable: "bash", args: ["-s"], stdin: script, reason: "structured_script_bash_stdin" };
+}
+
 /** Build an execution plan from already-structured executable/argv input. No shell parsing. */
 export function planStructuredExecution(
   executable: string,
@@ -299,6 +321,18 @@ function planSingleCommand(command: string, powershellExe: string, env: NodeJS.P
   }
 
   const nativeCandidate = NATIVE_COMMANDS.has(base) || isPathExecutable(first!);
+  const inlineCodePayload = (
+    ["python", "python.exe", "python3", "python3.exe", "py", "py.exe"].includes(base) && args[0] === "-c"
+  ) || (
+    ["node", "node.exe"].includes(base) && (args[0] === "-e" || args[0] === "--eval")
+  );
+  // Code passed to Python -c / Node -e is an opaque language payload, not a PowerShell
+  // interpolation surface. Generated code frequently contains `$`, backticks and nested
+  // quotes; sending that payload through PowerShell caused deterministic parser/expansion
+  // failures. Once argv has been parsed, execute the interpreter directly.
+  if (nativeCandidate && inlineCodePayload && !parsed.hasTopLevelShellSyntax) {
+    return { mode: "native", executable: first!, args, reason: "inline_code_argv_direct" };
+  }
   if (nativeCandidate && !parsed.hasTopLevelShellSyntax && !parsed.hasPowerShellExpansion) {
     return { mode: "native", executable: first!, args, reason: callOperatorMatch ? "powershell_call_operator_native_argv" : "native_argv_direct" };
   }

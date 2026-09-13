@@ -4,7 +4,7 @@ import { mkdir as mkdirAsync, readFile as readFileAsync, readdir as readdirAsync
 import { isAbsolute, join, resolve } from "node:path";
 import { Worker } from "node:worker_threads";
 import { currentTelemetryContext, emitTelemetry, withTelemetryContext, type TelemetryContext } from "./transport-telemetry.js";
-import { planCommandExecution, planStructuredExecution, type CommandExecutionMode, type CommandExecutionPlan } from "./command-execution-plan.js";
+import { planCommandExecution, planStructuredExecution, planStructuredScript, type CommandExecutionMode, type CommandExecutionPlan, type StructuredScriptLanguage } from "./command-execution-plan.js";
 
 const MAX_CAPTURE_CHARS = 100_000;
 // Current live MCPv3 capability was revalidated on 2026-09-04 with a single 31,000+
@@ -756,11 +756,37 @@ function normalizeCanonicalToolEntrypoints(command: string): PowerShellCommandNo
 function normalizeBusyActorValue(actor: string): string {
   const canonical = canonicalBusyHarness(actor);
   if (canonical !== actor) return canonical;
-  if (!actor || actor.startsWith("$") || /\s/.test(actor)) return actor;
+  if (!actor || actor.startsWith("$")) return actor;
   const alreadyHarnessed = BUSY_ACTOR_HARNESSES.some((harness) => actor.length > harness.length + 1
     && actor.slice(0, harness.length).toLowerCase() === harness.toLowerCase()
     && "-:/".includes(actor[harness.length]!));
   return alreadyHarnessed ? canonical : `ChatGPT:${actor}`;
+}
+
+function normalizePowerShellSilentObservationProbe(command: string): PowerShellCommandNormalization {
+  if (!/-ErrorAction\s+(?:SilentlyContinue|Ignore)\b/i.test(command)) return { command, changed: false };
+  if (!/\bGet-(?:ChildItem|Command|WinEvent|CimInstance|Item|Content|Process|Service)\b/i.test(command)) return { command, changed: false };
+  // This normalization is deliberately narrow: no external program invocation and no
+  // mutating/error-control cmdlets. It only gives best-effort observation probes the exit
+  // semantics their explicit SilentlyContinue/Ignore flag already requests.
+  if (/(?:^|[;|&]\s*)[&.]?\s*(?:python|py|node|git|gh|rg|cmd|pwsh|powershell|tasklist|schtasks|adb|ssh|scp|curl|ffmpeg)(?:\.exe)?\b/i.test(command)) return { command, changed: false };
+  if (/\b(?:Set|Add|Remove|New|Start|Stop|Restart|Clear|Copy|Move|Rename|Invoke|Export|Import|Out)-[A-Za-z0-9]+\b/i.test(command)) return { command, changed: false };
+  if (/\b(?:throw|exit|Write-Error)\b/i.test(command)) return { command, changed: false };
+  if (/;\s*exit\s+0\s*$/i.test(command)) return { command, changed: false };
+  return { command: `${command}; exit 0`, changed: true };
+}
+
+function normalizeBusyCoordinatorCliArguments(command: string): PowerShellCommandNormalization {
+  if (!/(?:BusyCoordinator[\\/](?:python[\\/])?busy(?:-python)?\.(?:cmd|py)|\bbusy-python\.cmd\b)/i.test(command)) {
+    return { command, changed: false };
+  }
+  let normalized = command;
+  // BusyCoordinator emits JSON from `list` by default; the CLI never accepted --json.
+  normalized = normalized.replace(/(\blist)\s+--json\b/gi, "$1");
+  // Historical callers used --ttl-seconds; the durable contract calls this lease duration.
+  normalized = normalized.replace(/(\b(?:claim|heartbeat)\b[^;\r\n]*?)--ttl-seconds\b/gi, "$1--lease-seconds");
+
+  return { command: normalized, changed: normalized !== command };
 }
 
 function normalizeBusyCoordinatorActorHarness(command: string): PowerShellCommandNormalization {
@@ -998,8 +1024,22 @@ function normalizePowerShellControlStatementPipelines(command: string): PowerShe
   return { command: normalized, changed: normalized !== command };
 }
 
-function commandPreflightError(command: string, executionMode: CommandExecutionMode): string | undefined {
-  const code = powershellCodeMask(command);
+function encodedCommandTransportError(command: string): string | undefined {
+  const lower = command.toLowerCase();
+  const hasPowerShellLauncher = /\b(?:pwsh|powershell)(?:\.exe)?\b/i.test(command);
+  if (hasPowerShellLauncher && /(?:^|\s)-(?:enc|encodedcommand)(?:\s|$)/i.test(command)) {
+    return "Base64/encoded command transport is not supported; use executable+args or script+language with stdin";
+  }
+  const hasPythonLauncher = /\b(?:python(?:3)?|py)(?:\.exe)?\b/i.test(command);
+  if (hasPythonLauncher && /(?:^|\s)-c(?:\s|$)/i.test(command) && lower.includes("exec(") && (lower.includes("base64.b64decode(") || lower.includes("base64.urlsafe_b64decode("))) {
+    return "Base64/encoded command transport is not supported; use executable+args or script+language with stdin";
+  }
+  return undefined;
+}
+
+function commandPolicyError(command: string, code = powershellCodeMask(command)): string | undefined {
+  const encodedTransportError = encodedCommandTransportError(command);
+  if (encodedTransportError) return encodedTransportError;
   const rootScanError = driveRootRecursiveScanError(command, code);
   if (rootScanError) return rootScanError;
   const vaultScanError = vaultRootRecursiveScanError(command, code);
@@ -1010,6 +1050,13 @@ function commandPreflightError(command: string, executionMode: CommandExecutionM
   if (swarmRouteError) return swarmRouteError;
   const productionMutationError = mcpProductionMutationError(command, code);
   if (productionMutationError) return productionMutationError;
+  return undefined;
+}
+
+function commandPreflightError(command: string, executionMode: CommandExecutionMode): string | undefined {
+  const code = powershellCodeMask(command);
+  const policyError = commandPolicyError(command, code);
+  if (policyError) return policyError;
   // Native argv and explicitly requested nested shells bypass the outer PowerShell
   // interpreter, so PowerShell-only syntax/expansion checks would be false positives.
   if (executionMode !== "powershell") return undefined;
@@ -1048,10 +1095,28 @@ function commandPreflightError(command: string, executionMode: CommandExecutionM
   return undefined;
 }
 
+function workerExecArgv(source: string[] = process.execArgv): string[] {
+  const result: string[] = [];
+  for (let index = 0; index < source.length; index += 1) {
+    const arg = source[index]!;
+    if (arg === "--input-type") { index += 1; continue; }
+    if (arg.startsWith("--input-type=")) continue;
+    result.push(arg);
+  }
+  return result;
+}
+
 function powershellWorker(): Worker {
   const testDelay = Math.max(0, Number(process.env.MCP_TEST_WORKER_CONSTRUCTION_DELAY_MS || 0));
   if (testDelay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, testDelay);
-  const worker = new Worker(new URL("./process-launch-worker.js", import.meta.url), { workerData: { powershellExe: POWERSHELL_EXE } });
+  // Worker threads inherit process.execArgv by default. `node --input-type=module` is valid
+  // for stdin/eval parents but invalid for file-backed workers, which previously made the
+  // launcher unavailable before the first child spawn. Preserve ordinary Node flags while
+  // stripping only the parent-input-mode option that cannot apply to this worker module.
+  const worker = new Worker(new URL("./process-launch-worker.js", import.meta.url), {
+    workerData: { powershellExe: POWERSHELL_EXE },
+    execArgv: workerExecArgv(),
+  });
   worker.unref();
   return worker;
 }
@@ -1152,7 +1217,7 @@ function replaceBusyActorWithChatGptHarness(command: string): string | undefined
     if (BUSY_ACTOR_HARNESSES.some((harness) => actor.length > harness.length + 1
       && actor.slice(0, harness.length).toLowerCase() === harness.toLowerCase()
       && "-:/".includes(actor[harness.length]!))) return canonicalBusyHarness(actor);
-    if (!actor || actor.startsWith("$") || /\s/.test(actor)) return actor;
+    if (!actor || actor.startsWith("$")) return actor;
     changed = true;
     return `ChatGPT:${actor}`;
   };
@@ -1201,7 +1266,7 @@ function repairPythonReadTextNewline(command: string, stderr: string): string | 
 }
 
 function repairTiny3dPythonPath(command: string, stderr: string): string | undefined {
-  if (!/No module named ['"]tiny3d['"]/i.test(stderr) || !/\bpython(?:\.exe)?\b[^;\r\n]*\s-m\s+tiny3d\b/i.test(command)) return undefined;
+  if (!/No module named\s+['"]?tiny3d['"]?/i.test(stderr) || !/\bpython(?:\.exe)?\b[^;\r\n]*\s-m\s+tiny3d\b/i.test(command)) return undefined;
   const userProfile = (process.env.USERPROFILE || "").trim();
   if (!userProfile) return undefined;
   const source = join(userProfile, "Desktop", "tiny3d", "src");
@@ -1210,12 +1275,35 @@ function repairTiny3dPythonPath(command: string, stderr: string): string | undef
   return `$env:PYTHONPATH='${quoted}'; ${command}`;
 }
 
+function repairInlinePowerShellHereString(command: string, stderr: string): string | undefined {
+  if (!/No characters are allowed after a here-string header/i.test(stderr)) return undefined;
+  let repaired = command.replace(
+    /(\$[A-Za-z_][A-Za-z0-9_]*\s*=\s*@\x27)([\s\S]*?)\x27@(?=\s*;)/g,
+    (whole, opener: string, body: string) => {
+      const withHead = body.startsWith("\r\n") || body.startsWith("\n") ? body : `\n${body}`;
+      const withTail = withHead.endsWith("\n") || withHead.endsWith("\r") ? withHead : `${withHead}\n`;
+      return `${opener}${withTail}\x27@`;
+    },
+  );
+  repaired = repaired.replace(
+    /(\$[A-Za-z_][A-Za-z0-9_]*\s*=\s*@")([\s\S]*?)"@(?=\s*;)/g,
+    (whole, opener: string, body: string) => {
+      const withHead = body.startsWith("\r\n") || body.startsWith("\n") ? body : `\n${body}`;
+      const withTail = withHead.endsWith("\n") || withHead.endsWith("\r") ? withHead : `${withHead}\n`;
+      return `${opener}${withTail}"@`;
+    },
+  );
+  return repaired !== command ? repaired : undefined;
+}
+
 function runtimeRepairCommand(command: string, stdout: string, stderr: string): RuntimeRepair | undefined {
   const combined = `${stderr}\n${stdout}`;
   if (/claim actor must be <harness><separator><task\/session suffix>/i.test(combined)) {
     const repaired = replaceBusyActorWithChatGptHarness(command);
     if (repaired) return { command: repaired, reason: "busy_actor_missing_harness" };
   }
+  const hereString = repairInlinePowerShellHereString(command, stderr);
+  if (hereString) return { command: hereString, reason: "powershell_inline_here_string_boundary" };
   const atlas = repairStackAtlasLookup(command, stderr);
   if (atlas) return { command: atlas, reason: "stack_atlas_lookup_fallback_to_find" };
   const readText = repairPythonReadTextNewline(command, stderr);
@@ -1233,7 +1321,11 @@ export function replayNormalizeStartProcessCommand(command: string): { command: 
   const rewrites: string[] = [];
   const canonicalTool = normalizeCanonicalToolEntrypoints(command);
   if (canonicalTool.changed) rewrites.push("canonical_tool_entrypoint");
-  const busy = normalizeBusyCoordinatorActorHarness(canonicalTool.command);
+  const silentProbe = normalizePowerShellSilentObservationProbe(canonicalTool.command);
+  if (silentProbe.changed) rewrites.push("powershell_silent_observation_probe");
+  const busyCli = normalizeBusyCoordinatorCliArguments(silentProbe.command);
+  if (busyCli.changed) rewrites.push("busy_cli_contract");
+  const busy = normalizeBusyCoordinatorActorHarness(busyCli.command);
   if (busy.changed) rewrites.push("busy_actor_harness_case");
   const hereString = normalizeInlinePowerShellHereStringNewlines(busy.command);
   if (hereString.changed) rewrites.push("powershell_here_string_newline");
@@ -1271,6 +1363,15 @@ export function replayPrepareStartProcessCommand(command: string): {
     }
   }
   return { command: effectiveCommand, rewrites, execution_mode: executionPlan.mode, execution_reason: executionPlan.reason };
+}
+
+export function replayWorkerExecArgv(source: string[]): string[] {
+  return workerExecArgv(source);
+}
+
+export function replayCurrentPreflightError(command: string): string | undefined {
+  const prepared = replayPrepareStartProcessCommand(command);
+  return commandPreflightError(prepared.command, prepared.execution_mode);
 }
 
 export class ProcessManager {
@@ -2115,8 +2216,11 @@ export class ProcessManager {
     submittedCommand: string | undefined,
     normalizationRewrites: string[] = [],
     preflightCommand: string = effectiveCommand,
+    preflightMode: "full" | "policy" = "full",
   ): StartResult {
-    const preflightError = commandPreflightError(preflightCommand, executionPlan.mode);
+    const preflightError = preflightMode === "policy"
+      ? commandPolicyError(preflightCommand)
+      : commandPreflightError(preflightCommand, executionPlan.mode);
     if (preflightError) {
       const rejectionId = randomUUID();
       void this.persistPreflightRejectionAsync(rejectionId, submittedCommand ?? effectiveCommand, workingDirectory, callerId, preflightError);
@@ -2164,6 +2268,7 @@ export class ProcessManager {
     this.pruneCompleted();
     const prepared = replayPrepareStartProcessCommand(command);
     const executionPlan = planCommandExecution(prepared.command, POWERSHELL_EXE);
+    const preflightCommand = prepared.command;
     return this.startPrepared(
       prepared.command,
       executionPlan,
@@ -2173,6 +2278,7 @@ export class ProcessManager {
       actionClass,
       prepared.command !== command ? command : undefined,
       prepared.rewrites,
+      preflightCommand,
     );
   }
 
@@ -2190,6 +2296,32 @@ export class ProcessManager {
     const displayCommand = structuredCommandDisplay(executable, args);
     const preflightCommand = stdin === undefined ? displayCommand : `${displayCommand}\n${stdin}`;
     return this.startPrepared(displayCommand, executionPlan, workingDirectory, callerId, activityTarget, actionClass, undefined, ["structured_argv", ...(stdin !== undefined ? ["structured_stdin"] : [])], preflightCommand);
+  }
+
+  startScript(
+    language: StructuredScriptLanguage,
+    script: string,
+    workingDirectory?: string,
+    callerId = "caller_unknown",
+    activityTarget?: ActivityTarget,
+    actionClass?: string,
+  ): StartResult {
+    this.pruneCompleted();
+    const executionPlan = planStructuredScript(language, script, POWERSHELL_EXE);
+    const displayCommand = `[${language} script]\n${script}`;
+    const policyCommand = `${structuredCommandDisplay(executionPlan.executable, executionPlan.args)}\n${script}`;
+    return this.startPrepared(
+      displayCommand,
+      executionPlan,
+      workingDirectory,
+      callerId,
+      activityTarget,
+      actionClass,
+      undefined,
+      ["structured_script", `structured_script_${language}_stdin`],
+      policyCommand,
+      "policy",
+    );
   }
 
   async startWithWait(
@@ -2277,6 +2409,26 @@ export class ProcessManager {
     return needsPaging
       ? this.pageOutput(legacy, fullStdout.text, fullStderr.text, observerCallerId, fullStdout.truncated, fullStderr.truncated, limit)
       : legacy;
+  }
+
+  async startScriptWithWait(
+    language: StructuredScriptLanguage,
+    script: string,
+    workingDirectory?: string,
+    callerId = "caller_unknown",
+    waitMs = 750,
+    activityTarget?: ActivityTarget,
+    actionClass?: string,
+  ): Promise<Record<string, unknown>> {
+    const cwd = await boundedValidatedCwd(workingDirectory);
+    const started = this.startScript(language, script, cwd, callerId, activityTarget, actionClass);
+    const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
+    emitTelemetry({ event: "process_wait_requested", action: "start_script", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
+    if (boundedWaitMs === 0) return started;
+    const state = this.processes.get(started.process_id);
+    if (!state || state.exitCode !== null) return this.read(started.process_id, MAX_READ_CHARS);
+    await Promise.race([state.done, delay(boundedWaitMs)]);
+    return this.read(started.process_id, MAX_READ_CHARS);
   }
 
   async startStructuredWithWait(

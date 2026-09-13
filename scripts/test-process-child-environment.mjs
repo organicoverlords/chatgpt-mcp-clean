@@ -36,6 +36,22 @@ const withBusyAlready = processChildEnvironment(
 );
 assert.equal(withBusyAlready.PATH, `C:\\Windows${delimiter}${busyDir}`, "BusyCoordinator PATH entry must not duplicate");
 
+const pythonProject = "C:\\Work\\TinyProject";
+const pythonSrc = join(pythonProject, "src");
+const pythonPyproject = join(pythonProject, "pyproject.toml");
+const withPythonSrc = processChildEnvironment(
+  { PATH: "C:\\Windows", PYTHONPATH: "C:\\SharedPy", MCP_GHBUF_PROXY_ENABLED: "0" },
+  (path) => path === pythonSrc || path === pythonPyproject,
+  pythonProject,
+);
+assert.equal(withPythonSrc.PYTHONPATH, `${pythonSrc}${delimiter}C:\\SharedPy`);
+const withoutPyproject = processChildEnvironment(
+  { PATH: "C:\\Windows", MCP_GHBUF_PROXY_ENABLED: "0" },
+  (path) => path === pythonSrc,
+  pythonProject,
+);
+assert.equal(withoutPyproject.PYTHONPATH, undefined);
+
 const missing = processChildEnvironment(parent, () => false);
 assert.equal(missing.Path, parent.Path);
 assert.equal(missing.GHBUF_PROXY_DIR, undefined);
@@ -69,4 +85,4 @@ const withAndroid = processChildEnvironment(
 );
 assert.equal(withAndroid.PATH, `${platformTools}${delimiter}C:\\Windows`, "standard Android platform-tools must be added when adb.exe exists");
 
-console.log("PASS process-child-environment ghbuf_child_only=true parent_unchanged=true fallback_safe=true");
+console.log("PASS process-child-environment ghbuf_child_only=true parent_unchanged=true project_python_src=true fallback_safe=true");

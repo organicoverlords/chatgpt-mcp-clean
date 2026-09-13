@@ -607,29 +607,49 @@
   },
   {
     "name": "start_process",
-    "description": "Execute a local process. Prefer executable plus args (and optional stdin) for exact process execution without shell parsing. Legacy command remains supported for shell programs; the runner routes plain native commands directly and uses PowerShell only when the command actually needs PowerShell syntax. wait_ms defaults to 750 ms and is bounded to 0..10000 ms.",
+    "description": "Execute a local process. Use executable+args for one program, or script+language for multiline generated PowerShell/Python/Node/Bash; script is transported through stdin so do not Base64-wrap code. Use legacy command only when shell composition is genuinely required. The runner routes plain native commands directly. wait_ms defaults to 750 ms and is bounded to 0..10000 ms.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
       "properties": {
-        "command": {
-          "type": "string",
-          "minLength": 1
-        },
         "executable": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "Preferred for normal process execution. Program name or absolute executable path; paired with args and optional stdin."
         },
         "args": {
           "maxItems": 512,
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "description": "Argument vector passed directly to executable without shell re-parsing."
         },
         "stdin": {
           "type": "string",
-          "maxLength": 1000000
+          "maxLength": 1000000,
+          "description": "Optional standard input for executable; use this instead of embedding payloads in shell quoting."
+        },
+        "script": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000000,
+          "description": "Preferred for multiline generated code. Source text is sent directly to the selected language runtime."
+        },
+        "language": {
+          "type": "string",
+          "enum": [
+            "powershell",
+            "python",
+            "node",
+            "bash"
+          ],
+          "description": "Runtime for script."
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Legacy shell-command compatibility only. Prefer executable+args or script+language unless shell composition is genuinely required."
         },
         "working_directory": {
           "type": "string"

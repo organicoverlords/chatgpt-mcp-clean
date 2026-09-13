@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { planCommandExecution } from "../dist/lib/command-execution-plan.js";
-import { ProcessManager } from "../dist/lib/process-manager.js";
+import { planCommandExecution, planStructuredScript } from "../dist/lib/command-execution-plan.js";
+import { ProcessManager, replayWorkerExecArgv } from "../dist/lib/process-manager.js";
 
 const pwsh = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
+assert.deepEqual(replayWorkerExecArgv(["--trace-warnings", "--input-type=module", "--max-old-space-size=2048"]), ["--trace-warnings", "--max-old-space-size=2048"]);
+assert.deepEqual(replayWorkerExecArgv(["--input-type", "module", "--trace-warnings"]), ["--trace-warnings"]);
 
 const gitPlan = planCommandExecution("git cat-file -e abcdef1234567^{commit}", pwsh);
 assert.equal(gitPlan.mode, "native");
@@ -14,6 +16,15 @@ assert.deepEqual(gitPlan.args, ["cat-file", "-e", "abcdef1234567^{commit}"]);
 const quotedPath = planCommandExecution("git -C 'C:\\Program Files\\repo' status --short", pwsh);
 assert.equal(quotedPath.mode, "native");
 assert.equal(quotedPath.args[1], "C:\\Program Files\\repo");
+
+const opaquePythonCode = planCommandExecution(String.raw`& python.exe -c "print('literal $v2VerifyPath and \"quotes\"')"`, pwsh);
+assert.equal(opaquePythonCode.mode, "native");
+assert.equal(opaquePythonCode.reason, "inline_code_argv_direct");
+assert.equal(opaquePythonCode.args[0], "-c");
+assert.match(opaquePythonCode.args[1], /literal \$v2VerifyPath and "quotes"/);
+const opaqueNodeCode = planCommandExecution(String.raw`node -e "process.stdout.write('literal $env:TEMP')"`, pwsh);
+assert.equal(opaqueNodeCode.mode, "native");
+assert.equal(opaqueNodeCode.reason, "inline_code_argv_direct");
 
 const pythonCode = planCommandExecution(`python -c "print('a;b|c')"`, pwsh);
 assert.equal(pythonCode.mode, "native");
@@ -191,5 +202,19 @@ try {
   rmSync(cmdDir, { recursive: true, force: true });
 }
 
-console.log("PASS command_execution_plan native_argv=true native_sequence=true native_pipeline=true python_heredoc_stdin=true structured_stdin=true cmd_wrapper_elision=true explicit_shell_direct=true powershell_repairs=true powershell_fallback=true");
+const scriptPs = planStructuredScript("powershell", `Write-Output "PS SCRIPT 'quote'"`, pwsh);
+assert.equal(scriptPs.mode, "powershell");
+assert.match(scriptPs.args.at(-1) || "", /ReadToEnd\(\).*ScriptBlock.*Create/i);
+assert.equal(scriptPs.stdin, `Write-Output "PS SCRIPT 'quote'"`);
+assert.ok(!scriptPs.args.some((value) => value.includes("PS SCRIPT")), "PowerShell script must not be serialized into argv");
+const scriptPy = planStructuredScript("python", `print("PY SCRIPT 'quote'")\n`, pwsh);
+assert.equal(scriptPy.mode, "native");
+assert.deepEqual(scriptPy.args, ["-"]);
+assert.equal(scriptPy.stdin, `print("PY SCRIPT 'quote'")\n`);
+const scriptNode = planStructuredScript("node", `process.stdout.write("NODE_SCRIPT")`, pwsh);
+assert.equal(scriptNode.mode, "native");
+assert.deepEqual(scriptNode.args, ["-"]);
+assert.equal(scriptNode.stdin, `process.stdout.write("NODE_SCRIPT")`);
+
+console.log("PASS command_execution_plan native_argv=true inline_code_opaque=true worker_execargv_sanitized=true native_sequence=true native_pipeline=true python_heredoc_stdin=true structured_stdin=true cmd_wrapper_elision=true explicit_shell_direct=true powershell_repairs=true structured_script_stdin=true powershell_fallback=true");
 
