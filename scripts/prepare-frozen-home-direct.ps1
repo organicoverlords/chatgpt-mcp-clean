@@ -8,6 +8,7 @@ param(
     [string]$DeploymentRoot = '',
     [string]$PublicOrigin = 'https://91-159-12-133.sslip.io',
     [string]$OAuthStoreRelative = 'home-direct-test\\oauth.json',
+    [string]$ReceiptStoreRelative = 'shared-process-receipts',
     [string]$CurrentTopologyPath = 'C:\Users\Lauri\Desktop\vault\04 Operating Contracts\mcp-current-topology.json',
     [switch]$ExplicitUserAuthorization,
     [switch]$Plan
@@ -48,7 +49,7 @@ if(Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue){ Fail "c
 if(Test-Path -LiteralPath $DeploymentRoot){ Fail "deployment root already exists: $DeploymentRoot" }
 $planResult=[ordered]@{
     status='PLAN'; commit=$commit; source_root=$root; deployment_root=$DeploymentRoot; runtime_root=(Join-Path $DeploymentRoot 'runtime');
-    task_name=$TaskName; port=$Port; instance_id=$InstanceId; public_origin=$PublicOrigin; oauth_store_relative=$OAuthStoreRelative;
+    task_name=$TaskName; port=$Port; instance_id=$InstanceId; public_origin=$PublicOrigin; oauth_store_relative=$OAuthStoreRelative; receipt_store_relative=$ReceiptStoreRelative;
     current_serving_listen=[string]$topology.serving.backend.listen; current_frozen_root=$currentFrozen; route_mutation=$false
 }
 if($Plan){ $planResult | ConvertTo-Json -Depth 5 -Compress; exit 0 }
@@ -108,7 +109,7 @@ Assert-Hash 'dist\\lib\\process-manager.js' ([string]`$m.process_manager_sha256)
 Assert-Hash 'package-lock.json' ([string]`$m.package_lock_sha256)
 `$owner=(Get-Content -LiteralPath (Join-Path `$root 'owner-login.txt') -Raw).Trim();if([string]::IsNullOrWhiteSpace(`$owner)){throw 'protected owner-login identity empty'}
 `$env:TAILSCALE_OWNER_LOGIN=`$owner;`$env:MCP_OWNER_AUTH_ORIGIN='';`$env:MCP_OWNER_AUTH_MODE='local-edge'
-`$stateRoot=Join-Path `$env:LOCALAPPDATA 'ChatGPTMcpClean\\minimal-connectors';`$oauth=Join-Path `$stateRoot '$OAuthStoreRelative';`$receipts=Join-Path `$stateRoot 'shared-process-receipts'
+`$stateRoot=Join-Path `$env:LOCALAPPDATA 'ChatGPTMcpClean\\minimal-connectors';`$oauth=Join-Path `$stateRoot '$OAuthStoreRelative';`$receipts=Join-Path `$stateRoot '$ReceiptStoreRelative'
 & (Join-Path `$runtime 'scripts\\start-minimal-clone.ps1') -InstanceId '$InstanceId' -Port $Port -PublicOrigin '$PublicOrigin' -StateRoot `$stateRoot -OAuthStorePath `$oauth -SharedReceiptDirectory `$receipts -SkipBuild -RestartOnUnexpectedExit -RestartBackoffSeconds 2 -RestartLimit 0
 exit `$LASTEXITCODE
 "@
