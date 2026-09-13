@@ -174,10 +174,35 @@ assert.equal(nativePipeline.exit_code, 0, JSON.stringify(nativePipeline));
 assert.equal(nativePipeline.execution_mode, "native_pipeline", JSON.stringify(nativePipeline));
 assert.match(nativePipeline.stdout, /PIPE_OK/);
 
+const nestedPowerShellDirect = await manager.startWithWait(`powershell -NoProfile -Command "$x='INNER_OK'; Write-Output $x"`, process.cwd(), "caller_execution_plan_nested_powershell_direct", waitMs);
+assert.equal(nestedPowerShellDirect.exit_code, 0, JSON.stringify(nestedPowerShellDirect));
+assert.equal(nestedPowerShellDirect.execution_mode, "explicit_shell", JSON.stringify(nestedPowerShellDirect));
+assert.equal(nestedPowerShellDirect.execution_reason, "explicit_shell_direct", JSON.stringify(nestedPowerShellDirect));
+assert.match(nestedPowerShellDirect.stdout, /INNER_OK/, JSON.stringify(nestedPowerShellDirect));
+
 const structuredStdin = await manager.startStructuredWithWait(process.execPath, ["-e", "process.stdin.pipe(process.stdout)"], process.cwd(), "caller_execution_plan_structured_stdin", waitMs, undefined, undefined, "STRUCTURED_STDIN_OK\n");
 assert.equal(structuredStdin.exit_code, 0, JSON.stringify(structuredStdin));
 assert.equal(structuredStdin.execution_mode, "native", JSON.stringify(structuredStdin));
 assert.match(structuredStdin.stdout, /STRUCTURED_STDIN_OK/);
+
+const structuredCmdComposition = await manager.startStructuredWithWait("cmd.exe", ["/d", "/s", "/c", "echo CMD_A & echo CMD_B"], process.cwd(), "caller_execution_plan_structured_cmd_composition", waitMs);
+assert.equal(structuredCmdComposition.exit_code, 0, JSON.stringify(structuredCmdComposition));
+assert.match(structuredCmdComposition.stdout, /CMD_A/);
+assert.match(structuredCmdComposition.stdout, /CMD_B/);
+const structuredPs7PipelineChain = await manager.startScriptWithWait("powershell", `& cmd.exe /d /s /c "exit 7" || Write-Output 'PS7_OR_OK'`, process.cwd(), "caller_execution_plan_structured_ps7_or", waitMs);
+assert.equal(structuredPs7PipelineChain.exit_code, 0, JSON.stringify(structuredPs7PipelineChain));
+assert.match(structuredPs7PipelineChain.stdout, /PS7_OR_OK/, JSON.stringify(structuredPs7PipelineChain));
+
+const structuredEnv = await manager.startStructuredWithWait(process.execPath, ["-e", "process.stdout.write(process.env.MCP_STRUCTURED_ENV_TEST || '')"], process.cwd(), "caller_execution_plan_structured_env", waitMs, undefined, undefined, undefined, { MCP_STRUCTURED_ENV_TEST: "ENV_OK" });
+assert.equal(structuredEnv.exit_code, 0, JSON.stringify(structuredEnv));
+assert.equal(structuredEnv.stdout, "ENV_OK", JSON.stringify(structuredEnv));
+assert.doesNotMatch(structuredEnv.command || "", /ENV_OK/, "env values must not be serialized into the reported command");
+assert.equal(process.env.MCP_STRUCTURED_ENV_TEST, undefined, "structured env overrides must remain child-only");
+const scriptEnv = await manager.startScriptWithWait("python", "import os,sys\nsys.stdout.write(os.environ.get('MCP_SCRIPT_ENV_TEST',''))\n", process.cwd(), "caller_execution_plan_script_env", waitMs, undefined, undefined, { MCP_SCRIPT_ENV_TEST: "SCRIPT_ENV_OK" });
+assert.equal(scriptEnv.exit_code, 0, JSON.stringify(scriptEnv));
+assert.equal(scriptEnv.stdout, "SCRIPT_ENV_OK", JSON.stringify(scriptEnv));
+assert.doesNotMatch(scriptEnv.command || "", /SCRIPT_ENV_OK/, "script env values must not be serialized into the reported command");
+assert.equal(process.env.MCP_SCRIPT_ENV_TEST, undefined, "script env overrides must remain child-only");
 
 const heredoc = await manager.startWithWait("python - <<'PY'\nprint('HEREDOC_OK')\nPY", process.cwd(), "caller_execution_plan_heredoc", waitMs);
 assert.equal(heredoc.exit_code, 0, JSON.stringify(heredoc));
@@ -228,5 +253,5 @@ assert.equal(missingStructuredExecutable.error_code, "ENOENT", JSON.stringify(mi
 assert.deepEqual(missingStructuredExecutable.failure_diagnostic, { kind: "spawn_error", origin: "process", boundary: "spawn", code: "ENOENT" });
 assert.equal(missingStructuredExecutable.stdout, "");
 
-console.log("PASS command_execution_plan native_argv=true inline_code_opaque=true worker_execargv_sanitized=true native_sequence=true native_pipeline=true python_heredoc_stdin=true structured_stdin=true cmd_wrapper_elision=true explicit_shell_direct=true powershell_repairs=true structured_script_stdin=true powershell_fallback=true cmd_multiline_guard=true spawn_error_code=true");
+console.log("PASS command_execution_plan native_argv=true inline_code_opaque=true worker_execargv_sanitized=true native_sequence=true native_pipeline=true python_heredoc_stdin=true structured_stdin=true cmd_wrapper_elision=true explicit_shell_direct=true powershell_repairs=true structured_script_stdin=true powershell_fallback=true cmd_multiline_guard=true spawn_error_code=true structured_env=true nested_powershell_direct=true structured_cmd_composition=true structured_ps7_chain=true");
 

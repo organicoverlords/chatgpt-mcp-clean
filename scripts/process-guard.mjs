@@ -366,7 +366,7 @@ try {
   assert.equal(eightySlotProcess.running, true, "slot 80 must be admitted");
   assert.throws(
     () => eightySlotManager.start("Start-Sleep -Seconds 10 # slot eighty one blocked", undefined, "caller_slot_eighty_one"),
-    /start_process_host_concurrency_limited: shared MCP host already has 80 live process slots; max=80/,
+    /start_process_host_concurrency_limited: live_process_count=80; max_live_processes=80/,
     "slot 81 must be rejected without requiring 80 real child processes",
   );
   await eightySlotManager.kill(eightySlotProcess.process_id);

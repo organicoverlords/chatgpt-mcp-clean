@@ -14,6 +14,7 @@ const REPLAY_SCOPE = (process.env.MCP_REPLAY_SCOPE || 'all').trim();
 const SAMPLE_MATCH_RAW = (process.env.MCP_REPLAY_SAMPLE_MATCH || '').trim();
 const SAMPLE_MATCH = SAMPLE_MATCH_RAW ? new RegExp(SAMPLE_MATCH_RAW, 'i') : undefined;
 const SAMPLE_LIMIT = Math.max(1, Math.min(100, Number(process.env.MCP_REPLAY_SAMPLE_LIMIT || 20)));
+const INCLUDE_CANDIDATE_IDS = (process.env.MCP_REPLAY_INCLUDE_CANDIDATE_IDS || '').trim() === '1';
 
 function jsonString(text, key) {
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -248,6 +249,7 @@ let failures = 0, expected = 0, coveredPreSpawn = 0, coveredRetry = 0, coveredLe
 const residualSamples = [];
 const matchedSamples = [];
 const residualCandidates = new Map();
+const residualCandidateIds = new Map();
 const silentNonzeroByExitCode = new Map();
 const silentNonzeroByExecutionReason = new Map();
 let failureDiagnosticMatches = 0;
@@ -281,6 +283,10 @@ for (const row of rows) {
   if (candidate) {
     const key = `${candidate.group}:${candidate.reason}`;
     residualCandidates.set(key, (residualCandidates.get(key) || 0) + 1);
+    if (INCLUDE_CANDIDATE_IDS) {
+      if (!residualCandidateIds.has(key)) residualCandidateIds.set(key, []);
+      residualCandidateIds.get(key).push(row.id);
+    }
     if (candidate.group === 'failure_diagnostic') {
       failureDiagnosticMatches += 1;
       if (candidate.diagnostic?.input_target) failureDiagnosticInputTargets += 1;
@@ -322,6 +328,7 @@ const summary = {
   silent_nonzero_by_exit_code: Object.fromEntries([...silentNonzeroByExitCode].sort((a, b) => b[1] - a[1])),
   silent_nonzero_by_execution_reason: Object.fromEntries([...silentNonzeroByExecutionReason].sort((a, b) => b[1] - a[1]).slice(0, 20)),
   residual_candidate_breakdown: Object.fromEntries([...residualCandidates].sort((a, b) => b[1] - a[1])),
+  ...(INCLUDE_CANDIDATE_IDS ? { residual_candidate_ids: Object.fromEntries([...residualCandidateIds]) } : {}),
   residual_candidate_note: 'diagnostics are bounded routing metadata only; incomplete receipts are separated from residual; diagnostic candidate buckets are not counted as fixed or avoidable until separately proven',
   scan_seconds: Number(((Date.now() - started) / 1000).toFixed(2)),
 };

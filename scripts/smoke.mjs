@@ -182,6 +182,7 @@ assert.equal(readOutputTool._meta, undefined, "read_output must stay widget/app 
 assert.ok(startProcessTool.inputSchema.properties.executable, "start_process must advertise structured executable input over MCP transport");
 assert.ok(startProcessTool.inputSchema.properties.args, "start_process must advertise structured argv input over MCP transport");
 assert.ok(startProcessTool.inputSchema.properties.stdin, "start_process must advertise structured stdin input over MCP transport");
+assert.ok(startProcessTool.inputSchema.properties.env, "start_process must advertise structured env input over MCP transport");
 assert.ok(startProcessTool.outputSchema?.properties?.failure_diagnostic, "start_process output must expose bounded machine-readable failure diagnostics");
 assert.ok(startProcessTool.inputSchema.properties.script, "start_process must advertise structured script input over MCP transport");
 assert.deepEqual(startProcessTool.inputSchema.properties.language.enum, ["powershell", "python", "node", "bash"]);
@@ -200,6 +201,17 @@ if (legacyCommandExpected) {
   assert.equal(hiddenLegacyAttempt.body?.result?.isError, true, hiddenLegacyAttempt.text);
   assert.match(hiddenLegacyAttempt.body.result.content?.[0]?.text || "", /command|Unrecognized key|validation/i);
 }
+const lossyCmdShimTransport = await mcpPost(sessionA, {
+  jsonrpc: "2.0",
+  id: Date.now(),
+  method: "tools/call",
+  params: { name: "start_process", arguments: { executable: "npm.cmd", args: ["line1\nline2"] } },
+});
+assert.equal(lossyCmdShimTransport.body?.result?.isError, true, lossyCmdShimTransport.text);
+const lossyCmdShimText = lossyCmdShimTransport.body.result.content?.[0]?.text || "";
+assert.match(lossyCmdShimText, /windows_command_shim_multiline_argument_not_lossless/);
+assert.doesNotMatch(lossyCmdShimText, /\b(?:retry|try|prefer|use)\b/i, lossyCmdShimText);
+
 const structuredTransport = await callTool(sessionA, "start_process", {
   executable: process.execPath,
   args: ["-e", "process.stdin.pipe(process.stdout)"],
@@ -209,6 +221,14 @@ const structuredTransport = await callTool(sessionA, "start_process", {
 assert.equal(structuredTransport.exit_code, 0, JSON.stringify(structuredTransport));
 assert.equal(structuredTransport.execution_mode, "native", JSON.stringify(structuredTransport));
 assert.equal(structuredTransport.stdout, "MCPV4_STRUCTURED_OK\n", JSON.stringify(structuredTransport));
+const structuredEnvTransport = await callTool(sessionA, "start_process", {
+  executable: process.execPath,
+  args: ["-e", "process.stdout.write(process.env.MCP_SMOKE_ENV || '')"],
+  env: { MCP_SMOKE_ENV: "MCPV4_ENV_OK" },
+  wait_ms: 10_000,
+});
+assert.equal(structuredEnvTransport.exit_code, 0, JSON.stringify(structuredEnvTransport));
+assert.equal(structuredEnvTransport.stdout, "MCPV4_ENV_OK", JSON.stringify(structuredEnvTransport));
 const scriptedTransport = await callTool(sessionA, "start_process", {
   language: "python",
   script: `import sys\nsys.stdout.write("MCPV4_SCRIPT_OK|'quote'|\\path")\n`,

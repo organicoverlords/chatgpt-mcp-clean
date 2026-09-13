@@ -28,6 +28,12 @@ const activityTargetSchema = z.object({
 }).strict();
 const actionClassSchema = z.string().min(1).max(64).regex(activityToken);
 
+const processEnvironmentSchema = z.record(
+  z.string().min(1).max(128).regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+  z.string().max(65_536),
+).refine((value) => Object.keys(value).length <= 128, "env may contain at most 128 entries")
+  .refine((value) => Object.entries(value).reduce((sum, [key, item]) => sum + key.length + item.length, 0) <= 1_000_000, "env payload exceeds 1000000 characters");
+
 const startProcessCommonShape = {
   working_directory: z.string().optional(),
   wait_ms: z.number().int().min(0).max(10_000).optional(),
@@ -39,6 +45,7 @@ const startProcessInputSchema = z.object({
   executable: z.string().min(1).describe("Program name or absolute executable path; paired with args and optional stdin; no shell re-parsing.").optional(),
   args: z.array(z.string()).max(512).describe("Argument vector passed directly to executable without shell re-parsing.").optional(),
   stdin: z.string().max(1_000_000).describe("Optional standard input passed directly to executable.").optional(),
+  env: processEnvironmentSchema.describe("Child-process environment overrides for executable or script input.").optional(),
   script: z.string().min(1).max(1_000_000).describe("Multiline source text for the selected runtime; transported through stdin.").optional(),
   language: z.enum(["powershell", "python", "node", "bash"]).describe("Runtime for script.").optional(),
   ...(legacyStartProcessCommandVisible ? {
@@ -53,6 +60,7 @@ const startProcessInputSchema = z.object({
   if (Number(legacy) + Number(structured) + Number(scripted) !== 1) ctx.addIssue({ code: "custom", message: legacyStartProcessCommandVisible ? "provide exactly one of command, executable, or script" : "provide exactly one of executable or script" });
   if (!structured && input.args !== undefined) ctx.addIssue({ code: "custom", path: ["args"], message: "args is only valid with executable" });
   if (!structured && input.stdin !== undefined) ctx.addIssue({ code: "custom", path: ["stdin"], message: "stdin is only valid with executable" });
+  if (legacy && input.env !== undefined) ctx.addIssue({ code: "custom", path: ["env"], message: "env is only valid with executable or script" });
   if (scripted !== (input.language !== undefined)) ctx.addIssue({ code: "custom", path: ["language"], message: "language is required exactly when script is provided" });
 });
 
@@ -226,8 +234,8 @@ export function createServer(callerId: string): McpServer {
     "start_process",
     {
       description: legacyStartProcessCommandVisible
-        ? "Execute a local process. Input forms: executable+args with optional stdin, script+language for PowerShell/Python/Node/Bash source, or legacy command for shell composition. Structured source is transported through stdin. wait_ms defaults to 750 ms and is bounded to 0..10000 ms."
-        : "Execute a local process. Input forms: executable+args with optional stdin, or script+language for PowerShell/Python/Node/Bash source. Structured source is transported through stdin. wait_ms defaults to 750 ms and is bounded to 0..10000 ms.",
+        ? "Execute a local process. Input forms: executable+args with optional stdin/env, script+language with optional env for PowerShell/Python/Node/Bash source, or legacy command for shell composition. Structured source is transported through stdin. wait_ms defaults to 750 ms and is bounded to 0..10000 ms."
+        : "Execute a local process. Input forms: executable+args with optional stdin/env, or script+language with optional env for PowerShell/Python/Node/Bash source. Structured source is transported through stdin. wait_ms defaults to 750 ms and is bounded to 0..10000 ms.",
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
       inputSchema: startProcessInputSchema,
       outputSchema: processOutputSchema,
@@ -238,8 +246,8 @@ export function createServer(callerId: string): McpServer {
       const value = typedInput.command !== undefined
         ? await processManager.startWithWait(typedInput.command, working_directory, callerId, wait_ms ?? 750, activity_target, action_class)
         : typedInput.executable !== undefined
-          ? await processManager.startStructuredWithWait(typedInput.executable, typedInput.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, typedInput.stdin)
-          : await processManager.startScriptWithWait(typedInput.language!, typedInput.script!, working_directory, callerId, wait_ms ?? 750, activity_target, action_class);
+          ? await processManager.startStructuredWithWait(typedInput.executable, typedInput.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, typedInput.stdin, typedInput.env)
+          : await processManager.startScriptWithWait(typedInput.language!, typedInput.script!, working_directory, callerId, wait_ms ?? 750, activity_target, action_class, typedInput.env);
       return structuredTextResult(value, callerId);
     },
   );

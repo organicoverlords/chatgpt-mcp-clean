@@ -79,6 +79,12 @@ function structuredCommandDisplay(executable: string, args: string[]): string {
   return [head, ...args.map(quoteStructuredArgument)].join(" ");
 }
 
+function structuredPolicyText(base: string, environment?: Record<string, string>): string {
+  if (!environment || Object.keys(environment).length === 0) return base;
+  const values = Object.entries(environment).map(([key, value]) => `[env:${key}]\n${value}`).join("\n");
+  return `${base}\n${values}`;
+}
+
 function structuredArgvTransportError(executable: string, args: string[]): string | undefined {
   if (!args.some((value) => /[\r\n]/.test(value))) return undefined;
   const base = executable.replaceAll("/", "\\").split("\\").at(-1)?.toLowerCase() ?? executable.toLowerCase();
@@ -1225,7 +1231,9 @@ function processFailureDiagnostic(
   if (!error && (exitCode === null || exitCode === 0)) return undefined;
   const boundedErrorCode = boundedFailureCode(errorCode);
   if (error && boundedErrorCode) return { kind: "spawn_error", origin: "process", boundary: "spawn", code: boundedErrorCode };
-  const output = `${stderr}\n${stdout}\n${error ?? ""}`.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+  const stripFailureAnsi = (value: string) => value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+  const parserOutput = stripFailureAnsi(`${stderr}\n${error ?? ""}`);
+  const output = stripFailureAnsi(`${stderr}\n${stdout}\n${error ?? ""}`);
   const structuredLanguage: StructuredScriptLanguage | undefined = executionReason?.startsWith("structured_script_powershell_")
     ? "powershell"
     : executionReason === "structured_script_python_stdin"
@@ -1241,17 +1249,17 @@ function processFailureDiagnostic(
   if (structuredLanguage === "powershell" && /Exception calling ["']Create["']/i.test(output)) parserOrigin = "powershell";
   else if (structuredLanguage === "python" && /File ["']<stdin>["'].*(?:SyntaxError|IndentationError|TabError):/is.test(output)) parserOrigin = "python";
   else if (structuredLanguage === "node" && /(?:\[stdin\]|\[eval\]).*SyntaxError:/is.test(output)) parserOrigin = "node";
-  else if (structuredLanguage === "bash" && /(?:bash|sh):[^\n]*syntax error/i.test(output)) parserOrigin = "bash";
-  else if (/(?:^|[;&|\s])(?:python(?:3)?|py)(?:\.exe)?\s+-c\b/i.test(command) && /File ["']<string>["'].*(?:SyntaxError|IndentationError|TabError):/is.test(output)) parserOrigin = "python";
-  else if (/(?:^|[;&|\s])node(?:\.exe)?\s+(?:-e|--eval)\b/i.test(command) && /(?:\[eval\]|evalmachine\.<anonymous>).*SyntaxError:/is.test(output)) parserOrigin = "node";
+  else if (structuredLanguage === "bash" && /(?:bash|sh):[^\n]*syntax error/i.test(parserOutput)) parserOrigin = "bash";
+  else if (/(?:^|[;&|\s])(?:python(?:3)?|py)(?:\.exe)?\s+-c\b/i.test(command) && /File ["']<string>["'].*(?:SyntaxError|IndentationError|TabError):/is.test(parserOutput)) parserOrigin = "python";
+  else if (/(?:^|[;&|\s])node(?:\.exe)?\s+(?:-e|--eval)\b/i.test(command) && /(?:\[eval\]|evalmachine\.<anonymous>).*SyntaxError:/is.test(parserOutput)) parserOrigin = "node";
   else if ((!executionReason || executionReason.startsWith("powershell_"))
-    && /(?:CategoryInfo\s*:\s*ParserError|ParserError:)/i.test(output)
-    && /(?:FullyQualifiedErrorId\s*:|Line\s+\|)/i.test(output)) parserOrigin = "powershell";
+    && /(?:CategoryInfo\s*:\s*ParserError|ParserError:)/i.test(parserOutput)
+    && /(?:FullyQualifiedErrorId\s*:|Line\s+\|)/i.test(parserOutput)) parserOrigin = "powershell";
 
   if (parserOrigin) {
     // Parser output identifies the language that rejected the source, but it does not prove
     // that changing transport would make invalid source valid. Report ownership/boundary only.
-    const code = parserFailureCode(parserOrigin, output);
+    const code = parserFailureCode(parserOrigin, parserOutput);
     return { kind: "parser_error", origin: parserOrigin, boundary: structuredLanguage ? "source" : "legacy_command", ...(code ? { code } : {}) };
   }
 
@@ -1592,7 +1600,7 @@ export class ProcessManager {
       live_process_count: liveCount,
       max_live_processes: maxLiveTotal,
     }, ownerContext);
-    throw new Error(`start_process_host_concurrency_limited: shared MCP host already has ${liveCount} live process slots; max=${maxLiveTotal}; use read_output/kill_process on existing work before starting more`);
+    throw new Error(`start_process_host_concurrency_limited: live_process_count=${liveCount}; max_live_processes=${maxLiveTotal}`);
   }
 
   private claimHostAdmissionSlot(processId: string, callerId: string, claimedAt: string, ownerContext: TelemetryContext): void {
@@ -2411,11 +2419,13 @@ export class ProcessManager {
     activityTarget?: ActivityTarget,
     actionClass?: string,
     stdin?: string,
+    environment?: Record<string, string>,
   ): StartResult {
     this.pruneCompleted();
-    const executionPlan = planStructuredExecution(executable, args, stdin, POWERSHELL_EXE);
+    const executionPlan = planStructuredExecution(executable, args, stdin, POWERSHELL_EXE, process.env, environment);
     const displayCommand = structuredCommandDisplay(executable, args);
-    const preflightCommand = stdin === undefined ? displayCommand : `${displayCommand}\n${stdin}`;
+    const inputText = stdin === undefined ? displayCommand : `${displayCommand}\n${stdin}`;
+    const preflightCommand = structuredPolicyText(inputText, environment);
     const transportPreflightError = structuredArgvTransportError(executable, args);
     return this.startPrepared(displayCommand, executionPlan, workingDirectory, callerId, activityTarget, actionClass, undefined, ["structured_argv", ...(stdin !== undefined ? ["structured_stdin"] : [])], preflightCommand, "full", transportPreflightError);
   }
@@ -2427,11 +2437,12 @@ export class ProcessManager {
     callerId = "caller_unknown",
     activityTarget?: ActivityTarget,
     actionClass?: string,
+    environment?: Record<string, string>,
   ): StartResult {
     this.pruneCompleted();
-    const executionPlan = planStructuredScript(language, script, POWERSHELL_EXE);
+    const executionPlan = planStructuredScript(language, script, POWERSHELL_EXE, process.env, environment);
     const displayCommand = `[${language} script]\n${script}`;
-    const policyCommand = `${structuredCommandDisplay(executionPlan.executable, executionPlan.args)}\n${script}`;
+    const policyCommand = structuredPolicyText(`${structuredCommandDisplay(executionPlan.executable, executionPlan.args)}\n${script}`, environment);
     return this.startPrepared(
       displayCommand,
       executionPlan,
@@ -2546,9 +2557,10 @@ export class ProcessManager {
     waitMs = 750,
     activityTarget?: ActivityTarget,
     actionClass?: string,
+    environment?: Record<string, string>,
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
-    const started = this.startScript(language, script, cwd, callerId, activityTarget, actionClass);
+    const started = this.startScript(language, script, cwd, callerId, activityTarget, actionClass, environment);
     const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
     emitTelemetry({ event: "process_wait_requested", action: "start_script", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;
@@ -2567,9 +2579,10 @@ export class ProcessManager {
     activityTarget?: ActivityTarget,
     actionClass?: string,
     stdin?: string,
+    environment?: Record<string, string>,
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
-    const started = this.startStructured(executable, args, cwd, callerId, activityTarget, actionClass, stdin);
+    const started = this.startStructured(executable, args, cwd, callerId, activityTarget, actionClass, stdin, environment);
     const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
     emitTelemetry({ event: "process_wait_requested", action: "start_structured", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;

@@ -8,8 +8,8 @@ import { planCommandExecution, type CommandExecutionPlan, type CommandExecutionS
 
 type LaunchData = { powershellExe: string };
 
-function launchEnvironment(command: string, requestId: string, cwd: string): { env: NodeJS.ProcessEnv; pytestTempRoot?: string } {
-  const env = processChildEnvironment(process.env, undefined, cwd);
+function launchEnvironment(command: string, requestId: string, cwd: string, overrides?: Record<string, string>): { env: NodeJS.ProcessEnv; pytestTempRoot?: string } {
+  const env = processChildEnvironment({ ...process.env, ...(overrides ?? {}) }, undefined, cwd);
   const invokesPytest = /(?:^|[;&|\s])(?:(?:python|python\.exe|py|py\.exe)\s+(?:-[^\s]+\s+)*-m\s+pytest\b|pytest(?:\.exe)?\b)/i.test(command);
   if (!invokesPytest || /--basetemp(?:=|\s)/i.test(command) || env.PYTEST_DEBUG_TEMPROOT) return { env };
   const systemTemp = (env.TEMP || env.TMP || "").trim();
@@ -203,7 +203,7 @@ async function runNativePipeline(
 
 async function executePlan(requestId: string, command: string, cwd: string, suppliedPlan?: CommandExecutionPlan): Promise<void> {
   const plan = suppliedPlan ?? planCommandExecution(command, data.powershellExe);
-  const launchEnv = launchEnvironment(command, requestId, cwd);
+  const launchEnv = launchEnvironment(command, requestId, cwd, plan.env);
   const steps = planSteps(plan);
   let previousCode: number | undefined;
   let finalSignal: NodeJS.Signals | null = null;

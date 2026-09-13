@@ -16,6 +16,7 @@ export type CommandExecutionPlan = {
   args: string[];
   reason: string;
   stdin?: string;
+  env?: Record<string, string>;
   steps?: CommandExecutionStep[];
 };
 
@@ -270,6 +271,7 @@ export function planStructuredScript(
   script: string,
   powershellExe: string,
   env: NodeJS.ProcessEnv = process.env,
+  childEnv?: Record<string, string>,
 ): CommandExecutionPlan {
   if (language === "powershell") {
     return {
@@ -277,12 +279,13 @@ export function planStructuredScript(
       executable: powershellExe,
       args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command", "$source=[Console]::In.ReadToEnd(); try { $block=[scriptblock]::Create($source) } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }; & $block"],
       stdin: script,
+      ...(childEnv ? { env: { ...childEnv } } : {}),
       reason: "structured_script_powershell_stdin_scriptblock",
     };
   }
-  if (language === "python") return { mode: "native", executable: "python", args: ["-"], stdin: script, reason: "structured_script_python_stdin" };
-  if (language === "node") return { mode: "native", executable: process.execPath, args: ["-"], stdin: script, reason: "structured_script_node_stdin" };
-  return { mode: "explicit_shell", executable: "bash", args: ["-s"], stdin: script, reason: "structured_script_bash_stdin" };
+  if (language === "python") return { mode: "native", executable: "python", args: ["-"], stdin: script, ...(childEnv ? { env: { ...childEnv } } : {}), reason: "structured_script_python_stdin" };
+  if (language === "node") return { mode: "native", executable: process.execPath, args: ["-"], stdin: script, ...(childEnv ? { env: { ...childEnv } } : {}), reason: "structured_script_node_stdin" };
+  return { mode: "explicit_shell", executable: "bash", args: ["-s"], stdin: script, ...(childEnv ? { env: { ...childEnv } } : {}), reason: "structured_script_bash_stdin" };
 }
 
 /** Build an execution plan from already-structured executable/argv input. No shell parsing. */
@@ -292,6 +295,7 @@ export function planStructuredExecution(
   stdin: string | undefined = undefined,
   powershellExe: string,
   env: NodeJS.ProcessEnv = process.env,
+  childEnv?: Record<string, string>,
 ): CommandExecutionPlan {
   const base = basenameLower(executable);
   const explicit = EXPLICIT_SHELLS.has(base);
@@ -300,6 +304,7 @@ export function planStructuredExecution(
     executable: explicit ? explicitShellExecutable(executable, powershellExe, env) : executable,
     args: [...args],
     ...(stdin !== undefined ? { stdin } : {}),
+    ...(childEnv ? { env: { ...childEnv } } : {}),
     reason: explicit ? "structured_explicit_shell" : "structured_argv",
   };
 }

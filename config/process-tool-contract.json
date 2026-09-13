@@ -683,7 +683,7 @@
   },
   {
     "name": "start_process",
-    "description": "Execute a local process. Input forms: executable+args with optional stdin, script+language for PowerShell/Python/Node/Bash source, or legacy command for shell composition. Structured source is transported through stdin. wait_ms defaults to 750 ms and is bounded to 0..10000 ms.",
+    "description": "Execute a local process. Input forms: executable+args with optional stdin/env, script+language with optional env for PowerShell/Python/Node/Bash source, or legacy command for shell composition. Structured source is transported through stdin. wait_ms defaults to 750 ms and is bounded to 0..10000 ms.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -705,6 +705,20 @@
           "type": "string",
           "maxLength": 1000000,
           "description": "Optional standard input passed directly to executable."
+        },
+        "env": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 65536
+          },
+          "description": "Child-process environment overrides for executable or script input."
         },
         "script": {
           "type": "string",

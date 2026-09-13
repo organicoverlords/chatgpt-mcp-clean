@@ -38,6 +38,16 @@ function rejectsScript(language, script) {
   );
 }
 
+function rejectsScriptWithEnv(language, script, env) {
+  assert.throws(
+    () => manager.startScript(language, script, undefined, "caller_script_env_production_mutation_reject", undefined, undefined, env),
+    (error) => error instanceof Error
+      && error.message.startsWith("start_process_preflight_failed:")
+      && /direct MCP production ingress mutation/.test(error.message),
+    `expected structured script+env production mutation rejection: ${language}`,
+  );
+}
+
 function rejectsRawVpsWithGuidance(command) {
   assert.throws(
     () => manager.start(command, undefined, "caller_production_vps_read_route_reject"),
@@ -84,6 +94,8 @@ rejectsStructured("node.exe", ["dist/index.js", "--port", "3011"]);
 rejectsStructured("pwsh.exe", ["-NoProfile", "-Command", "-"], `ssh root@${productionVpsIp} true`);
 rejectsScript("powershell", `Set-Content -LiteralPath '${caddyPath}' -Value 'blocked'`);
 rejectsScript("python", `import paramiko\nprint('${productionVpsIp}')\n`);
+rejectsScriptWithEnv("powershell", `ssh root@$env:TARGET true`, { TARGET: productionVpsIp });
+rejectsScriptWithEnv("python", `import os, paramiko\nprint(os.environ['TARGET'])\n`, { TARGET: productionVpsIp });
 rejects(`& ssh.exe root@5.61.91.127 "cp /tmp/Caddyfile /etc/caddy/Caddyfile; systemctl reload caddy"`);
 rejects(`& ssh.exe root@${productionVpsIp} "python3 -c 'print(1)'"`);
 rejects(`scp.exe C:\tmp\Caddyfile root@${productionVpsIp}:${caddyPath}`);
@@ -233,4 +245,4 @@ assert.equal(benign.exit_code, 0);
 assert.match(benign.stdout, /Caddyfile/);
 assert.match(benign.stdout, /3012/);
 
-console.log("PASS production_mutation_preflight direct_serving_mutations_blocked=true raw_production_vps_transport_blocked=true windows_production_controls_blocked=true direct_serving_starts_blocked=true supported_edge_wrappers_allowed=true structured_argv_policy_guarded=true structured_script_policy_guarded=true offpath_reference_allowed=true");
+console.log("PASS production_mutation_preflight direct_serving_mutations_blocked=true raw_production_vps_transport_blocked=true windows_production_controls_blocked=true direct_serving_starts_blocked=true supported_edge_wrappers_allowed=true structured_argv_policy_guarded=true structured_script_policy_guarded=true structured_env_policy_guarded=true offpath_reference_allowed=true");

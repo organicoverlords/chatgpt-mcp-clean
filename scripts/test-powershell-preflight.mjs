@@ -63,6 +63,14 @@ const legacyPowerShellParserCode = replayFailureDiagnostic({
   execution_reason: "powershell_fallback",
 });
 assert.deepEqual(legacyPowerShellParserCode, { kind: "parser_error", origin: "powershell", boundary: "legacy_command", code: "RedirectionNotSupported" });
+const parserTextOnlyInStdout = replayFailureDiagnostic({
+  command: `rg -n ParserError archive`,
+  stdout: `archived receipt says ParserError: old failure\nLine |\nFullyQualifiedErrorId : UnexpectedToken`,
+  stderr: ``,
+  exit_code: 1,
+  execution_reason: "powershell_shell_syntax",
+});
+assert.equal(parserTextOnlyInStdout, undefined, JSON.stringify(parserTextOnlyInStdout));
 const busyUsageDiagnostic = replayFailureDiagnostic({ command: `busy-python.cmd claim`, stderr: `usage: busy claim [-h] actor scope`, exit_code: 2, execution_reason: "native_argv_direct" });
 assert.deepEqual(busyUsageDiagnostic, { kind: "cli_usage", origin: "busy_cli", boundary: "legacy_command", input_target: { mode: "executable" } });
 const structuredBusyUsageDiagnostic = replayFailureDiagnostic({ command: `busy-python.cmd claim`, stderr: `usage: busy claim [-h] actor scope`, exit_code: 2, execution_reason: "structured_argv" });
