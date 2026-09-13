@@ -9,11 +9,12 @@ import { pipeline } from "node:stream/promises";
 import { constants as zlibConstants, createZstdCompress } from "node:zlib";
 import type { Request, Response as ExpressResponse } from "express";
 import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { z } from "zod";
 
-export const FILE_TRANSFER_WIDGET_URI = "ui://process/file-transfer-v4.html";
-const MCP_APP_MIME_TYPE = "text/html;profile=mcp-app";
-const LEGACY_FILE_TRANSFER_WIDGET_URIS = ["ui://process/file-transfer-v1.html"] as const;
+export const FILE_TRANSFER_WIDGET_URI = "ui://process/file-transfer-v6.html";
+const MCP_APP_MIME_TYPE = RESOURCE_MIME_TYPE;
+const LEGACY_FILE_TRANSFER_WIDGET_URIS = ["ui://process/file-transfer-v5.html", "ui://process/file-transfer-v4.html", "ui://process/file-transfer-v1.html"] as const;
 const LOCAL_EXPORT_TTL_MS = 5 * 60 * 1000;
 const MAX_NATIVE_IMAGE_BYTES = 20 * 1024 * 1024;
 const DEFAULT_MAX_FILE_BYTES = 512 * 1024 * 1024;
@@ -173,6 +174,12 @@ function localTransferUrl(token: string): string {
   return url.href;
 }
 
+function localDiagnosticUrl(token: string): string {
+  const url = new URL("file-transfer/diagnostic", publicOrigin());
+  url.searchParams.set("token", token);
+  return url.href;
+}
+
 export async function prepareLocalFileTransfer(path: string): Promise<LocalFileTransfer> {
   cleanupExpired();
   if (!isAbsolute(path)) throw new Error("upload_local_file path must be absolute");
@@ -218,6 +225,7 @@ function localTransferMeta(item: LocalFileTransfer, deliveryMode: "library_uploa
     phase: "ready",
     delivery_mode: deliveryMode,
     transfer_url: localTransferUrl(item.token),
+    diagnostic_url: localDiagnosticUrl(item.token),
     file_name: item.file_name,
     mime_type: item.mime_type,
     bytes: item.bytes,
@@ -486,6 +494,32 @@ function zstdStream() {
   return createZstdCompress({ params: { [zlibConstants.ZSTD_c_compressionLevel]: 1 } });
 }
 
+export async function serveLocalFileTransferDiagnostic(req: Request, res: ExpressResponse): Promise<void> {
+  cleanupExpired();
+  const token = typeof req.query.token === "string" ? req.query.token : "";
+  const item = token ? localExports.get(token) : undefined;
+  if (!item) { res.status(404).send("File transfer token is invalid or expired"); return; }
+  const raw = typeof req.body === "string" ? req.body : "";
+  if (!raw || Buffer.byteLength(raw, "utf8") > 16 * 1024) { res.status(400).send("Diagnostic payload is invalid"); return; }
+  let body: any;
+  try { body = JSON.parse(raw); } catch { res.status(400).send("Diagnostic payload is invalid"); return; }
+  const safe = {
+    file_name: item.file_name, bytes: item.bytes, sha256: item.sha256,
+    phase: typeof body?.phase === "string" ? body.phase.slice(0, 64) : "unknown",
+    uploadFileAvailable: body?.uploadFileAvailable === true,
+    selectFilesAvailable: body?.selectFilesAvailable === true,
+    getFileDownloadUrlAvailable: body?.getFileDownloadUrlAvailable === true,
+    rawFileId: typeof body?.rawFileId === "string" ? body.rawFileId.slice(0, 256) : "",
+    downloadUrlAvailable: body?.downloadUrlAvailable === true,
+    uploadError: typeof body?.uploadError === "string" ? body.uploadError.slice(0, 512) : "",
+    getFileDownloadUrlError: typeof body?.getFileDownloadUrlError === "string" ? body.getFileDownloadUrlError.slice(0, 512) : "",
+  };
+  console.error("FILE_TRANSFER_HOST_DIAG " + JSON.stringify(safe));
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Cache-Control", "no-store");
+  res.status(204).end();
+}
+
 export async function serveLocalFileTransfer(req: Request, res: ExpressResponse): Promise<void> {
   cleanupExpired();
   const token = typeof req.query.token === "string" ? req.query.token : "";
@@ -644,10 +678,8 @@ function widgetResourceMeta() {
 function uploadToolMeta() {
   return {
     ui: { resourceUri: FILE_TRANSFER_WIDGET_URI, visibility: ["model", "app"] },
-    // Current MCP Apps helpers mirror the modern nested URI into this flat
-    // compatibility key. Some ChatGPT host/binding paths still require it
-    // before they fetch the ui:// resource and mount the widget.
-    "ui/resourceUri": FILE_TRANSFER_WIDGET_URI,
+    // Keep the ChatGPT compatibility template while letting the official
+    // MCP Apps helper normalize ui.resourceUri -> ui/resourceUri.
     "openai/outputTemplate": FILE_TRANSFER_WIDGET_URI,
   };
 }
@@ -672,21 +704,28 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
     { title: "Exact transferred file", description: "Exact original local file or manifest-declared review member returned by a tool" },
     async (uri) => ({ contents: [await localFileResourceContents(uri.href)] }),
   );
-  server.registerResource("process-file-transfer-widget", FILE_TRANSFER_WIDGET_URI, { mimeType: MCP_APP_MIME_TYPE }, async () => ({
-    contents: [{
-      uri: FILE_TRANSFER_WIDGET_URI,
-      mimeType: MCP_APP_MIME_TYPE,
-      text: fileTransferWidgetHtml(),
-      _meta: widgetResourceMeta(),
-    }],
-  }));
+  registerAppResource(
+    server,
+    "process-file-transfer-widget",
+    FILE_TRANSFER_WIDGET_URI,
+    { _meta: widgetResourceMeta() },
+    async () => ({
+      contents: [{
+        uri: FILE_TRANSFER_WIDGET_URI,
+        mimeType: RESOURCE_MIME_TYPE,
+        text: fileTransferWidgetHtml(),
+        _meta: widgetResourceMeta(),
+      }],
+    }),
+  );
   for (const [index, uri] of LEGACY_FILE_TRANSFER_WIDGET_URIS.entries()) {
     server.registerResource(`process-file-transfer-widget-legacy-${index + 1}`, uri, { mimeType: MCP_APP_MIME_TYPE }, async () => ({
       contents: [{ uri, mimeType: MCP_APP_MIME_TYPE, text: fileTransferWidgetHtml(), _meta: widgetResourceMeta() }],
     }));
   }
 
-  server.registerTool(
+  registerAppTool(
+    server,
     "upload_local_file",
     {
       description: "Return one exact local file as a native MCP file resource and, for supported non-ZIP files, persist the same verified bytes into ChatGPT Library through the dedicated HTTPS file-transfer widget. ZIP files remain exact resource-only transfers. start_process/read_output never mount this widget.",
@@ -750,19 +789,27 @@ async function render(result){
  if(p.delivery_mode==='review_resources'){setStatus('FILE_TRANSFER_OK review media exposed from '+p.file_name);return;}
  if(p.delivery_mode==='resource_only'){setStatus('FILE_TRANSFER_OK exact resource '+p.file_name);return;}
  if(p.delivery_mode!=='library_upload')return;
- if(!p.transfer_url)return;setStatus('FILE_TRANSFER_RUNNING '+p.file_name);
+ const diag={uploadFileAvailable:typeof window.openai?.uploadFile==='function',selectFilesAvailable:typeof window.openai?.selectFiles==='function',getFileDownloadUrlAvailable:typeof window.openai?.getFileDownloadUrl==='function'};
+ async function report(phase,extra={}){if(!p.diagnostic_url)return;try{await fetch(p.diagnostic_url,{method:'POST',headers:{'Content-Type':'text/plain;charset=UTF-8'},body:JSON.stringify({phase,...diag,...extra}),cache:'no-store',keepalive:true});}catch{}}
+ if(!p.transfer_url)return;setStatus('FILE_TRANSFER_DIAG '+JSON.stringify(diag)+' '+p.file_name);
+ await report('capabilities');
  try{
-  if(typeof window.openai?.uploadFile!=='function')throw new Error('UPLOAD_FILE_UNAVAILABLE');
+  if(!diag.uploadFileAvailable)throw new Error('UPLOAD_FILE_UNAVAILABLE');
   const r=await fetch(p.transfer_url,{cache:'no-store'});if(!r.ok)throw new Error('TRANSFER_HTTP_'+r.status);
   const data=await r.arrayBuffer();if(data.byteLength!==p.bytes)throw new Error('BYTE_COUNT_MISMATCH');
   const digest=hex(await crypto.subtle.digest('SHA-256',data));if(digest!==p.sha256)throw new Error('SHA256_MISMATCH');
   const blob=new Blob([data],{type:p.mime_type});
   if(p.mime_type.startsWith('image/')){imageEl.src=URL.createObjectURL(blob);imageEl.classList.add('on');window.openai?.notifyIntrinsicHeight?.();}
   const file=new File([blob],p.file_name,{type:p.mime_type});const out=await window.openai.uploadFile(file,{library:true});
-  const fileId=out?.fileId||'';if(!fileId)throw new Error('UPLOAD_FILE_ID_MISSING');
-  window.openai?.setWidgetState?.({modelContent:{file_transfer:{status:'ok',direction:'local_to_chatgpt',fileId,fileName:p.file_name,mimeType:p.mime_type,bytes:p.bytes,sha256:p.sha256,library:true}},privateContent:{file_transfer:{status:'ok',fileId,fileName:p.file_name,mimeType:p.mime_type,bytes:p.bytes,sha256:p.sha256,library:true}},imageIds:p.mime_type.startsWith('image/')?[fileId]:[]});
-  setStatus('FILE_TRANSFER_OK '+p.file_name+' '+p.bytes+' bytes LIBRARY '+fileId);
- }catch(e){setStatus('FILE_TRANSFER_ERROR '+String(e?.message||e));}
+  const fileId=out?.fileId||'';diag.rawFileId=fileId;if(!fileId)throw new Error('UPLOAD_FILE_ID_MISSING');
+  await report('upload_ok',{rawFileId:fileId});
+  let downloadResult=null;
+  if(diag.getFileDownloadUrlAvailable){try{downloadResult=await window.openai.getFileDownloadUrl({fileId});diag.getFileDownloadUrlResult=downloadResult;}catch(e){diag.getFileDownloadUrlError=String(e?.message||e);}}else{diag.getFileDownloadUrlError='GET_FILE_DOWNLOAD_URL_UNAVAILABLE';}
+  const modelDiag={uploadFileAvailable:diag.uploadFileAvailable,selectFilesAvailable:diag.selectFilesAvailable,getFileDownloadUrlAvailable:diag.getFileDownloadUrlAvailable,rawFileId:fileId,downloadUrlAvailable:!!downloadResult?.downloadUrl,getFileDownloadUrlError:diag.getFileDownloadUrlError||''};
+  window.openai?.setWidgetState?.({modelContent:{file_transfer:{status:'ok',direction:'local_to_chatgpt',fileId,fileName:p.file_name,mimeType:p.mime_type,bytes:p.bytes,sha256:p.sha256,library:true,hostDiagnostics:modelDiag}},privateContent:{file_transfer:{status:'ok',fileId,fileName:p.file_name,mimeType:p.mime_type,bytes:p.bytes,sha256:p.sha256,library:true,hostDiagnostics:diag}},imageIds:p.mime_type.startsWith('image/')?[fileId]:[]});
+  await report('complete',{rawFileId:fileId,downloadUrlAvailable:!!downloadResult?.downloadUrl,getFileDownloadUrlError:diag.getFileDownloadUrlError||''});
+  setStatus('FILE_TRANSFER_OK '+p.file_name+' '+p.bytes+' bytes LIBRARY '+fileId+' DIAG '+JSON.stringify(diag));
+ }catch(e){const message=String(e?.message||e);await report('error',{rawFileId:diag.rawFileId||'',uploadError:message,getFileDownloadUrlError:diag.getFileDownloadUrlError||''});setStatus('FILE_TRANSFER_ERROR '+message+' DIAG '+JSON.stringify(diag));}
 }
 window.addEventListener('message',event=>{if(event.source!==window.parent)return;const m=event.data;if(m?.jsonrpc!=='2.0')return;if(m.id==='file-transfer-init'&&('result'in m||'error'in m)){if(!m.error)window.parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*');return;}if(m.method==='ui/notifications/tool-result')render(m.params||{});});
 const envelope=window.openai?.toolResponseMetadata?.mcp_tool_result;if(envelope)render(envelope);
