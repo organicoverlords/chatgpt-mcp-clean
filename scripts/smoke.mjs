@@ -110,6 +110,13 @@ function toolResult(result) {
 async function callTool(sessionId, name, args = {}) {
   return toolResult(await mcpPost(sessionId, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name, arguments: args } }));
 }
+function assertToolErrorWithoutAppMeta(result, label) {
+  const tool = result.body?.result;
+  assert.equal(tool?.isError, true, `${label}: ${result.text}`);
+  assert.equal(tool?._meta, undefined, `${label} must not attach result app/widget metadata`);
+  assert.equal(tool?.structuredContent, undefined, `${label} must not synthesize structured success content`);
+  assert.equal((tool?.content || []).some((entry) => entry?.type === "image" || entry?.type === "resource_link"), false, `${label} must not expose media/resource content`);
+}
 async function waitForOutput(sessionId, processId, pattern, timeoutMs = 20_000, initialOutput) {
   const deadline = Date.now() + timeoutMs;
   let output = initialOutput;
@@ -172,7 +179,7 @@ assert.equal(startProcessTool.inputSchema.properties.activity_target.properties.
 assert.equal(startProcessTool.inputSchema.properties.activity_target.properties.project.maxLength, 80);
 assert.equal(startProcessTool.inputSchema.properties.action_class.maxLength, 64);
 const invalidActivityTarget = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: "start_process", arguments: { executable: process.execPath, args: ["-e", "process.stdout.write('INVALID_TARGET_MUST_NOT_RUN')"], activity_target: { type: "card", id: "bad id with spaces" } } } });
-assert.equal(invalidActivityTarget.body?.result?.isError, true, invalidActivityTarget.text);
+assertToolErrorWithoutAppMeta(invalidActivityTarget, "schema-invalid start_process");
 assert.match(invalidActivityTarget.body.result.content?.[0]?.text || "", /activity_target|invalid|validation/i);
 const readOutputTool = listed.body.result.tools.find((tool) => tool.name === "read_output");
 assert.equal(readOutputTool.inputSchema.properties.wait_ms.maximum, 10_000);
@@ -207,10 +214,17 @@ const lossyCmdShimTransport = await mcpPost(sessionA, {
   method: "tools/call",
   params: { name: "start_process", arguments: { executable: "npm.cmd", args: ["line1\nline2"] } },
 });
-assert.equal(lossyCmdShimTransport.body?.result?.isError, true, lossyCmdShimTransport.text);
+assertToolErrorWithoutAppMeta(lossyCmdShimTransport, "lossy structured cmd shim");
 const lossyCmdShimText = lossyCmdShimTransport.body.result.content?.[0]?.text || "";
 assert.match(lossyCmdShimText, /windows_command_shim_multiline_argument_not_lossless/);
 assert.doesNotMatch(lossyCmdShimText, /\b(?:retry|try|prefer|use)\b/i, lossyCmdShimText);
+
+const missingReadOverHttp = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: "read_output", arguments: { process_id: "00000000-0000-4000-8000-000000000000" } } });
+assertToolErrorWithoutAppMeta(missingReadOverHttp, "missing read_output over HTTP");
+const missingKillOverHttp = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: "kill_process", arguments: { process_id: "00000000-0000-4000-8000-000000000000" } } });
+assertToolErrorWithoutAppMeta(missingKillOverHttp, "missing kill_process over HTTP");
+const missingUploadOverHttp = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: "upload_local_file", arguments: { path: "C:\\definitely-missing\\image.png" } } });
+assertToolErrorWithoutAppMeta(missingUploadOverHttp, "missing upload_local_file over HTTP");
 
 const structuredTransport = await callTool(sessionA, "start_process", {
   executable: process.execPath,
