@@ -204,6 +204,19 @@ try {
     assert.deepEqual(byName.start_process.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: true });
     assert.deepEqual(byName.read_output.annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: false });
     assert.deepEqual(byName.kill_process.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: false });
+    const expectedInvocationUi = {
+      start_process: { title: "Run command", invoking: "Running command…", invoked: "Command returned" },
+      read_output: { title: "Check command", invoking: "Checking command…", invoked: "Command checked" },
+      kill_process: { title: "Stop process", invoking: "Stopping process…", invoked: "Process stop checked" },
+      upload_local_file: { title: "Share local file", invoking: "Preparing file…", invoked: "File ready" },
+      download_chatgpt_file: { title: "Save ChatGPT file", invoking: "Saving file…", invoked: "File saved" },
+    };
+    for (const [name, expectedUi] of Object.entries(expectedInvocationUi)) {
+      assert.equal(byName[name].title, expectedUi.title, `${name} should expose a concise user-facing title`);
+      assert.equal(byName[name]._meta?.["openai/toolInvocation/invoking"], expectedUi.invoking, `${name} should expose concise invoking status`);
+      assert.equal(byName[name]._meta?.["openai/toolInvocation/invoked"], expectedUi.invoked, `${name} should expose concise invoked status`);
+      assert.ok(expectedUi.invoking.length <= 64 && expectedUi.invoked.length <= 64, `${name} invocation statuses must stay within Apps SDK limits`);
+    }
     assert.equal(byName.start_process?._meta?.["openai/outputTemplate"], undefined);
     assert.equal(byName.read_output?._meta?.["openai/outputTemplate"], undefined);
     assert.equal(byName.upload_local_file?._meta?.["openai/outputTemplate"], FILE_TRANSFER_WIDGET_URI);

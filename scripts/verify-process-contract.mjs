@@ -19,13 +19,32 @@ const actualTools = Object.entries(server._registeredTools)
   .sort(([a], [b]) => a.localeCompare(b))
   .map(([name, tool]) => ({ name, description: tool.description || "", inputSchema: z.toJSONSchema(tool.inputSchema), ...(tool.outputSchema ? { outputSchema: z.toJSONSchema(tool.outputSchema) } : {}) }));
 
+const expectedInvocationUi = {
+  start_process: { title: "Run command", invoking: "Running command…", invoked: "Command returned" },
+  read_output: { title: "Check command", invoking: "Checking command…", invoked: "Command checked" },
+  kill_process: { title: "Stop process", invoking: "Stopping process…", invoked: "Process stop checked" },
+  upload_local_file: { title: "Share local file", invoking: "Preparing file…", invoked: "File ready" },
+  download_chatgpt_file: { title: "Save ChatGPT file", invoking: "Saving file…", invoked: "File saved" },
+};
+for (const [name, expected] of Object.entries(expectedInvocationUi)) {
+  const tool = server._registeredTools[name];
+  assert.equal(tool?.title, expected.title, `${name} must expose its concise user-facing title`);
+  assert.equal(tool?._meta?.["openai/toolInvocation/invoking"], expected.invoking, `${name} must expose concise invoking status`);
+  assert.equal(tool?._meta?.["openai/toolInvocation/invoked"], expected.invoked, `${name} must expose concise invoked status`);
+  assert.ok(expected.invoking.length <= 64 && expected.invoked.length <= 64, `${name} invocation statuses must stay within Apps SDK limits`);
+}
+
 const structuredProcessToolNames = ["start_process", "read_output", "kill_process"];
 for (const name of structuredProcessToolNames) {
   assert.ok(server._registeredTools[name]?.outputSchema, `${name} must declare outputSchema`);
 }
 
-assert.equal(server._registeredTools.start_process?._meta, undefined, "start_process must remain widget/app-metadata free");
-assert.equal(server._registeredTools.read_output?._meta, undefined, "read_output must remain widget/app-metadata free");
+for (const name of ["start_process", "read_output"]) {
+  const meta = server._registeredTools[name]?._meta;
+  assert.equal(meta?.["openai/outputTemplate"], undefined, `${name} must not mount an app/widget template`);
+  assert.equal(meta?.["ui/resourceUri"], undefined, `${name} must not advertise an app resource URI`);
+  assert.equal(meta?.ui, undefined, `${name} must not advertise nested app UI metadata`);
+}
 const startInputSchema = server._registeredTools.start_process?.inputSchema;
 assert.ok(startInputSchema, "start_process input schema missing");
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output LEGACY" })).success, true, "legacy command input must remain valid");

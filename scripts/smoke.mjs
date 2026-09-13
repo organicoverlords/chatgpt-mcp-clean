@@ -184,8 +184,11 @@ assert.match(invalidActivityTarget.body.result.content?.[0]?.text || "", /activi
 const readOutputTool = listed.body.result.tools.find((tool) => tool.name === "read_output");
 assert.equal(readOutputTool.inputSchema.properties.wait_ms.maximum, 10_000);
 assert.equal(readOutputTool.inputSchema.properties.wait_ms.minimum, 0);
-assert.equal(startProcessTool._meta, undefined, "start_process must stay widget/app metadata free over MCP transport");
-assert.equal(readOutputTool._meta, undefined, "read_output must stay widget/app metadata free over MCP transport");
+for (const [name, tool] of [["start_process", startProcessTool], ["read_output", readOutputTool]]) {
+  assert.equal(tool._meta?.["openai/outputTemplate"], undefined, `${name} must not mount a widget over MCP transport`);
+  assert.equal(tool._meta?.["ui/resourceUri"], undefined, `${name} must not advertise a widget resource over MCP transport`);
+  assert.equal(tool._meta?.ui, undefined, `${name} must not advertise nested widget UI metadata over MCP transport`);
+}
 assert.ok(startProcessTool.inputSchema.properties.executable, "start_process must advertise structured executable input over MCP transport");
 assert.ok(startProcessTool.inputSchema.properties.args, "start_process must advertise structured argv input over MCP transport");
 assert.ok(startProcessTool.inputSchema.properties.stdin, "start_process must advertise structured stdin input over MCP transport");
