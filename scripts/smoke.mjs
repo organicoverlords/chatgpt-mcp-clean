@@ -1,6 +1,9 @@
 import "dotenv/config";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
 const origin = (process.env.MCP_SMOKE_ORIGIN || process.env.MCP_PUBLIC_ORIGIN || "http://127.0.0.1:3000").replace(/\/$/, "");
 const publicOrigin = (process.env.MCP_SMOKE_PUBLIC_ORIGIN || origin).replace(/\/$/, "");
@@ -230,6 +233,34 @@ const missingKillOverHttp = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.n
 assertToolErrorWithoutAppMeta(missingKillOverHttp, "missing kill_process over HTTP");
 const missingUploadOverHttp = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: expectedLocalFileTool, arguments: { path: "C:\\definitely-missing\\image.png" } } });
 assertToolErrorWithoutAppMeta(missingUploadOverHttp, `missing ${expectedLocalFileTool} over HTTP`);
+
+const localFileSmokePath = process.env.MCP_SMOKE_LOCAL_FILE_PATH || fileURLToPath(import.meta.url);
+const localFileSmokeBytes = await readFile(localFileSmokePath);
+const localFileSmokeSha256 = createHash("sha256").update(localFileSmokeBytes).digest("hex");
+const localFileCall = await mcpPost(sessionA, {
+  jsonrpc: "2.0",
+  id: Date.now(),
+  method: "tools/call",
+  params: { name: expectedLocalFileTool, arguments: { path: localFileSmokePath } },
+});
+const localFileToolResult = localFileCall.body?.result;
+assert.ok(localFileToolResult && localFileToolResult.isError !== true, localFileCall.text);
+assert.equal(localFileToolResult._meta, undefined, `${expectedLocalFileTool} success must remain widget-free`);
+assert.equal(localFileToolResult.structuredContent?.delivery_mode, "tool_file_reference", localFileCall.text);
+assert.equal(localFileToolResult.structuredContent?.bytes, localFileSmokeBytes.length, localFileCall.text);
+assert.equal(localFileToolResult.structuredContent?.sha256, localFileSmokeSha256, localFileCall.text);
+const localFileRef = (localFileToolResult.content || []).find((entry) => entry?.type === "resource_link" && entry?.uri === localFileToolResult.structuredContent?.resource_uri);
+assert.ok(localFileRef, `${expectedLocalFileTool} must return its exact native MCP resource link`);
+assert.equal((localFileToolResult.content || []).some((entry) => entry?.type === "image"), false, `${expectedLocalFileTool} must keep file bytes lazy`);
+const localFileResource = await mcpPost(sessionA, {
+  jsonrpc: "2.0",
+  id: Date.now(),
+  method: "resources/read",
+  params: { uri: localFileRef.uri },
+});
+const localFileBlob = localFileResource.body?.result?.contents?.[0]?.blob;
+assert.ok(localFileBlob, `${expectedLocalFileTool} resource must return exact bytes`);
+assert.equal(Buffer.from(localFileBlob, "base64").compare(localFileSmokeBytes), 0, `${expectedLocalFileTool} resource bytes changed in transit`);
 
 const structuredTransport = await callTool(sessionA, "start_process", {
   executable: process.execPath,
