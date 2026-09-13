@@ -45,6 +45,16 @@ export type ActivityTarget = {
   project?: string;
 };
 
+export type ProcessFailureDiagnostic = {
+  kind: "parser_error" | "cli_usage";
+  origin: "powershell" | "python" | "node" | "bash" | "busy_cli" | "stack_atlas_cli" | "swarm_route_cli";
+  boundary: "source" | "legacy_command" | "argv_contract";
+  input_target?: {
+    mode: "script" | "executable";
+    language?: StructuredScriptLanguage;
+  };
+};
+
 type StartResult = {
   mcp_status: "OK";
   process_state: "RUNNING" | "COMPLETED";
@@ -1028,11 +1038,11 @@ function encodedCommandTransportError(command: string): string | undefined {
   const lower = command.toLowerCase();
   const hasPowerShellLauncher = /\b(?:pwsh|powershell)(?:\.exe)?\b/i.test(command);
   if (hasPowerShellLauncher && /(?:^|\s)-(?:enc|encodedcommand)(?:\s|$)/i.test(command)) {
-    return "Base64/encoded command transport is not supported; use executable+args or script+language with stdin";
+    return "encoded_command_transport_disallowed";
   }
   const hasPythonLauncher = /\b(?:python(?:3)?|py)(?:\.exe)?\b/i.test(command);
   if (hasPythonLauncher && /(?:^|\s)-c(?:\s|$)/i.test(command) && lower.includes("exec(") && (lower.includes("base64.b64decode(") || lower.includes("base64.urlsafe_b64decode("))) {
-    return "Base64/encoded command transport is not supported; use executable+args or script+language with stdin";
+    return "encoded_command_transport_disallowed";
   }
   return undefined;
 }
@@ -1170,6 +1180,73 @@ function processResponseState(startedAt: string, running: boolean, finishedAt?: 
 
 // These fields describe the completeness and integrity of retained MCP execution evidence.
 // They do not score semantic task quality; output volume and exit status are evidence only.
+function processFailureDiagnostic(
+  command: string,
+  stdout: string,
+  stderr: string,
+  exitCode: number | null,
+  error: string | undefined,
+  executionReason: string | undefined,
+): ProcessFailureDiagnostic | undefined {
+  if (!error && (exitCode === null || exitCode === 0)) return undefined;
+  const output = `${stderr}\n${stdout}\n${error ?? ""}`.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+  const structuredLanguage: StructuredScriptLanguage | undefined = executionReason?.startsWith("structured_script_powershell_")
+    ? "powershell"
+    : executionReason === "structured_script_python_stdin"
+      ? "python"
+      : executionReason === "structured_script_node_stdin"
+        ? "node"
+        : executionReason === "structured_script_bash_stdin"
+          ? "bash"
+          : undefined;
+  const structuredArgv = executionReason === "structured_argv" || executionReason === "structured_explicit_shell";
+
+  let parserOrigin: StructuredScriptLanguage | undefined;
+  if (structuredLanguage === "powershell" && /Exception calling ["']Create["']/i.test(output)) parserOrigin = "powershell";
+  else if (structuredLanguage === "python" && /File ["']<stdin>["'].*(?:SyntaxError|IndentationError|TabError):/is.test(output)) parserOrigin = "python";
+  else if (structuredLanguage === "node" && /(?:\[stdin\]|\[eval\]).*SyntaxError:/is.test(output)) parserOrigin = "node";
+  else if (structuredLanguage === "bash" && /(?:bash|sh):[^\n]*syntax error/i.test(output)) parserOrigin = "bash";
+  else if (/(?:^|[;&|\s])(?:python(?:3)?|py)(?:\.exe)?\s+-c\b/i.test(command) && /File ["']<string>["'].*(?:SyntaxError|IndentationError|TabError):/is.test(output)) parserOrigin = "python";
+  else if (/(?:^|[;&|\s])node(?:\.exe)?\s+(?:-e|--eval)\b/i.test(command) && /(?:\[eval\]|evalmachine\.<anonymous>).*SyntaxError:/is.test(output)) parserOrigin = "node";
+  else if ((!executionReason || executionReason.startsWith("powershell_")) && /ParserError:/i.test(output) && /Line\s+\|/i.test(output)) parserOrigin = "powershell";
+
+  if (parserOrigin) {
+    // Parser output identifies the language that rejected the source, but it does not prove
+    // that changing transport would make invalid source valid. Report ownership/boundary only.
+    return { kind: "parser_error", origin: parserOrigin, boundary: structuredLanguage ? "source" : "legacy_command" };
+  }
+
+  const cliOrigin: ProcessFailureDiagnostic["origin"] | undefined = /^usage: busy\b/im.test(output) && /(?:BusyCoordinator|busy(?:-python)?\.(?:cmd|py)|\bbusy\b)/i.test(command)
+    ? "busy_cli"
+    : /^usage: stack_atlas\.py\b/im.test(output) && /stack_atlas\.py/i.test(command)
+      ? "stack_atlas_cli"
+      : /^usage: swarm_route\.py\b/im.test(output) && /swarm_route\.py/i.test(command)
+        ? "swarm_route_cli"
+        : undefined;
+  if (cliOrigin) {
+    return {
+      kind: "cli_usage",
+      origin: cliOrigin,
+      boundary: structuredArgv ? "argv_contract" : "legacy_command",
+      ...(structuredArgv ? {} : { input_target: { mode: "executable" as const } }),
+    };
+  }
+  return undefined;
+}
+
+export function replayFailureDiagnostic(input: {
+  command?: string; stdout?: string; stderr?: string; exit_code?: number | null; error?: string; execution_reason?: string;
+}): ProcessFailureDiagnostic | undefined {
+  return processFailureDiagnostic(
+    String(input.command || ""),
+    String(input.stdout || ""),
+    String(input.stderr || ""),
+    input.exit_code ?? null,
+    input.error === undefined ? undefined : String(input.error),
+    input.execution_reason === undefined ? undefined : String(input.execution_reason),
+  );
+}
+
 function processOutputAudit(
   stdout: string,
   stderr: string,
@@ -2110,7 +2187,8 @@ export class ProcessManager {
     const observerCallerId = observer.caller_id ?? "caller_unknown";
     emitTelemetry({ event: "process_receipt_read", process_id: receipt.process_id, pid: receipt.pid, owner_caller_id: receipt.caller_id, caller_id: observerCallerId }, observer);
     const audit = processOutputAudit(receipt.stdout, receipt.stderr, Boolean(receipt.stdout_truncated), Boolean(receipt.stderr_truncated), receipt.exit_code, receipt.signal, receipt.error, receipt.request_id);
-    const legacy = { ...processResponseState(receipt.started_at, false, receipt.finished_at), process_id: receipt.process_id, pid: receipt.pid, ...audit, ...(receipt.activity_target ? { activity_target: receipt.activity_target } : {}), ...(receipt.action_class ? { action_class: receipt.action_class } : {}), ...(receipt.execution_mode ? { execution_mode: receipt.execution_mode } : {}), ...(receipt.execution_reason ? { execution_reason: receipt.execution_reason } : {}), command: receipt.command, ...(receipt.command_truncated ? { command_truncated: true } : {}), ...(receipt.submitted_command !== undefined ? { submitted_command: receipt.submitted_command, ...(receipt.submitted_command_truncated ? { submitted_command_truncated: true } : {}) } : {}), cwd: receipt.cwd, running: false, stdout: receipt.stdout.slice(-limit), stderr: receipt.stderr.slice(-limit), exit_code: receipt.exit_code, signal: receipt.signal, started_at: receipt.started_at, finished_at: receipt.finished_at, ...(receipt.stdout_truncated || receipt.stdout.length > limit ? { stdout_truncated: true } : {}), ...(receipt.stderr_truncated || receipt.stderr.length > limit ? { stderr_truncated: true } : {}), ...(receipt.error ? { error: receipt.error } : {}), ...(receipt.repair_attempts?.length ? { repair_attempts: receipt.repair_attempts } : {}) };
+    const failureDiagnostic = processFailureDiagnostic(receipt.command, receipt.stdout, receipt.stderr, receipt.exit_code, receipt.error, receipt.execution_reason);
+    const legacy = { ...processResponseState(receipt.started_at, false, receipt.finished_at), process_id: receipt.process_id, pid: receipt.pid, ...audit, ...(failureDiagnostic ? { failure_diagnostic: failureDiagnostic } : {}), ...(receipt.activity_target ? { activity_target: receipt.activity_target } : {}), ...(receipt.action_class ? { action_class: receipt.action_class } : {}), ...(receipt.execution_mode ? { execution_mode: receipt.execution_mode } : {}), ...(receipt.execution_reason ? { execution_reason: receipt.execution_reason } : {}), command: receipt.command, ...(receipt.command_truncated ? { command_truncated: true } : {}), ...(receipt.submitted_command !== undefined ? { submitted_command: receipt.submitted_command, ...(receipt.submitted_command_truncated ? { submitted_command_truncated: true } : {}) } : {}), cwd: receipt.cwd, running: false, stdout: receipt.stdout.slice(-limit), stderr: receipt.stderr.slice(-limit), exit_code: receipt.exit_code, signal: receipt.signal, started_at: receipt.started_at, finished_at: receipt.finished_at, ...(receipt.stdout_truncated || receipt.stdout.length > limit ? { stdout_truncated: true } : {}), ...(receipt.stderr_truncated || receipt.stderr.length > limit ? { stderr_truncated: true } : {}), ...(receipt.error ? { error: receipt.error } : {}), ...(receipt.repair_attempts?.length ? { repair_attempts: receipt.repair_attempts } : {}) };
     const cursorExists = this.outputCursors.has(this.cursorKey(receipt.process_id, observerCallerId));
     const needsPaging = cursorExists || receipt.stdout.length + receipt.stderr.length > limit;
     return needsPaging ? this.pageOutput(legacy, receipt.stdout, receipt.stderr, observerCallerId, Boolean(receipt.stdout_truncated), Boolean(receipt.stderr_truncated), limit) : legacy;
@@ -2391,6 +2469,10 @@ export class ProcessManager {
       stdout: stdout.text,
       stderr: stderr.text,
       ...(state.exitCode !== null ? processOutputAudit(fullStdout.text, fullStderr.text, fullStdout.truncated, fullStderr.truncated, state.exitCode, state.signal ?? null, state.error, state.ownerContext.request_id) : {}),
+      ...(state.exitCode !== null ? (() => {
+        const diagnostic = processFailureDiagnostic(state.command, fullStdout.text, fullStderr.text, state.exitCode, state.error, state.executionReason);
+        return diagnostic ? { failure_diagnostic: diagnostic } : {};
+      })() : {}),
       exit_code: state.exitCode,
       signal: state.signal ?? null,
       started_at: state.startedAt,

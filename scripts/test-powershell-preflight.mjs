@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProcessManager, replayCurrentPreflightError, replayNormalizeStartProcessCommand } from "../dist/lib/process-manager.js";
+import { ProcessManager, replayCurrentPreflightError, replayFailureDiagnostic, replayNormalizeStartProcessCommand } from "../dist/lib/process-manager.js";
 
 const manager = new ProcessManager();
 const commandWaitMs = 30_000;
@@ -51,6 +51,16 @@ assert.equal(structuredPsPid.submitted_command, undefined);
 const structuredPsInvalid = await manager.startScriptWithWait("powershell", `if (`, undefined, "caller_structured_ps_invalid", commandWaitMs);
 assert.notEqual(structuredPsInvalid.exit_code, 0, JSON.stringify(structuredPsInvalid));
 assert.match(structuredPsInvalid.stderr, /Exception calling \"Create\"|ParserError|Missing closing|Unexpected token/i);
+assert.deepEqual(structuredPsInvalid.failure_diagnostic, { kind: "parser_error", origin: "powershell", boundary: "source" });
+assert.equal(structuredPsScript.failure_diagnostic, undefined);
+const legacyPythonParser = await run(`python -c "if"`, "caller_legacy_python_parser_route");
+assert.notEqual(legacyPythonParser.exit_code, 0, JSON.stringify(legacyPythonParser));
+assert.deepEqual(legacyPythonParser.failure_diagnostic, { kind: "parser_error", origin: "python", boundary: "legacy_command" });
+const busyUsageDiagnostic = replayFailureDiagnostic({ command: `busy-python.cmd claim`, stderr: `usage: busy claim [-h] actor scope`, exit_code: 2, execution_reason: "native_argv_direct" });
+assert.deepEqual(busyUsageDiagnostic, { kind: "cli_usage", origin: "busy_cli", boundary: "legacy_command", input_target: { mode: "executable" } });
+const structuredBusyUsageDiagnostic = replayFailureDiagnostic({ command: `busy-python.cmd claim`, stderr: `usage: busy claim [-h] actor scope`, exit_code: 2, execution_reason: "structured_argv" });
+assert.deepEqual(structuredBusyUsageDiagnostic, { kind: "cli_usage", origin: "busy_cli", boundary: "argv_contract" });
+assert.equal(replayFailureDiagnostic({ command: "python -m pytest", stderr: "1 failed", exit_code: 1, execution_reason: "native_argv_direct" }), undefined);
 
 const nativeFailure = await run("cmd.exe /c exit 7", "caller_pwsh_preflight_native_failure");
 assert.equal(nativeFailure.exit_code, 7, "explicit cmd.exe must execute directly and preserve its native exit code");
@@ -196,8 +206,8 @@ assert.equal(nestedLiteralDoubleQuoted.exit_code, 0, JSON.stringify(nestedLitera
 assert.match(nestedLiteralDoubleQuoted.stdout, /NESTED_LITERAL_OK/);
 const nestedEscapedVariable = await run("pwsh.exe -NoProfile -Command \"Write-Output `$env:TEMP\"", "caller_nested_escaped_variable_allowed");
 assert.equal(nestedEscapedVariable.exit_code, 0, JSON.stringify(nestedEscapedVariable));
-rejects(`pwsh.exe -NoProfile -EncodedCommand QQ==`, /Base64\/encoded command transport is not supported/i);
-rejects(`python -c "import base64;exec(base64.b64decode('QQ==').decode())"`, /Base64\/encoded command transport is not supported/i);
+rejects(`pwsh.exe -NoProfile -EncodedCommand QQ==`, /encoded_command_transport_disallowed/i);
+rejects(`python -c "import base64;exec(base64.b64decode('QQ==').decode())"`, /encoded_command_transport_disallowed/i);
 const nestedFile = await run(String.raw`pwsh.exe -NoProfile -File C:\definitely-missing-mcp-preflight.ps1`, "caller_nested_file_allowed");
 assert.notEqual(nestedFile.exit_code, 0, "missing -File fixture should fail at execution, not preflight");
 const nestedCommandLiteral = await run(String.raw`Write-Output 'pwsh.exe -Command "$env:TEMP"'; # powershell.exe -Command "$childOnlyPath"
@@ -325,5 +335,5 @@ try {
   rmSync(rejectionReceiptDirectory, { recursive: true, force: true });
 }
 
-console.log("PASS powershell_preflight pwsh=7.6.5 ps7_operators=true loop_pipeline_autonormalization=true nested_command_parent_expansion=guarded args_assignment=allowed drive_root_recursion=blocked vault_root_recursion=blocked bounded_recursion=allowed durable_rejections=true");
+console.log("PASS powershell_preflight pwsh=7.6.5 ps7_operators=true loop_pipeline_autonormalization=true nested_command_parent_expansion=guarded args_assignment=allowed drive_root_recursion=blocked vault_root_recursion=blocked bounded_recursion=allowed durable_rejections=true failure_diagnostics=structured_not_prompted");
 process.exit(0);

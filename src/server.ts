@@ -36,13 +36,13 @@ const startProcessCommonShape = {
 };
 const legacyStartProcessCommandVisible = (process.env.MCP_START_PROCESS_LEGACY_COMMAND_VISIBLE || "1").trim() !== "0";
 const startProcessInputSchema = z.object({
-  executable: z.string().min(1).describe("Preferred for normal process execution. Program name or absolute executable path; paired with args and optional stdin.").optional(),
+  executable: z.string().min(1).describe("Program name or absolute executable path; paired with args and optional stdin; no shell re-parsing.").optional(),
   args: z.array(z.string()).max(512).describe("Argument vector passed directly to executable without shell re-parsing.").optional(),
-  stdin: z.string().max(1_000_000).describe("Optional standard input for executable; use this instead of embedding payloads in shell quoting.").optional(),
-  script: z.string().min(1).max(1_000_000).describe("Preferred for multiline generated code. Source text is sent directly to the selected language runtime.").optional(),
+  stdin: z.string().max(1_000_000).describe("Optional standard input passed directly to executable.").optional(),
+  script: z.string().min(1).max(1_000_000).describe("Multiline source text for the selected runtime; transported through stdin.").optional(),
   language: z.enum(["powershell", "python", "node", "bash"]).describe("Runtime for script.").optional(),
   ...(legacyStartProcessCommandVisible ? {
-    command: z.string().min(1).describe("Legacy shell-command compatibility only. Prefer executable+args or script+language unless shell composition is genuinely required.").optional(),
+    command: z.string().min(1).describe("Legacy shell-command compatibility for shell composition.").optional(),
   } : {}),
   ...startProcessCommonShape,
 }).strict().superRefine((value, ctx) => {
@@ -64,6 +64,16 @@ const repairAttemptSchema = z.object({
   exit_code: z.number().int(),
   started_at: z.string(),
   finished_at: z.string(),
+}).strict();
+
+const failureDiagnosticSchema = z.object({
+  kind: z.enum(["parser_error", "cli_usage"]),
+  origin: z.enum(["powershell", "python", "node", "bash", "busy_cli", "stack_atlas_cli", "swarm_route_cli"]),
+  boundary: z.enum(["source", "legacy_command", "argv_contract"]),
+  input_target: z.object({
+    mode: z.enum(["script", "executable"]),
+    language: z.enum(["powershell", "python", "node", "bash"]).optional(),
+  }).strict().optional(),
 }).strict();
 
 const outputPageSchema = z.object({
@@ -134,6 +144,7 @@ const processOutputSchema = z.object({
   stderr_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   evidence_completeness: z.enum(["complete", "bounded"]).optional(),
   execution_outcome: z.enum(["success", "nonzero_exit", "signaled", "error", "unknown"]).optional(),
+  failure_diagnostic: failureDiagnosticSchema.optional(),
   output_page: outputPageSchema.optional(),
   generated_at: z.string().optional(),
   freshness: snapshotFreshnessSchema.optional(),
@@ -212,7 +223,9 @@ export function createServer(callerId: string): McpServer {
   server.registerTool(
     "start_process",
     {
-      description: "Execute a local process. Use executable+args for one program, or script+language for multiline generated PowerShell/Python/Node/Bash; script is transported through stdin so do not Base64-wrap code. Use legacy command only when shell composition is genuinely required. The runner routes plain native commands directly. wait_ms defaults to 750 ms and is bounded to 0..10000 ms.",
+      description: legacyStartProcessCommandVisible
+        ? "Execute a local process. Input forms: executable+args with optional stdin, script+language for PowerShell/Python/Node/Bash source, or legacy command for shell composition. Structured source is transported through stdin. wait_ms defaults to 750 ms and is bounded to 0..10000 ms."
+        : "Execute a local process. Input forms: executable+args with optional stdin, or script+language for PowerShell/Python/Node/Bash source. Structured source is transported through stdin. wait_ms defaults to 750 ms and is bounded to 0..10000 ms.",
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
       inputSchema: startProcessInputSchema,
       outputSchema: processOutputSchema,
