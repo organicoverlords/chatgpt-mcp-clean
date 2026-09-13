@@ -214,19 +214,6 @@ export function localTransferSummary(item: LocalFileTransfer) {
   };
 }
 
-function localTransferMeta(item: LocalFileTransfer, deliveryMode: "library_upload" | "review_resources" | "resource_only") {
-  return {
-    direction: "local_to_chatgpt",
-    phase: "ready",
-    delivery_mode: deliveryMode,
-    transfer_url: localTransferUrl(item.token),
-    file_name: item.file_name,
-    mime_type: item.mime_type,
-    bytes: item.bytes,
-    sha256: item.sha256,
-  };
-}
-
 export function localFileResourceLink(item: LocalFileTransfer) {
   return {
     type: "resource_link" as const,
@@ -626,7 +613,7 @@ function widgetResourceMeta() {
   const connectDomains = origin ? [origin] : [];
   return {
     ui: { prefersBorder: false, csp: { connectDomains, resourceDomains: connectDomains } },
-    "openai/widgetDescription": "Exact-byte local file persistence into ChatGPT Library.",
+    "openai/widgetDescription": "Inert compatibility surface for native exact-byte file resources.",
     "openai/widgetPrefersBorder": false,
     "openai/widgetCSP": { connect_domains: connectDomains, resource_domains: connectDomains },
   };
@@ -634,12 +621,8 @@ function widgetResourceMeta() {
 
 function uploadToolMeta() {
   return {
-    ui: { resourceUri: FILE_TRANSFER_WIDGET_URI, visibility: ["model", "app"] },
-    // Current MCP Apps helpers mirror the modern nested URI into this flat
-    // compatibility key. Some ChatGPT host/binding paths still require it
-    // before they fetch the ui:// resource and mount the widget.
-    "ui/resourceUri": FILE_TRANSFER_WIDGET_URI,
-    "openai/outputTemplate": FILE_TRANSFER_WIDGET_URI,
+    // Invocation status text is presentation-only. Deliberately omit every
+    // widget/app binding key so upload_local_file stays a native MCP handoff.
     "openai/toolInvocation/invoking": "Preparing file…",
     "openai/toolInvocation/invoked": "File ready",
   };
@@ -684,7 +667,7 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
     "upload_local_file",
     {
       title: "Share local file",
-      description: "Return one exact local file as a native MCP file resource and, for supported non-ZIP files, persist the same verified bytes into ChatGPT Library through the dedicated HTTPS file-transfer widget. ZIP files remain exact resource-only transfers. start_process/read_output never mount this widget.",
+      description: "Return one exact local file as a native MCP file resource for ChatGPT to materialize as a native conversation file. This tool never mounts an app/widget or invokes the Library upload API. Transfers preserve exact bytes and SHA-256; images remain compact lazy resources and ZIP review members remain exact resource links.",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       _meta: uploadToolMeta(),
       inputSchema: z.object({ path: z.string().min(1) }),
@@ -692,16 +675,12 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
     },
     async ({ path }) => {
       const handoff = await localFileTransferHandoff(await prepareLocalFileTransfer(path));
-      const isZip = handoff.item.mime_type === "application/zip";
-      const reviewResourceMode = isZip && handoff.content.some((entry: any) => entry.type === "resource_link" && entry.uri !== handoff.summary.resource_uri);
-      const widgetDeliveryMode = reviewResourceMode ? "review_resources" : (isZip ? "resource_only" : "library_upload");
       return {
         content: [
           { type: "text" as const, text: JSON.stringify({ caller_id: callerId, ...handoff.summary }) },
           ...handoff.content,
         ],
         structuredContent: handoff.summary,
-        _meta: { file_transfer: localTransferMeta(handoff.item, widgetDeliveryMode) },
       };
     },
   );
@@ -737,41 +716,6 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
 export function fileTransferWidgetHtml(): string {
   return `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color-scheme:light dark}body{margin:0;background:transparent}html,body{margin:0;padding:0;background:transparent;overflow:hidden}.status{box-sizing:border-box;height:28px;line-height:28px;padding:0 8px;font:12px/28px ui-monospace,SFMono-Regular,Consolas,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}</style>
-<body><div id="status" class="status">FILE_TRANSFER_READY</div>
-<script>
-const statusEl=document.getElementById('status');let started='';let closing=false;
-function setStatus(v){statusEl.textContent=v;}
-function hex(bytes){return [...new Uint8Array(bytes)].map(b=>b.toString(16).padStart(2,'0')).join('');}
-function payload(result){return result?._meta?.file_transfer||null;}
-function persistedTransfer(){const s=window.openai?.widgetState;return s?.privateContent?.file_transfer||s?.modelContent?.file_transfer||s?.file_transfer||null;}
-async function closeWidget(){if(closing)return;closing=true;if(typeof window.openai?.requestClose==='function'){try{await window.openai.requestClose();}catch{closing=false;}}}
-async function closeIfCompleted(){const done=persistedTransfer();if(done?.status!=='ok')return false;setStatus('FILE_TRANSFER_OK '+(done.fileName||'file')+' LIBRARY '+(done.fileId||''));await closeWidget();return true;}
-async function render(result){
- const p=payload(result);if(!p||p.direction!=='local_to_chatgpt')return;
- const key=p.sha256+':'+(p.delivery_mode||'library_upload');if(started===key)return;started=key;
- if(p.delivery_mode==='review_resources'){setStatus('FILE_TRANSFER_OK review media exposed from '+p.file_name);await closeWidget();return;}
- if(p.delivery_mode==='resource_only'){setStatus('FILE_TRANSFER_OK exact resource '+p.file_name);await closeWidget();return;}
- if(p.delivery_mode!=='library_upload')return;
- const done=persistedTransfer();if(done?.status==='ok'&&done?.sha256===p.sha256){setStatus('FILE_TRANSFER_OK '+p.file_name+' '+p.bytes+' bytes LIBRARY '+(done.fileId||''));await closeWidget();return;}
- if(!p.transfer_url)return;setStatus('FILE_TRANSFER_RUNNING '+p.file_name);
- try{
-  if(typeof window.openai?.uploadFile!=='function')throw new Error('UPLOAD_FILE_UNAVAILABLE');
-  const r=await fetch(p.transfer_url,{cache:'no-store'});if(!r.ok)throw new Error('TRANSFER_HTTP_'+r.status);
-  const data=await r.arrayBuffer();if(data.byteLength!==p.bytes)throw new Error('BYTE_COUNT_MISMATCH');
-  const digest=hex(await crypto.subtle.digest('SHA-256',data));if(digest!==p.sha256)throw new Error('SHA256_MISMATCH');
-  const blob=new Blob([data],{type:p.mime_type});
-  const file=new File([blob],p.file_name,{type:p.mime_type});const out=await window.openai.uploadFile(file,{library:true});
-  const fileId=out?.fileId||'';if(!fileId)throw new Error('UPLOAD_FILE_ID_MISSING');
-  window.openai?.setWidgetState?.({modelContent:{file_transfer:{status:'ok',direction:'local_to_chatgpt',fileId,fileName:p.file_name,mimeType:p.mime_type,bytes:p.bytes,sha256:p.sha256,library:true}},privateContent:{file_transfer:{status:'ok',fileId,fileName:p.file_name,mimeType:p.mime_type,bytes:p.bytes,sha256:p.sha256,library:true}}});
-  setStatus('FILE_TRANSFER_OK '+p.file_name+' '+p.bytes+' bytes LIBRARY '+fileId);
-  await closeWidget();
- }catch(e){setStatus('FILE_TRANSFER_ERROR '+String(e?.message||e));}
-}
-window.addEventListener('message',event=>{if(event.source!==window.parent)return;const m=event.data;if(m?.jsonrpc!=='2.0')return;if(m.id==='file-transfer-init'&&('result'in m||'error'in m)){if(!m.error)window.parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*');return;}if(m.method==='ui/notifications/tool-result')render(m.params||{});});
-window.addEventListener('openai:set_globals',()=>{void closeIfCompleted();});
-void closeIfCompleted();
-const envelope=window.openai?.toolResponseMetadata?.mcp_tool_result;if(envelope)render(envelope);
-window.parent.postMessage({jsonrpc:'2.0',id:'file-transfer-init',method:'ui/initialize',params:{protocolVersion:'2026-01-26',appInfo:{name:'process-file-transfer',version:'5.0.0'},appCapabilities:{availableDisplayModes:['inline']}}},'*');
-</script></body></html>`;
+<style>:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color-scheme:light dark}html,body{margin:0;padding:0;background:transparent;overflow:hidden}.status{box-sizing:border-box;height:28px;line-height:28px;padding:0 8px;font:12px/28px ui-monospace,SFMono-Regular,Consolas,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}</style></head>
+<body><div class="status">FILE_TRANSFER_NATIVE_RESOURCE</div></body></html>`;
 }

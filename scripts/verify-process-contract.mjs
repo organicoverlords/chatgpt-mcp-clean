@@ -39,7 +39,7 @@ for (const name of structuredProcessToolNames) {
   assert.ok(server._registeredTools[name]?.outputSchema, `${name} must declare outputSchema`);
 }
 
-for (const name of ["start_process", "read_output"]) {
+for (const name of ["start_process", "read_output", "upload_local_file"]) {
   const meta = server._registeredTools[name]?._meta;
   assert.equal(meta?.["openai/outputTemplate"], undefined, `${name} must not mount an app/widget template`);
   assert.equal(meta?.["ui/resourceUri"], undefined, `${name} must not advertise an app resource URI`);
@@ -90,7 +90,7 @@ const expectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "99fe75fbe713d134b3aed292f0b81c66cd56654823b32c6c5b6e0c224029e2ec";
+const acceptedContractSha256 = "388cf4d2c672c027b380733c613799e58f6a2ee9b99467eaf0d384843d773af6";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(expectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 assert.deepEqual(actualTools, expectedTools, "connector tool contract changed; do not replace a stable connector identity without an explicit contract migration");
