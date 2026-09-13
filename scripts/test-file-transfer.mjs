@@ -297,7 +297,7 @@ assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v7.html", "le
   assert.equal(invalidStart.isError, true, "schema-invalid start_process must be a tool-level failure");
   assert.equal(invalidStart._meta, undefined, "schema-invalid start_process must not attach app/widget metadata");
   assert.equal(invalidStart.content.some((entry) => entry.type === "image" || entry.type === "resource_link"), false, "schema-invalid start_process must not expose media content");
-  assert.deepEqual(upload?.annotations, { readOnlyHint: false, destructiveHint: false, openWorldHint: false }, "local file export remains a closed-domain action");
+  assert.deepEqual(upload?.annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: false }, "native local file handoff must be classified as a closed-domain read action");
 
   function exactFileReference(result, expectedName, expectedMime, expectedBytes) {
     const summary = result.structuredContent;

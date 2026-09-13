@@ -204,6 +204,7 @@ try {
     assert.deepEqual(byName.start_process.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: true });
     assert.deepEqual(byName.read_output.annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: false });
     assert.deepEqual(byName.kill_process.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: false });
+    assert.deepEqual(byName.upload_local_file.annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: false });
     const expectedInvocationUi = {
       start_process: { title: "Run command", invoking: "Running command…", invoked: "Command returned" },
       read_output: { title: "Check command", invoking: "Checking command…", invoked: "Command checked" },

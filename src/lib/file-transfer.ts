@@ -668,7 +668,7 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
     {
       title: "Share local file",
       description: "Return one exact local file as a native MCP file resource for ChatGPT to materialize as a native conversation file. This tool never mounts an app/widget or invokes the Library upload API. Transfers preserve exact bytes and SHA-256; images remain compact lazy resources and ZIP review members remain exact resource links.",
-      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       _meta: uploadToolMeta(),
       inputSchema: z.object({ path: z.string().min(1) }),
       outputSchema: UploadLocalFileOutputSchema,
