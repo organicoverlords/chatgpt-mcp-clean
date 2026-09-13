@@ -21,10 +21,11 @@ while (pages.at(-1).next_action === "READ_SAME_PROCESS_ID") {
 for (const page of pages) {
   if (!page.output_page) continue;
   assert.ok(page.output_page.page_chars <= 32_000, "logical page never exceeds 32k");
-  assert.equal(page.output_page.page_limit, 32_000, "page uses current 32k read contract");
 }
-assert.ok(pages[0].stdout.length > 30_000, "first page is not constrained by the stale 6k assumption");
+assert.equal(pages[0].output_page.page_limit, 8_000, "start_process uses transcript-safe default page size");
+assert.ok(pages[0].stdout.length <= 8_000, "start_process default page stays transcript-safe");
+assert.equal(pages[1].output_page.page_limit, 32_000, "explicit read_output can still opt into validated 32k pages");
 assert.equal(pages.map((page) => page.stdout).join(""), expected, "all retained stdout is returned losslessly in order");
 assert.equal(pages.at(-1).next_action, "STOP_READING");
 assert.equal(pages.at(-1).output_page.more, false);
-console.log(`PASS lossless_output_32k pages=${pages.length} chars=${expected.length} first_page=${pages[0].stdout.length}`);
+console.log(`PASS lossless_output_transcript_bounded pages=${pages.length} chars=${expected.length} first_page=${pages[0].stdout.length} opt_in_page=${pages[1].output_page.page_limit}`);

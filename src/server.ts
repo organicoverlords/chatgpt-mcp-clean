@@ -193,10 +193,23 @@ function textResult(value: unknown, id: string) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
 }
 
+function compactStructuredText(data: Record<string, unknown>): string {
+  const summary: Record<string, unknown> = { structured_content: true };
+  for (const key of ["mcp_status", "process_state", "next_action", "process_id", "pid", "running", "exit_code", "signal", "killed", "already_exited"]) {
+    if (data[key] !== undefined) summary[key] = data[key];
+  }
+  if (typeof data.stdout === "string") summary.stdout_chars = data.stdout.length;
+  if (typeof data.stderr === "string") summary.stderr_chars = data.stderr.length;
+  if (data.output_page && typeof data.output_page === "object") summary.output_page = data.output_page;
+  return JSON.stringify(summary);
+}
+
 async function structuredTextResult(value: unknown, id: string) {
   const data = resultData(value, id);
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(data) }],
+    // structuredContent is authoritative for ChatGPT. Keep the text fallback compact so
+    // stdout/stderr are not serialized twice into the conversation transcript.
+    content: [{ type: "text" as const, text: fullToolProfile ? JSON.stringify(data) : compactStructuredText(data) }],
     structuredContent: data,
   };
 }

@@ -157,7 +157,7 @@ async function connect(clone, clientName) {
     const result = await post({ jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name, arguments: args } }, sessionId);
     const text = result.body.result.content?.[0]?.text;
     assert.ok(text, result.text);
-    return JSON.parse(text);
+    return result.body.result.structuredContent ?? JSON.parse(text);
   }
   async function readResource(uri) {
     const result = await post({ jsonrpc: "2.0", id: Date.now(), method: "resources/read", params: { uri } }, sessionId);

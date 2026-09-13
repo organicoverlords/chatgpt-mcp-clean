@@ -112,7 +112,7 @@ try {
       const started = performance.now();
       const reply = await client.callTool({ name: "read_output", arguments: { process_id: id, max_chars: 32000, wait_ms: 0 } });
       assert.equal(reply.isError, undefined, JSON.stringify(reply));
-      assert.equal(JSON.parse(reply.content[0].text).snapshot_alias, true);
+      assert.equal(reply.structuredContent?.snapshot_alias ?? JSON.parse(reply.content[0].text).snapshot_alias, true);
       console.log(`PASS local MCP read_output ${id}: ${Math.round(performance.now() - started)} ms, no subprocess`);
     }
   } finally { await client.close(); await server.close(); }

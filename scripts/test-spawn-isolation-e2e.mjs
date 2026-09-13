@@ -100,14 +100,14 @@ try {
   const startResult = await startPromise;
   const startMs = performance.now() - startAt;
   assert.ok(startMs < 1500, `start_process exceeded bounded wait: ${startMs.toFixed(1)}ms`);
-  const startPayload = JSON.parse(startResult.body.result.content[0].text);
+  const startPayload = startResult.body.result.structuredContent ?? JSON.parse(startResult.body.result.content[0].text);
   assert.ok(startPayload.process_id);
   let final = startPayload;
   const deadline = Date.now() + 8000;
   while (Date.now() < deadline) {
     await sleep(100);
     const readResult = await mcpPost(sessionId, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: "read_output", arguments: { process_id: startPayload.process_id, wait_ms: 250 } } });
-    final = JSON.parse(readResult.body.result.content[0].text);
+    final = readResult.body.result.structuredContent ?? JSON.parse(readResult.body.result.content[0].text);
     if (final.running === false) break;
   }
   assert.equal(final.running, false, JSON.stringify(final));

@@ -105,7 +105,7 @@ function toolResult(result) {
   assert.ok(result.body?.result, result.text);
   const content = result.body.result.content;
   assert.ok(Array.isArray(content) && content[0]?.text, result.text);
-  return JSON.parse(content[0].text);
+  return result.body.result.structuredContent ?? JSON.parse(content[0].text);
 }
 async function callTool(sessionId, name, args = {}) {
   return toolResult(await mcpPost(sessionId, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name, arguments: args } }));
@@ -576,6 +576,18 @@ try {
   assert.equal(killed.killed, true);
   execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `if (Get-Process -Id ${childPid} -ErrorAction SilentlyContinue) { exit 1 } else { exit 0 }`], { encoding: "utf8" });
 
+  const transcriptBudgetProbe = await callTool(sessionA, "start_process", {
+    executable: process.execPath,
+    args: ["-e", "process.stdout.write('T'.repeat(20000))"],
+    wait_ms: 10_000,
+  });
+  assert.equal(transcriptBudgetProbe.running, false, "transcript budget probe must complete in start_process");
+  assert.equal(transcriptBudgetProbe.output_page?.page_limit, 8_000, "default start_process page must stay transcript-safe");
+  assert.equal(transcriptBudgetProbe.stdout.length, 8_000, "default start_process page must emit only 8k stdout");
+  assert.equal(transcriptBudgetProbe.next_action, "READ_SAME_PROCESS_ID");
+  const transcriptBudgetRemainder = await callTool(sessionA, "read_output", { process_id: transcriptBudgetProbe.process_id, max_chars: 32_000, wait_ms: 0 });
+  assert.equal(transcriptBudgetRemainder.stdout.length, 12_000, "explicit 32k read_output must expose the remaining captured stdout");
+  assert.equal(transcriptBudgetRemainder.next_action, "STOP_READING");
   floodJob = await callTool(sessionA, "start_process", { language: "powershell", script: "$payload = 'X' * 200; 1..10000 | ForEach-Object { Write-Output (('FLOOD_{0}_{1}' -f $_,$payload)) }" });
   const healthStarted = Date.now();
   const healthDuringFlood = await jsonFetch(`${origin}/health`, { signal: AbortSignal.timeout(5_000) });
@@ -583,7 +595,7 @@ try {
   assert.ok(Date.now() - healthStarted < 5_000, "health probe stalled during high-output process");
   const floodOutput = await readAllUntilExit(sessionA, floodJob);
   assert.equal(floodOutput.last.running, false);
-  assert.ok(floodOutput.pages[0].stdout.length > 30_000 && floodOutput.pages[0].stdout.length <= 32_000, `first paged read_output returned ${floodOutput.pages[0].stdout.length} characters`);
+  assert.ok(floodOutput.pages[0].stdout.length > 30_000 && floodOutput.pages[0].stdout.length <= 32_000, `first explicit paged read_output returned ${floodOutput.pages[0].stdout.length} characters`);
   assert.equal(floodOutput.pages.at(-1).stdout_truncated, true);
   assert.equal(floodOutput.stdout.length, 100_000, `lossless retained output returned ${floodOutput.stdout.length} characters`);
   assert.match(floodOutput.stdout, /FLOOD_10000_/);

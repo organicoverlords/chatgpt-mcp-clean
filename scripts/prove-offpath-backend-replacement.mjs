@@ -74,7 +74,7 @@ async function jsonFetch(url, options = {}) {
 function rpcPayload(result) {
   assert.ok(result.body?.result, result.text);
   const text = result.body.result.content?.find((item) => item.type === "text")?.text;
-  return text ? JSON.parse(text) : result.body.result;
+  return result.body.result.structuredContent ?? (text ? JSON.parse(text) : result.body.result);
 }
 
 let monitor = false;
