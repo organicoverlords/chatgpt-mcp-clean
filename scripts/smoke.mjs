@@ -223,6 +223,33 @@ assert.equal(giantStructuredTransport.execution_outcome, "success", JSON.stringi
 assert.equal(giantStructuredTransport.exit_code, 0, JSON.stringify(giantStructuredTransport));
 assert.equal(giantStructuredTransport.stdout.replace(/\r\n/g, "\n"), "GIANT_ONE_CALL|$env:TEMP|'quote'|{json}|\\path|PS_DONE", JSON.stringify(giantStructuredTransport));
 assert.equal(giantStructuredTransport.execution_reason, "structured_script_powershell_stdin_scriptblock", JSON.stringify(giantStructuredTransport));
+const giantScriptBenchCount = Math.max(0, Number(process.env.MCP_SMOKE_GIANT_SCRIPT_COUNT || 0));
+if (giantScriptBenchCount > 0) {
+  const giantLatencies = [];
+  for (let index = 0; index < giantScriptBenchCount; index += 1) {
+    const marker = `GIANT_BENCH_${index}|$env:TEMP|'quote'|{json}|\\path`;
+    const script = `${giantScriptPadding}\n$payload = @'\n${marker}\n'@\n[Console]::Out.Write($payload)\n`;
+    const startedAt = performance.now();
+    const result = await callTool(sessionA, "start_process", { language: "powershell", script, wait_ms: 10_000 });
+    giantLatencies.push(performance.now() - startedAt);
+    assert.equal(result.execution_outcome, "success", JSON.stringify({ index, result }));
+    assert.equal(result.exit_code, 0, JSON.stringify({ index, result }));
+    assert.equal(result.stdout.replace(/\r\n/g, "\n"), marker, JSON.stringify({ index, result }));
+    assert.equal(result.execution_reason, "structured_script_powershell_stdin_scriptblock", JSON.stringify({ index, result }));
+  }
+  const sorted = [...giantLatencies].sort((left, right) => left - right);
+  const pct = (ratio) => sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * ratio))] ?? 0;
+  console.log(`AUTHENTICATED_GIANT_SCRIPT_BENCH ${JSON.stringify({
+    oauth_bypassed: false,
+    calls: giantScriptBenchCount,
+    script_padding_lines: 500,
+    failures: 0,
+    avoidable_first_attempt_failures: 0,
+    p50_ms: Number(pct(0.50).toFixed(3)),
+    p95_ms: Number(pct(0.95).toFixed(3)),
+    max_ms: Number((sorted.at(-1) ?? 0).toFixed(3)),
+  })}`);
+}
 const expectedPythonFailure = await callTool(sessionA, "start_process", {
   language: "python",
   script: "raise SystemExit(9)\n",
@@ -347,6 +374,39 @@ if (knownSignatureCount > 0) {
     avoidable_first_attempt_failures: 0,
     avoidable_first_attempt_failure_rate_pct: 0,
     modes,
+    p50_ms: Number(pct(0.50).toFixed(3)),
+    p95_ms: Number(pct(0.95).toFixed(3)),
+    max_ms: Number((sorted.at(-1) ?? 0).toFixed(3)),
+  })}`);
+}
+
+const historicalPythonTransportCount = Math.max(0, Number(process.env.MCP_SMOKE_HISTORICAL_PYTHON_COUNT || 0));
+if (historicalPythonTransportCount > 0) {
+  const latencies = [];
+  const variants = { json_object: 0, powershell_literal: 0, cpp_literal: 0, markdown_literal: 0, regex_multiline: 0 };
+  const payloads = ["[{\"path\":\"C:\\Users\\Example\\AppData\\Local\\ChatGPTMcpMinimal\\.state\\transport.jsonl\",\"exists\":false,\"size\":null,\"mtime\":null},{\"path\":\"C:\\Users\\Example\\minimal-connectors\\clone-a\\transport.jsonl\",\"exists\":true,\"size\":12345}]", "$mcpLine = @($text -split \"`r?`n\" | Where-Object { $_ -match '^- Keep MCPv3 start_process payloads short' }); if ($mcpLine.Count -ne 1) { throw \"found $($mcpLine.Count)\" }", "TEXT(\"VICTORY  |  YOUR TEAM %d  |  ENEMY CORE DESTROYED\\n%s\") => TEXT(\"DEFEAT  |  ENEMY TEAM %d WINS  |  YOUR CORE DESTROYED\\n%s\"); path=Plugins/P3/P3UI/Source/P3UI/Private/P3LaneWarHUDWidget.cpp", "Every peer-recovery check is recorded in the acting worker's report. Each run emits one explicit `Peer recovery:` entry in `findings`: either `none needed`, `scheduler control unavailable: <reason>`, or the action taken.", "cleanup_converger|timeline_materializer|worktree\\s+(remove|prune)|branch\\s+(-d|-D|--delete)|update-ref\\s+-d|git\\s+clean|gh\\s+pr\\s+merge|Remove-Item|memory_bank\\.py\\s+record|\\.agents\nsecond-line\twith-tab\nand\\slashes"];  const variantNames = Object.keys(variants);
+  for (let index = 0; index < historicalPythonTransportCount; index += 1) {
+    const variantIndex = index % payloads.length;
+    const payload = payloads[variantIndex];
+    const marker = `HISTORICAL_PYTHON_${index}`;
+    variants[variantNames[variantIndex]] += 1;
+    const script = `import sys\npayload = ${JSON.stringify(payload)}\nsys.stdout.write(${JSON.stringify(marker)} + "|" + payload)\n`;
+    const startedAt = performance.now();
+    const result = await callTool(sessionA, "start_process", { language: "python", script, wait_ms: 10_000 });
+    latencies.push(performance.now() - startedAt);
+    assert.equal(result.execution_outcome, "success", JSON.stringify({ index, variant: variantNames[variantIndex], result }));
+    assert.equal(result.exit_code, 0, JSON.stringify({ index, variant: variantNames[variantIndex], result }));
+    assert.equal(result.execution_reason, "structured_script_python_stdin", JSON.stringify({ index, result }));
+    assert.equal(result.stdout.replace(/\r\n/g, "\n"), `${marker}|${payload}`.replace(/\r\n/g, "\n"), JSON.stringify({ index, variant: variantNames[variantIndex], result }));
+  }
+  const sorted = [...latencies].sort((left, right) => left - right);
+  const pct = (ratio) => sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * ratio))] ?? 0;
+  console.log(`AUTHENTICATED_HISTORICAL_PYTHON_TRANSPORT_BENCH ${JSON.stringify({
+    oauth_bypassed: false,
+    calls: historicalPythonTransportCount,
+    failures: 0,
+    avoidable_first_attempt_failures: 0,
+    variants,
     p50_ms: Number(pct(0.50).toFixed(3)),
     p95_ms: Number(pct(0.95).toFixed(3)),
     max_ms: Number((sorted.at(-1) ?? 0).toFixed(3)),

@@ -91,6 +91,26 @@ function isLegacyShellSurfaceCoverage(coverage) {
   return reasons.some((reason) => /^(?:powershell_c_style_quote_escape|powershell_interpolation_literal|powershell_here_string_newline|route_(?:native|explicit_shell|native_sequence|native_pipeline)|python_heredoc_to_stdin|cmd_wrapper_elided|inline_code_argv_direct)$/.test(reason));
 }
 
+function residualCandidate(row) {
+  const command = String(row.command || '');
+  const output = stripAnsi(`${row.error || ''}\n${row.stderr || ''}\n${row.stdout || ''}`);
+  const inlinePython = /(?:^|[;&|\s])(?:python(?:3)?|py)(?:\.exe)?\s+-c\b/i.test(command);
+  if (inlinePython && /\bbase64\.(?:b64decode|urlsafe_b64decode)\s*\(/i.test(command)) {
+    return { group: 'legacy_transport', reason: 'encoded_python_command' };
+  }
+  if (inlinePython && /File "<string>", line 1/i.test(output) && /SyntaxError:/i.test(output)) {
+    return { group: 'legacy_transport', reason: 'python_inline_code_quoting' };
+  }
+  if (/ParserError:/i.test(output)) {
+    return { group: 'parser_review', reason: 'powershell_or_nested_parser_error' };
+  }
+  if (/^usage: busy\b/im.test(output)) return { group: 'semantic_cli', reason: 'busy_cli_contract' };
+  if (/^usage: stack_atlas\.py\b/im.test(output)) return { group: 'semantic_cli', reason: 'stack_atlas_cli_contract' };
+  if (/^usage: swarm_route\.py\b/im.test(output)) return { group: 'semantic_cli', reason: 'swarm_route_cli_contract' };
+  if (!output.trim()) return { group: 'unknown', reason: 'no_output' };
+  return undefined;
+}
+
 function currentCoverage(row) {
   const command = String(row.command || '');
   const stdout = String(row.stdout || '');
@@ -230,6 +250,7 @@ const bump = (key) => counts.set(key, (counts.get(key) || 0) + 1);
 let failures = 0, expected = 0, coveredPreSpawn = 0, coveredRetry = 0, coveredLegacyShellSurface = 0, pairedFailures = 0, residual = 0;
 const residualSamples = [];
 const matchedSamples = [];
+const residualCandidates = new Map();
 for (const row of rows) {
   if (!isFailure(row)) continue;
   failures += 1;
@@ -244,6 +265,11 @@ for (const row of rows) {
     continue;
   }
   residual += 1;
+  const candidate = residualCandidate(row);
+  if (candidate) {
+    const key = `${candidate.group}:${candidate.reason}`;
+    residualCandidates.set(key, (residualCandidates.get(key) || 0) + 1);
+  }
   const first = `${row.error || ''}\n${row.stderr || ''}\n${row.stdout || ''}`.replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/).map((x) => x.trim()).find(Boolean) || String(row.reason || '<NO_OUTPUT>');
   bump(`residual:${first.replace(/[0-9a-f]{16,40}/ig, '<sha>').replace(/\d{4,}/g, '<n>').slice(0, 140)}`);
   if (residualSamples.length < 20 && paired.has(row.id)) residualSamples.push({ bad: row.command.slice(0, 220), good: paired.get(row.id).command.slice(0, 220), first: first.slice(0, 180) });
@@ -273,6 +299,8 @@ const summary = {
   legacy_shell_surface_rate_pct_of_all_attempts: Number((100 * coveredLegacyShellSurface / Math.max(1, rows.length)).toFixed(3)),
   unclassified_or_avoidable_residual: residual,
   residual_rate_pct: Number((100 * residual / Math.max(1, rows.length)).toFixed(3)),
+  residual_candidate_breakdown: Object.fromEntries([...residualCandidates].sort((a, b) => b[1] - a[1])),
+  residual_candidate_note: 'candidate buckets are triage labels only; they are not counted as fixed or avoidable until separately proven',
   scan_seconds: Number(((Date.now() - started) / 1000).toFixed(2)),
 };
 console.log(JSON.stringify(summary, null, 2));
