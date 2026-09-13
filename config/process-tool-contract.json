@@ -189,8 +189,8 @@
         },
         "max_chars": {
           "type": "integer",
-          "minimum": 1,
-          "maximum": 32000
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
         },
         "wait_ms": {
           "type": "integer",

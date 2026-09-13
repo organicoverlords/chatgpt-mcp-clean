@@ -269,14 +269,19 @@ export function createServer(callerId: string): McpServer {
       },
       inputSchema: z.object({
         process_id: z.string().min(1),
-        max_chars: z.number().int().min(1).max(32_000).optional(),
+        // Size is a hint, not a failure boundary. Accept any integer and clamp it so a
+        // harmless caller guess cannot burn an MCP turn on schema validation.
+        max_chars: z.number().int().optional(),
         wait_ms: z.number().int().min(0).max(10_000).optional(),
       }),
       outputSchema: processOutputSchema,
     },
-    async ({ process_id, max_chars, wait_ms }) => structuredTextResult(isBootstrapSnapshot(process_id)
-      ? await readBootstrapSnapshot(max_chars ?? 32_000, process_id)
-      : await processManager.readOutput(process_id, max_chars, wait_ms), callerId),
+    async ({ process_id, max_chars, wait_ms }) => {
+      const boundedMaxChars = Math.max(1, Math.min(max_chars ?? 32_000, 32_000));
+      return structuredTextResult(isBootstrapSnapshot(process_id)
+        ? await readBootstrapSnapshot(boundedMaxChars, process_id)
+        : await processManager.readOutput(process_id, boundedMaxChars, wait_ms), callerId);
+    },
   );
 
   server.registerTool(

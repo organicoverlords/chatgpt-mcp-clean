@@ -57,6 +57,12 @@ assert.equal((await startInputSchema.safeParseAsync({ executable: "node", args: 
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output BAD", executable: "node" })).success, false, "command and executable modes must be mutually exclusive");
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output BAD", stdin: "x" })).success, false, "legacy command mode must reject structured stdin");
 
+const readInputSchema = server._registeredTools.read_output?.inputSchema;
+assert.ok(readInputSchema, "read_output input schema missing");
+assert.equal((await readInputSchema.safeParseAsync({ process_id: "probe", max_chars: 0 })).success, true, "read_output max_chars=0 must be accepted and clamped instead of burning a retry turn");
+assert.equal((await readInputSchema.safeParseAsync({ process_id: "probe", max_chars: -100 })).success, true, "read_output negative max_chars must be accepted and clamped instead of burning a retry turn");
+assert.equal((await readInputSchema.safeParseAsync({ process_id: "probe", max_chars: 1_000_000 })).success, true, "read_output oversized max_chars must be accepted and clamped instead of burning a retry turn");
+
 async function assertStructuredProcessResult(name, args) {
   const tool = server._registeredTools[name];
   const result = await tool.handler(args, {});
@@ -87,6 +93,11 @@ const stdinStructured = await assertStructuredProcessResult("start_process", {
 assert.equal(String(stdinStructured.stdout || ""), "contract-stdin\n", "structured stdin must reach the child without shell transport");
 const readStructured = await assertStructuredProcessResult("read_output", { process_id: startStructured.process_id, max_chars: 32_000, wait_ms: 0 });
 assert.equal(readStructured.process_id, startStructured.process_id, "read_output structured result must preserve process identity");
+const tinyReadStructured = await assertStructuredProcessResult("read_output", { process_id: startStructured.process_id, max_chars: 0, wait_ms: 0 });
+assert.ok(String(tinyReadStructured.stdout || "").length <= 1, "max_chars=0 must clamp to one retained character");
+assert.equal(tinyReadStructured.output_page?.page_limit, 1, "max_chars=0 must expose the effective clamped page limit");
+const oversizedReadStructured = await assertStructuredProcessResult("read_output", { process_id: startStructured.process_id, max_chars: 1_000_000, wait_ms: 0 });
+assert.ok(String(oversizedReadStructured.stdout || "").length <= 32_000, "oversized max_chars must clamp to the transport cap");
 const killStructured = await assertStructuredProcessResult("kill_process", { process_id: startStructured.process_id });
 assert.equal(killStructured.already_exited, true, "kill_process structured regression probe should exercise already-exited variant");
 const contractPath = resolve("config/process-tool-contract.json");
@@ -95,7 +106,7 @@ const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "388cf4d2c672c027b380733c613799e58f6a2ee9b99467eaf0d384843d773af6";
+const acceptedContractSha256 = "9ede6b90221e96af79693f6f601268826e3847ba055b54038570f65025e8b3e9";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 const expectedTools = baseExpectedTools
