@@ -9,6 +9,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 process.env.MCP_PUBLIC_ORIGIN = "https://mcp.example.test/";
+delete process.env.MCP_LIBRARY_SPOOL_BRIDGE;
+delete process.env.MCP_RUNTIME_INSTANCE_ID;
 const dir = await mkdtemp(join(tmpdir(), "mcp-file-transfer-"));
 process.env.MCP_PROCESS_RECEIPT_DIR = join(dir, "receipts");
 

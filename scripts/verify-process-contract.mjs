@@ -15,7 +15,7 @@ const localFileToolName = (process.env.MCP_LOCAL_FILE_TOOL_NAME || "upload_local
 assert.ok(["upload_local_file", "read_local_file"].includes(localFileToolName), `unsupported MCP_LOCAL_FILE_TOOL_NAME=${localFileToolName}`);
 const librarySpoolBridgeEnabled = localFileToolName === "upload_local_file" && (process.env.MCP_LIBRARY_SPOOL_BRIDGE === "1" || (process.env.MCP_RUNTIME_INSTANCE_ID || "").startsWith("issue333-persistent-widget-"));
 const readLocalFileDescription = "Read one exact local file and return its unchanged bytes as a native MCP file resource for ChatGPT. This read-only tool does not modify local state, mount an app/widget, or invoke the Library upload API. Transfers preserve exact bytes and SHA-256; images remain compact lazy resources and ZIP review members remain exact resource links.";
-const readOutputBridgeDescription = "Read process stdout/stderr or mount the persistent visual-proof bridge with process_id=visual-proof. Ordinary start_process remains widget-free; the mounted bridge consumes later proofs without per-proof tool calls.";
+const mountBridgeDescription = "Mount the one persistent visual-proof bridge. Call once; ordinary command reads remain widget-free.";
 const { createServer } = await import("../dist/server.js");
 const { registerOptionalVisualProofTools } = await import("../dist/lib/visual-proof-registration.js");
 const contractSourceCommit = "0123456789abcdef0123456789abcdef01234567";
@@ -27,12 +27,13 @@ const actualTools = Object.entries(server._registeredTools)
 
 const expectedInvocationUi = {
   start_process: { title: "Run command", invoking: "Running command…", invoked: "Command returned" },
-  read_output: { title: "Check command", invoking: "Checking command…", invoked: "Command checked" },
+  read_output: { title: "Check command", invoking: "Checking command\u2026", invoked: "Command checked" },
   kill_process: { title: "Stop process", invoking: "Stopping process…", invoked: "Process stop checked" },
   [localFileToolName]: localFileToolName === "read_local_file"
     ? { title: "Read local file", invoking: "Reading file…", invoked: "File ready" }
     : { title: "Share local file", invoking: "Preparing file…", invoked: "File ready" },
   download_chatgpt_file: { title: "Save ChatGPT file", invoking: "Saving file…", invoked: "File saved" },
+  ...(librarySpoolBridgeEnabled ? { mount_visual_proof_bridge: { title: "Open visual proof bridge", invoking: "Opening visual proof bridge.", invoked: "Visual proof bridge ready" } } : {}),
 };
 for (const [name, expected] of Object.entries(expectedInvocationUi)) {
   const tool = server._registeredTools[name];
@@ -47,18 +48,18 @@ for (const name of structuredProcessToolNames) {
   assert.ok(server._registeredTools[name]?.outputSchema, `${name} must declare outputSchema`);
 }
 
-for (const name of ["start_process", ...(librarySpoolBridgeEnabled ? [] : ["read_output", localFileToolName])]) {
+for (const name of ["start_process", "read_output", localFileToolName]) {
   const meta = server._registeredTools[name]?._meta;
   assert.equal(meta?.["openai/outputTemplate"], undefined, `${name} must not mount an app/widget template`);
   assert.equal(meta?.["ui/resourceUri"], undefined, `${name} must not advertise an app resource URI`);
   assert.equal(meta?.ui, undefined, `${name} must not advertise nested app UI metadata`);
 }
 if (librarySpoolBridgeEnabled) {
-  for (const name of ["read_output", localFileToolName]) {
-    const meta = server._registeredTools[name]?._meta;
-    assert.equal(meta?.["openai/outputTemplate"], "ui://process/file-transfer-v7.html", `${name} persistent bridge must mount existing file-transfer widget`);
-    assert.equal(meta?.ui?.resourceUri, "ui://process/file-transfer-v7.html", `${name} persistent bridge must advertise existing app resource URI`);
-  }
+  const meta = server._registeredTools.mount_visual_proof_bridge?._meta || {};
+  assert.equal(meta?.["openai/outputTemplate"], "ui://process/file-transfer-v7.html", "dedicated visual-proof mount must mount existing file-transfer widget");
+  assert.equal(meta?.ui?.resourceUri, "ui://process/file-transfer-v7.html", "dedicated visual-proof mount must advertise existing app resource URI");
+} else {
+  assert.equal(server._registeredTools.mount_visual_proof_bridge, undefined, "normal runtime must not advertise bridge-only mount action");
 }
 const startInputSchema = server._registeredTools.start_process?.inputSchema;
 assert.ok(startInputSchema, "start_process input schema missing");
@@ -124,13 +125,17 @@ const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 const acceptedContractSha256 = "9d9464bb514fb88e4e63ec88878fb0e186b029ea9fa45ca359917a731a2e49f3";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
-const expectedTools = baseExpectedTools
-  .map((tool) => librarySpoolBridgeEnabled && tool.name === "read_output"
-    ? { ...tool, description: readOutputBridgeDescription }
-    : localFileToolName === "read_local_file" && tool.name === "upload_local_file"
-      ? { ...tool, name: "read_local_file", description: readLocalFileDescription }
-      : tool)
-  .sort((a, b) => a.name.localeCompare(b.name));
+const expectedTools = [
+  ...baseExpectedTools.map((tool) => localFileToolName === "read_local_file" && tool.name === "upload_local_file"
+    ? { ...tool, name: "read_local_file", description: readLocalFileDescription }
+    : tool),
+  ...(librarySpoolBridgeEnabled ? [{
+    name: "mount_visual_proof_bridge",
+    description: mountBridgeDescription,
+    inputSchema: z.toJSONSchema(z.object({})),
+    outputSchema: baseExpectedTools.find((tool) => tool.name === "read_output").outputSchema,
+  }] : []),
+].sort((a, b) => a.name.localeCompare(b.name));
 assert.deepEqual(actualTools, expectedTools, "connector tool contract changed; do not replace a stable connector identity without an explicit contract migration");
 const serverBytes = readFileSync(resolve("dist/server.js"));
 const actualHash = createHash("sha256").update(serverBytes).digest("hex");

@@ -747,15 +747,7 @@ export function librarySpoolBridgeEnabled(): boolean { return process.env.MCP_LI
 
 function uploadToolMeta(name: LocalFileToolName) {
   const presentation = localFileToolPresentation(name);
-  if (name === "read_local_file" || !librarySpoolBridgeEnabled()) {
-    return {
-      "openai/toolInvocation/invoking": presentation.invoking,
-      "openai/toolInvocation/invoked": "File ready",
-    };
-  }
   return {
-    ui: { resourceUri: FILE_TRANSFER_WIDGET_URI, visibility: ["model", "app"] },
-    "openai/outputTemplate": FILE_TRANSFER_WIDGET_URI,
     "openai/toolInvocation/invoking": presentation.invoking,
     "openai/toolInvocation/invoked": "File ready",
   };
@@ -810,14 +802,12 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
     },
     async ({ path }) => {
       const handoff = await localFileTransferHandoff(await prepareLocalFileTransfer(path));
-      const bridge = localFileName === "upload_local_file" && librarySpoolBridgeEnabled() ? createLibrarySpoolBridgeSession() : undefined;
       return {
         content: [
           { type: "text" as const, text: JSON.stringify({ caller_id: callerId, ...handoff.summary }) },
           ...handoff.content,
         ],
         structuredContent: handoff.summary,
-        ...(bridge ? { _meta: { file_transfer: localTransferMeta(handoff.item), library_spool_bridge: bridge } } : {}),
       };
     },
   );
