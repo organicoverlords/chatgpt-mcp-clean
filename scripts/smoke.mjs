@@ -379,7 +379,7 @@ const invalidPowerShellSyntax = await callTool(sessionA, "start_process", {
 assert.equal(invalidPowerShellSyntax.execution_outcome, "nonzero_exit", JSON.stringify(invalidPowerShellSyntax));
 assert.notEqual(invalidPowerShellSyntax.exit_code, 0, JSON.stringify(invalidPowerShellSyntax));
 assert.match(invalidPowerShellSyntax.stderr || "", /Missing condition|parse|if statement/i, JSON.stringify(invalidPowerShellSyntax));
-assert.deepEqual(invalidPowerShellSyntax.failure_diagnostic, { kind: "parser_error", origin: "powershell", boundary: "source" }, JSON.stringify(invalidPowerShellSyntax));
+assert.deepEqual(invalidPowerShellSyntax.failure_diagnostic, { kind: "parser_error", origin: "powershell", boundary: "source", retry_without_change: false, retry_requires_change: true, suggested_action: "fix_source" }, JSON.stringify(invalidPowerShellSyntax));
 assert.equal(expectedPythonFailure.failure_diagnostic, undefined, JSON.stringify(expectedPythonFailure));
 const missingExecutableFailure = await callTool(sessionA, "start_process", {
   executable: "__mcp_definitely_missing_executable__",
@@ -388,7 +388,7 @@ const missingExecutableFailure = await callTool(sessionA, "start_process", {
 });
 assert.equal(missingExecutableFailure.execution_outcome, "error", JSON.stringify(missingExecutableFailure));
 assert.equal(missingExecutableFailure.error_code, "ENOENT", JSON.stringify(missingExecutableFailure));
-assert.deepEqual(missingExecutableFailure.failure_diagnostic, { kind: "spawn_error", origin: "process", boundary: "spawn", code: "ENOENT" }, JSON.stringify(missingExecutableFailure));
+assert.deepEqual(missingExecutableFailure.failure_diagnostic, { kind: "spawn_error", origin: "process", boundary: "spawn", code: "ENOENT", retry_without_change: false, retry_requires_change: true, suggested_action: "fix_executable_or_path" }, JSON.stringify(missingExecutableFailure));
 
 const authBenchCount = Math.max(0, Number(process.env.MCP_SMOKE_BENCH_COUNT || 0));
 if (authBenchCount > 0) {
