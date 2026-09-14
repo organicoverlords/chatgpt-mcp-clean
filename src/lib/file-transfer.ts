@@ -241,6 +241,7 @@ function localTransferMeta(item: LocalFileTransfer) {
     direction: "local_to_chatgpt" as const,
     phase: "ready" as const,
     transfer_url: localTransferUrl(item.token),
+    resource_uri: `mcp-upload://file-transfer/${item.token}`,
     file_name: item.file_name,
     mime_type: item.mime_type,
     bytes: item.bytes,
@@ -856,10 +857,12 @@ export function fileTransferWidgetHtml(): string {
 <style>:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color-scheme:light dark}body{margin:0;background:transparent}.image{display:none;max-width:100%;height:auto;border-radius:8px}.image.on{display:block}.status{padding:6px 8px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-word}</style>
 <body><img id="image" class="image" alt="Uploaded image"><div id="status" class="status">VISUAL_PROOF_BRIDGE_READY</div>
 <script>
-const statusEl=document.getElementById('status');const imageEl=document.getElementById('image');let started='';let bridgeStarted='';
+const statusEl=document.getElementById('status');const imageEl=document.getElementById('image');let started='';let bridgeStarted='';let rpcSeq=0;const rpcPending=new Map();
 function setStatus(v){statusEl.textContent=v;window.openai?.notifyIntrinsicHeight?.();}
 function hex(bytes){return [...new Uint8Array(bytes)].map(b=>b.toString(16).padStart(2,'0')).join('');}
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
+function rpcRequest(method,params){return new Promise((resolve,reject)=>{const id='visual-proof-rpc-'+(++rpcSeq);const timer=setTimeout(()=>{rpcPending.delete(id);reject(new Error('RPC_TIMEOUT_'+method));},10000);rpcPending.set(id,{resolve,reject,timer});window.parent.postMessage({jsonrpc:'2.0',id,method,params},'*');});}
+async function sendProofMessage(p,label){if(!p?.resource_uri)throw new Error('RESOURCE_URI_MISSING');setStatus('VISUAL_PROOF_MESSAGE '+(label||p.file_name));const result=await rpcRequest('ui/message',{role:'user',content:[{type:'text',text:'Visual proof ready. Inspect the attached exact full-resolution image and continue the current task. File: '+p.file_name+'; bytes: '+p.bytes+'; sha256: '+p.sha256},{type:'resource_link',uri:p.resource_uri,name:p.file_name,title:p.file_name,mimeType:p.mime_type,size:p.bytes}]});if(result?.isError)throw new Error('UI_MESSAGE_REJECTED');setStatus('VISUAL_PROOF_MESSAGE_OK '+p.file_name);}
 async function uploadTransfer(p,label){
  if(!p||p.direction!=='local_to_chatgpt'||!p.transfer_url)return null;
  if(typeof window.openai?.uploadFile!=='function')throw new Error('UPLOAD_FILE_UNAVAILABLE');
@@ -883,14 +886,14 @@ async function bridgeLoop(b){
    if(r.status===204){await sleep(Number(b.poll_ms)||250);continue;}
    if(!r.ok)throw new Error('BRIDGE_NEXT_HTTP_'+r.status);
    const next=await r.json();if(next?.status!=='ready'||!next?.file_transfer)throw new Error('BRIDGE_NEXT_INVALID');
-   await uploadTransfer(next.file_transfer,next.id||next.file_transfer.file_name);
+   await sendProofMessage(next.file_transfer,next.id||next.file_transfer.file_name);
    const ack=new URL(b.ack_url);ack.searchParams.set('id',next.id);
    const a=await fetch(ack.href,{method:'POST',cache:'no-store'});if(!a.ok)throw new Error('BRIDGE_ACK_HTTP_'+a.status);
   }catch(e){setStatus('VISUAL_PROOF_BRIDGE_ERROR '+String(e?.message||e));await sleep(1000);}
  }
 }
 function render(result){const p=result?._meta?.file_transfer||null;const b=result?._meta?.library_spool_bridge||null;if(p)oneShot(p);if(b)bridgeLoop(b);}
-window.addEventListener('message',event=>{if(event.source!==window.parent)return;const m=event.data;if(m?.jsonrpc!=='2.0')return;if(m.id==='file-transfer-init'&&('result'in m||'error'in m)){if(!m.error)window.parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*');return;}if(m.method==='ui/notifications/tool-result')render(m.params||{});});
+window.addEventListener('message',event=>{if(event.source!==window.parent)return;const m=event.data;if(m?.jsonrpc!=='2.0')return;if(m.id==='file-transfer-init'&&('result'in m||'error'in m)){if(!m.error)window.parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*');return;}const pending=rpcPending.get(m.id);if(pending&&('result'in m||'error'in m)){clearTimeout(pending.timer);rpcPending.delete(m.id);if(m.error)pending.reject(new Error('RPC_ERROR_'+String(m.error?.message||m.id)));else pending.resolve(m.result||{});return;}if(m.method==='ui/notifications/tool-result')render(m.params||{});});
 const envelope=window.openai?.toolResponseMetadata?.mcp_tool_result;if(envelope)render(envelope);
 window.parent.postMessage({jsonrpc:'2.0',id:'file-transfer-init',method:'ui/initialize',params:{protocolVersion:'2026-01-26',appInfo:{name:'persistent-visual-proof-bridge',version:'1.0.0'},appCapabilities:{availableDisplayModes:['inline']}}},'*');
 </script></body></html>`;
