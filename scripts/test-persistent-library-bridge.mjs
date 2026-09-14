@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +21,7 @@ const mod = await import("../dist/lib/file-transfer.js");
 const html = mod.fileTransferWidgetHtml();
 assert.match(html, /window\.openai\?\.uploadFile/);
 assert.match(html, /bridgeLoop/);
+assert.doesNotMatch(html, /sleep\(Number\(b\.poll_ms\)/, "mounted bridge must not short-poll while idle");
 assert.doesNotMatch(html, /VISUAL_PROOF_BRIDGE_READY/, "idle bridge must be visually silent");
 assert.match(html, /ui\/message/);
 assert.match(html, /type:'resource_link'/);
@@ -43,8 +45,11 @@ assert.equal(mount.content.filter((item) => item?.type === "resource_link").leng
 const bridge = mount._meta?.library_spool_bridge;
 assert.ok(bridge, "visual-proof read must return one bridge session");
 assert.match(bridge.next_url, /^https:\/\/bridge\.example\.test\/visual-proof\/library-bridge\/next\?token=/);
-class FakeResponse {
-  constructor(){ this.statusCode=200; this.headers={}; this.body=null; }
+class FakeRequest extends EventEmitter {
+  constructor(query){ super(); this.query=query; }
+}
+class FakeResponse extends EventEmitter {
+  constructor(){ super(); this.statusCode=200; this.headers={}; this.body=null; }
   setHeader(k,v){ this.headers[k]=v; return this; }
   status(n){ this.statusCode=n; return this; }
   send(v){ this.body=v; return this; }
@@ -53,7 +58,7 @@ class FakeResponse {
 }
 const token = new URL(bridge.next_url).searchParams.get("token");
 const nextRes = new FakeResponse();
-await mod.serveLibrarySpoolBridgeNext({ query: { token } }, nextRes);
+await mod.serveLibrarySpoolBridgeNext(new FakeRequest({ token }), nextRes);
 assert.equal(nextRes.statusCode, 200);
 assert.equal(nextRes.body.status, "ready");
 assert.equal(nextRes.body.file_transfer.bytes, png.length);
@@ -62,7 +67,24 @@ assert.match(nextRes.body.file_transfer.transfer_url, /^https:\/\/bridge\.exampl
 assert.match(nextRes.body.file_transfer.resource_uri, /^mcp-upload:\/\/file-transfer\//);
 assert.equal((await readdir(queue)).length, 1, "proof must remain queued until widget upload ack");
 const ackRes = new FakeResponse();
-await mod.serveLibrarySpoolBridgeAck({ query: { token, id: nextRes.body.id } }, ackRes);
+await mod.serveLibrarySpoolBridgeAck(new FakeRequest({ token, id: nextRes.body.id }), ackRes);
 assert.equal(ackRes.statusCode, 200);
 assert.equal((await readdir(queue)).length, 0, "proof must be acknowledged after successful widget upload");
-console.log("PASS persistent_visual_bridge mount_action=mount_visual_proof_bridge start_widget=false mount_consumes_proof=false polling=true exact_hash=true resource_message=true per_proof_upload=false ack_after_message=true");
+
+const idleReq = new FakeRequest({ token });
+const idleRes = new FakeResponse();
+let idleResolved = false;
+const idleWait = mod.serveLibrarySpoolBridgeNext(idleReq, idleRes).then(() => { idleResolved = true; });
+await new Promise((resolve) => setTimeout(resolve, 60));
+assert.equal(idleResolved, false, "idle bridge next request must stay open instead of returning 204 for client polling");
+assert.equal(idleRes.body, null);
+await writeFile(join(queue, "0002.json"), JSON.stringify({ path: filePath, bytes: png.length, sha256 }));
+await Promise.race([idleWait, new Promise((_, reject) => setTimeout(() => reject(new Error("long-poll did not wake after spool write")), 2000))]);
+assert.equal(idleRes.statusCode, 200);
+assert.equal(idleRes.body.status, "ready");
+assert.equal(idleRes.body.file_transfer.sha256, sha256);
+const idleAck = new FakeResponse();
+await mod.serveLibrarySpoolBridgeAck(new FakeRequest({ token, id: idleRes.body.id }), idleAck);
+assert.equal(idleAck.statusCode, 200);
+assert.equal((await readdir(queue)).length, 0);
+console.log("PASS persistent_visual_bridge mount_action=mount_visual_proof_bridge start_widget=false mount_consumes_proof=false idle_http_polling=false long_poll=true exact_hash=true resource_message=true per_proof_upload=false ack_after_message=true");

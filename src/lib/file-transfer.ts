@@ -10,7 +10,7 @@ import { constants as zlibConstants, createZstdCompress } from "node:zlib";
 import type { Request, Response as ExpressResponse } from "express";
 import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { acknowledgeVisualProofSpoolBatch, readVisualProofSpoolBatch, type PendingVisualProof } from "./visual-proof-spool.js";
+import { acknowledgeVisualProofSpoolBatch, readVisualProofSpoolBatch, waitForVisualProofSpoolItem, type PendingVisualProof } from "./visual-proof-spool.js";
 
 export const FILE_TRANSFER_WIDGET_URI = "ui://process/file-transfer-v7.html";
 export const FILE_TRANSFER_MARKER_PREFIX = "CHATGPT_LIBRARY_UPLOAD=";
@@ -667,7 +667,7 @@ export function createLibrarySpoolBridgeSession() {
     next_url: librarySpoolBridgeUrl("next", token),
     ack_url: librarySpoolBridgeUrl("ack", token),
     expires_at,
-    poll_ms: 250,
+    transport: "long_poll",
   };
 }
 
@@ -685,9 +685,27 @@ export async function serveLibrarySpoolBridgeNext(req: Request, res: ExpressResp
   const session = bridgeSession(req);
   if (!session) { res.status(404).send("Library spool bridge token is invalid or expired"); return; }
   if (!session.in_flight) {
-    const batch = await readVisualProofSpoolBatch(512);
-    const pending = batch.pending[0];
-    if (!pending) { res.status(204).end(); return; }
+    let batch = await readVisualProofSpoolBatch(512);
+    let pending = batch.pending[0];
+    if (!pending) {
+      // Hold one mounted bridge request open until the spool changes instead of making
+      // thousands of empty HTTP polls per hour. Abort the local watcher when the host
+      // closes the request so an abandoned widget cannot leak a waiter.
+      const abort = new AbortController();
+      const onAbort = () => abort.abort();
+      req.once("aborted", onAbort);
+      res.once("close", onAbort);
+      try {
+        const ready = await waitForVisualProofSpoolItem(abort.signal);
+        if (!ready) return;
+        batch = await readVisualProofSpoolBatch(512);
+        pending = batch.pending[0];
+        if (!pending) { res.status(204).end(); return; }
+      } finally {
+        req.off("aborted", onAbort);
+        res.off("close", onAbort);
+      }
+    }
     const item = await prepareLocalFileTransfer(pending.filePath);
     session.in_flight = { id: basename(pending.manifestPath), pending, item };
   }
@@ -873,7 +891,7 @@ async function bridgeLoop(b){
  for(;;){
   try{
    const r=await fetch(b.next_url,{cache:'no-store'});
-   if(r.status===204){await sleep(Number(b.poll_ms)||250);continue;}
+   if(r.status===204){continue;}
    if(!r.ok)throw new Error('BRIDGE_NEXT_HTTP_'+r.status);
    const next=await r.json();if(next?.status!=='ready'||!next?.file_transfer)throw new Error('BRIDGE_NEXT_INVALID');
    await sendProofMessage(next.file_transfer,next.id||next.file_transfer.file_name);
