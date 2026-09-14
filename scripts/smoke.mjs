@@ -262,6 +262,34 @@ const localFileBlob = localFileResource.body?.result?.contents?.[0]?.blob;
 assert.ok(localFileBlob, `${expectedLocalFileTool} resource must return exact bytes`);
 assert.equal(Buffer.from(localFileBlob, "base64").compare(localFileSmokeBytes), 0, `${expectedLocalFileTool} resource bytes changed in transit`);
 
+const markerCode = `process.stdout.write(${JSON.stringify(`CHATGPT_LIBRARY_UPLOAD=${localFileSmokePath}\n`)})`;
+const markerProcessCall = await mcpPost(sessionA, {
+  jsonrpc: "2.0",
+  id: Date.now(),
+  method: "tools/call",
+  params: {
+    name: "start_process",
+    arguments: { executable: process.execPath, args: ["-e", markerCode], wait_ms: 10_000 },
+  },
+});
+const markerToolResult = markerProcessCall.body?.result;
+assert.ok(markerToolResult && markerToolResult.isError !== true, markerProcessCall.text);
+assert.equal(markerToolResult._meta, undefined, "start_process marker handoff must remain widget-free");
+assert.equal(markerToolResult.structuredContent?.file_transfer, undefined, "start_process marker handoff must not change the structured process contract");
+const markerRef = (markerToolResult.content || []).find((entry) => entry?.type === "resource_link");
+assert.ok(markerRef, "start_process marker must append a native resource_link over authenticated HTTP");
+assert.equal(markerRef.mimeType, localFileToolResult.structuredContent?.mime_type, markerProcessCall.text);
+assert.equal(markerRef.size, localFileSmokeBytes.length, markerProcessCall.text);
+const markerResource = await mcpPost(sessionA, {
+  jsonrpc: "2.0",
+  id: Date.now(),
+  method: "resources/read",
+  params: { uri: markerRef.uri },
+});
+const markerBlob = markerResource.body?.result?.contents?.[0]?.blob;
+assert.ok(markerBlob, "start_process marker resource must return exact bytes over authenticated HTTP");
+assert.equal(Buffer.from(markerBlob, "base64").compare(localFileSmokeBytes), 0, "start_process marker resource bytes changed in transit");
+
 const structuredTransport = await callTool(sessionA, "start_process", {
   executable: process.execPath,
   args: ["-e", "process.stdin.pipe(process.stdout)"],
