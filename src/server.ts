@@ -6,7 +6,7 @@ import { z } from "zod";
 import { BusyStore } from "./lib/busy-store.js";
 import { viewImage } from "./lib/image-viewer.js";
 import { ProcessManager } from "./lib/process-manager.js";
-import { localFileTransferHandoff, prepareMarkedLocalFileTransfers, registerFileTransferTools } from "./lib/file-transfer.js";
+import { FILE_TRANSFER_WIDGET_URI, createLibrarySpoolBridgeSession, librarySpoolBridgeEnabled, localFileTransferHandoff, prepareMarkedLocalFileTransfers, registerFileTransferTools } from "./lib/file-transfer.js";
 import { registerTemplateCompatibilityResources } from "./lib/template-compat.js";
 
 // The deployed ChatGPT connector surface is the process profile. Keep the broader
@@ -266,12 +266,13 @@ export function createServer(callerId: string): McpServer {
     "read_output",
     {
       title: "Check command",
-      description: "Read process stdout/stderr or a named bootstrap snapshot. Returns structured data only; it never mounts an app/widget template. wait_ms may wait up to 10000 ms for output or exit, and each stream is bounded to 32000 characters.",
+      description: librarySpoolBridgeEnabled()
+        ? "Read process stdout/stderr or mount the persistent visual-proof bridge with process_id=visual-proof. Ordinary start_process remains widget-free; the mounted bridge consumes later proofs without per-proof tool calls."
+        : "Read process stdout/stderr or a named bootstrap snapshot. Returns structured data only; it never mounts an app/widget template. wait_ms may wait up to 10000 ms for output or exit, and each stream is bounded to 32000 characters.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-      _meta: {
-        "openai/toolInvocation/invoking": "Checking command…",
-        "openai/toolInvocation/invoked": "Command checked",
-      },
+      _meta: librarySpoolBridgeEnabled()
+        ? { ui: { resourceUri: FILE_TRANSFER_WIDGET_URI, visibility: ["model", "app"] }, "openai/outputTemplate": FILE_TRANSFER_WIDGET_URI, "openai/toolInvocation/invoking": "Checking command…", "openai/toolInvocation/invoked": "Command checked" }
+        : { "openai/toolInvocation/invoking": "Checking command…", "openai/toolInvocation/invoked": "Command checked" },
       inputSchema: z.object({
         process_id: z.string().min(1),
         // Size is a hint, not a failure boundary. Accept any integer and clamp it so a
@@ -284,6 +285,13 @@ export function createServer(callerId: string): McpServer {
     async ({ process_id, max_chars, wait_ms }) => {
       const boundedMaxChars = Math.max(1, Math.min(max_chars ?? 32_000, 32_000));
       if (isVisualProofSnapshot(process_id)) {
+        if (librarySpoolBridgeEnabled()) {
+          const value = {
+            mcp_status: "OK", process_state: "SNAPSHOT", elapsed_ms: 0, next_action: "READ_SAME_PROCESS_ID",
+            process_id: "visual-proof", running: true, stdout: "", stderr: "", no_change: true, snapshot_alias: true,
+          };
+          return { ...(await structuredTextResult(value, callerId)), _meta: { library_spool_bridge: createLibrarySpoolBridgeSession() } };
+        }
         const batch = await readVisualProofSpoolBatch(boundedMaxChars);
         const result = await structuredTextResult(batch.value, callerId);
         await acknowledgeVisualProofSpoolBatch(batch.pending);
