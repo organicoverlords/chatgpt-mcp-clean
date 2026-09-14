@@ -24,6 +24,7 @@ assert.match(html, /bridgeLoop/);
 assert.doesNotMatch(html, /sleep\(Number\(b\.poll_ms\)/, "mounted bridge must not short-poll while idle");
 assert.doesNotMatch(html, /VISUAL_PROOF_BRIDGE_READY/, "idle bridge must be visually silent");
 assert.match(html, /ui\/message/);
+assert.match(html, /VISUAL_PROOF_BRIDGE_ACK_ERROR/, 'ACK failures must retry without re-sending ui/message');
 assert.match(html, /type:'resource_link'/);
 assert.match(html, /RESOURCE_URI_MISSING/);
 assert.doesNotMatch(html, /await uploadTransfer\(next\.file_transfer/, 'spool hot loop must not re-upload each proof through Library');
@@ -65,11 +66,20 @@ assert.equal(nextRes.body.file_transfer.bytes, png.length);
 assert.equal(nextRes.body.file_transfer.sha256, sha256);
 assert.match(nextRes.body.file_transfer.transfer_url, /^https:\/\/bridge\.example\.test\/file-transfer\/local\?token=/);
 assert.match(nextRes.body.file_transfer.resource_uri, /^mcp-upload:\/\/file-transfer\//);
-assert.equal((await readdir(queue)).length, 1, "proof must remain queued until widget upload ack");
+assert.equal((await readdir(queue)).length, 0, "proof must leave the shared queue as soon as one bridge session atomically claims it");
+const secondMount = await mountTool.handler({}, {});
+const secondBridge = secondMount._meta?.library_spool_bridge;
+const secondToken = new URL(secondBridge.next_url).searchParams.get("token");
+const secondReq = new FakeRequest({ token: secondToken });
+const secondRes = new FakeResponse();
+let secondResolved = false;
+const secondWait = mod.serveLibrarySpoolBridgeNext(secondReq, secondRes).then(() => { secondResolved = true; });
+await new Promise((resolve) => setTimeout(resolve, 60));
+assert.equal(secondResolved, false, "a second bridge process/session must not observe an artifact already claimed by the first");
 const ackRes = new FakeResponse();
 await mod.serveLibrarySpoolBridgeAck(new FakeRequest({ token, id: nextRes.body.id }), ackRes);
 assert.equal(ackRes.statusCode, 200);
-assert.equal((await readdir(queue)).length, 0, "proof must be acknowledged after successful widget upload");
+assert.equal((await readdir(queue)).length, 0, "proof must remain absent from the shared queue after acknowledgement");
 
 const idleReq = new FakeRequest({ token });
 const idleRes = new FakeResponse();
@@ -78,13 +88,49 @@ const idleWait = mod.serveLibrarySpoolBridgeNext(idleReq, idleRes).then(() => { 
 await new Promise((resolve) => setTimeout(resolve, 60));
 assert.equal(idleResolved, false, "idle bridge next request must stay open instead of returning 204 for client polling");
 assert.equal(idleRes.body, null);
+
 await writeFile(join(queue, "0002.json"), JSON.stringify({ path: filePath, bytes: png.length, sha256 }));
-await Promise.race([idleWait, new Promise((_, reject) => setTimeout(() => reject(new Error("long-poll did not wake after spool write")), 2000))]);
-assert.equal(idleRes.statusCode, 200);
-assert.equal(idleRes.body.status, "ready");
-assert.equal(idleRes.body.file_transfer.sha256, sha256);
-const idleAck = new FakeResponse();
-await mod.serveLibrarySpoolBridgeAck(new FakeRequest({ token, id: idleRes.body.id }), idleAck);
-assert.equal(idleAck.statusCode, 200);
+await Promise.race([
+  Promise.all([secondWait, idleWait]),
+  new Promise((_, reject) => setTimeout(() => reject(new Error("bridge sessions did not settle after a new artifact")), 2000)),
+]);
+const ready = [
+  { token: secondToken, res: secondRes },
+  { token, res: idleRes },
+].filter(({ res }) => res.statusCode === 200 && res.body?.status === "ready");
+const missed = [secondRes, idleRes].filter((res) => res.statusCode === 204);
+assert.equal(ready.length, 1, "one artifact must be claimed by exactly one bridge session");
+assert.equal(missed.length, 1, "the losing bridge session must return 204 after losing the atomic claim");
+assert.equal(ready[0].res.body?.id, "0002.json");
+const winnerAck = new FakeResponse();
+await mod.serveLibrarySpoolBridgeAck(new FakeRequest({ token: ready[0].token, id: ready[0].res.body.id }), winnerAck);
+assert.equal(winnerAck.statusCode, 200);
+
+const loserToken = ready[0].token === token ? secondToken : token;
+const loserRes = new FakeResponse();
+const loserNext = mod.serveLibrarySpoolBridgeNext(new FakeRequest({ token: loserToken }), loserRes);
+await new Promise((resolve) => setTimeout(resolve, 60));
+assert.equal(loserRes.body, null, "losing bridge may long-poll again after its 204");
+await writeFile(join(queue, "0003.json"), JSON.stringify({ path: filePath, bytes: png.length, sha256 }));
+await Promise.race([loserNext, new Promise((_, reject) => setTimeout(() => reject(new Error("remaining bridge did not wake for the next artifact")), 2000))]);
+assert.equal(loserRes.statusCode, 200);
+assert.equal(loserRes.body?.id, "0003.json");
+assert.equal(loserRes.body.file_transfer.sha256, sha256);
+const loserAck = new FakeResponse();
+await mod.serveLibrarySpoolBridgeAck(new FakeRequest({ token: loserToken, id: loserRes.body.id }), loserAck);
+assert.equal(loserAck.statusCode, 200);
+assert.equal((await readdir(queue)).length, 0);
+
+const abandonedDir = join(spool, "claimed", "abandoned.json.claim");
+await mkdir(abandonedDir, { recursive: true });
+await writeFile(join(abandonedDir, "owner.meta"), JSON.stringify({ pid: 999999, claimedAt: 0 }));
+await writeFile(join(abandonedDir, "abandoned.json"), JSON.stringify({ path: filePath, bytes: png.length, sha256 }));
+const recoveredRes = new FakeResponse();
+await mod.serveLibrarySpoolBridgeNext(new FakeRequest({ token: loserToken }), recoveredRes);
+assert.equal(recoveredRes.statusCode, 200);
+assert.equal(recoveredRes.body?.id, "abandoned.json", "dead-owner claim must be recovered after backend restart/crash");
+const recoveredAck = new FakeResponse();
+await mod.serveLibrarySpoolBridgeAck(new FakeRequest({ token: loserToken, id: recoveredRes.body.id }), recoveredAck);
+assert.equal(recoveredAck.statusCode, 200);
 assert.equal((await readdir(queue)).length, 0);
 console.log("PASS persistent_visual_bridge mount_action=mount_visual_proof_bridge start_widget=false mount_consumes_proof=false idle_http_polling=false long_poll=true exact_hash=true resource_message=true per_proof_upload=false ack_after_message=true");

@@ -1,15 +1,17 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { watch } from "node:fs";
-import { mkdir, readFile, readdir, rename, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const VISUAL_PROOF_PROCESS_ID = "visual-proof";
 const MARKER_PREFIX = "CHATGPT_LIBRARY_UPLOAD=";
 
 export interface PendingVisualProof {
+  id: string;
   manifestPath: string;
   processedPath: string;
   filePath: string;
+  claimDirectory?: string;
 }
 
 function spoolRoot(): string {
@@ -69,6 +71,109 @@ export async function waitForVisualProofSpoolItem(signal?: AbortSignal): Promise
   });
 }
 
+async function pendingFromManifest(root: string, id: string, manifestPath: string, processedPath: string): Promise<PendingVisualProof> {
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+  const filePath = validateSpoolPath(root, manifest.path);
+  const expectedBytes = Number(manifest.bytes);
+  const expectedSha256 = String(manifest.sha256 || "").toLowerCase();
+  if (!Number.isSafeInteger(expectedBytes) || expectedBytes <= 0) throw new Error(`invalid visual proof byte count in ${id}`);
+  if (!/^[0-9a-f]{64}$/.test(expectedSha256)) throw new Error(`invalid visual proof sha256 in ${id}`);
+  const info = await stat(filePath);
+  if (!info.isFile() || info.size !== expectedBytes) throw new Error(`visual proof size mismatch in ${id}`);
+  const bytes = await readFile(filePath);
+  const actualSha256 = createHash("sha256").update(bytes).digest("hex");
+  if (actualSha256 !== expectedSha256) throw new Error(`visual proof sha256 mismatch in ${id}`);
+  return { id, manifestPath, processedPath, filePath };
+}
+
+const CLAIM_OWNER_FILE = "owner.meta";
+const CLAIM_OWNER_WRITE_GRACE_MS = 30_000;
+
+function processIsAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException)?.code === "EPERM"; }
+}
+
+async function recoverAbandonedVisualProofClaims(root: string): Promise<void> {
+  const queueDir = join(root, "queue");
+  const claimedRoot = join(root, "claimed");
+  await mkdir(queueDir, { recursive: true });
+  await mkdir(claimedRoot, { recursive: true });
+  const entries = await readdir(claimedRoot, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.endsWith(".claim")) continue;
+    const claimDir = join(claimedRoot, entry.name);
+    let owner: { pid?: number; claimedAt?: number } | undefined;
+    try { owner = JSON.parse(await readFile(join(claimDir, CLAIM_OWNER_FILE), "utf8")); } catch {}
+    if (owner?.pid && processIsAlive(owner.pid)) continue;
+    if (!owner) {
+      const info = await stat(claimDir);
+      if (Date.now() - info.mtimeMs < CLAIM_OWNER_WRITE_GRACE_MS) continue;
+    }
+    const manifests = (await readdir(claimDir)).filter((name) => name.toLowerCase().endsWith(".json"));
+    for (const name of manifests) {
+      const source = join(claimDir, name);
+      let target = join(queueDir, name);
+      try {
+        await stat(target);
+        target = join(queueDir, `recovered-${Date.now()}-${randomUUID()}-${name}`);
+      } catch {}
+      await rename(source, target);
+    }
+    await rm(claimDir, { recursive: true, force: true });
+  }
+}
+
+export async function claimVisualProofSpoolItem(): Promise<PendingVisualProof | undefined> {
+  const root = spoolRoot();
+  const queueDir = join(root, "queue");
+  const claimedRoot = join(root, "claimed");
+  const processedDir = join(root, "processed");
+  await mkdir(queueDir, { recursive: true });
+  await mkdir(claimedRoot, { recursive: true });
+  await mkdir(processedDir, { recursive: true });
+  await recoverAbandonedVisualProofClaims(root);
+  const names = (await readdir(queueDir)).filter((name) => name.toLowerCase().endsWith(".json")).sort();
+  for (const name of names) {
+    const source = join(queueDir, name);
+    const claimDir = join(claimedRoot, `${name}.claim`);
+    try {
+      // A fixed claim directory is the cross-process exclusion primitive. On Windows,
+      // concurrent rename(source, distinctDestinations) is not sufficient for exclusive
+      // ownership, while mkdir on the same path reliably gives one winner.
+      await mkdir(claimDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "EEXIST") continue;
+      throw error;
+    }
+    try {
+      await writeFile(join(claimDir, CLAIM_OWNER_FILE), JSON.stringify({ pid: process.pid, claimedAt: Date.now() }), "utf8");
+      const claimed = join(claimDir, name);
+      try {
+        await rename(source, claimed);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException)?.code;
+        await rm(claimDir, { recursive: true, force: true });
+        if (code === "ENOENT" || code === "EACCES" || code === "EPERM") continue;
+        throw error;
+      }
+      try {
+        const proof = await pendingFromManifest(root, name, claimed, join(processedDir, name));
+        return { ...proof, claimDirectory: claimDir };
+      } catch (error) {
+        try { await rename(claimed, source); } catch {}
+        await rm(claimDir, { recursive: true, force: true });
+        throw error;
+      }
+    } catch (error) {
+      try { await rm(claimDir, { recursive: true, force: true }); } catch {}
+      throw error;
+    }
+  }
+  return undefined;
+}
+
 export async function readVisualProofSpoolBatch(maxChars: number): Promise<{ value: Record<string, unknown>; pending: PendingVisualProof[] }> {
   const root = spoolRoot();
   const queueDir = join(root, "queue");
@@ -81,22 +186,12 @@ export async function readVisualProofSpoolBatch(maxChars: number): Promise<{ val
   let usedChars = 0;
   for (const name of names) {
     const manifestPath = join(queueDir, name);
-    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
-    const filePath = validateSpoolPath(root, manifest.path);
-    const expectedBytes = Number(manifest.bytes);
-    const expectedSha256 = String(manifest.sha256 || "").toLowerCase();
-    if (!Number.isSafeInteger(expectedBytes) || expectedBytes <= 0) throw new Error(`invalid visual proof byte count in ${name}`);
-    if (!/^[0-9a-f]{64}$/.test(expectedSha256)) throw new Error(`invalid visual proof sha256 in ${name}`);
-    const info = await stat(filePath);
-    if (!info.isFile() || info.size !== expectedBytes) throw new Error(`visual proof size mismatch in ${name}`);
-    const bytes = await readFile(filePath);
-    const actualSha256 = createHash("sha256").update(bytes).digest("hex");
-    if (actualSha256 !== expectedSha256) throw new Error(`visual proof sha256 mismatch in ${name}`);
-    const marker = `${MARKER_PREFIX}${filePath}\n`;
+    const proof = await pendingFromManifest(root, name, manifestPath, join(processedDir, name));
+    const marker = `${MARKER_PREFIX}${proof.filePath}\n`;
     if (pending.length > 0 && usedChars + marker.length > maxChars) break;
     usedChars += marker.length;
     markers.push(marker.trimEnd());
-    pending.push({ manifestPath, processedPath: join(processedDir, name), filePath });
+    pending.push(proof);
   }
   return {
     value: {
@@ -116,5 +211,22 @@ export async function readVisualProofSpoolBatch(maxChars: number): Promise<{ val
 }
 
 export async function acknowledgeVisualProofSpoolBatch(pending: PendingVisualProof[]): Promise<void> {
-  for (const item of pending) await rename(item.manifestPath, item.processedPath);
+  for (const item of pending) {
+    try {
+      await rename(item.manifestPath, item.processedPath);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code === "ENOENT") {
+        try {
+          const info = await stat(item.processedPath);
+          if (info.isFile()) {
+            if (item.claimDirectory) await rm(item.claimDirectory, { recursive: true, force: true });
+            continue;
+          }
+        } catch {}
+      }
+      throw error;
+    }
+    if (item.claimDirectory) await rm(item.claimDirectory, { recursive: true, force: true });
+  }
 }
