@@ -81,6 +81,9 @@ rejects("& .\\scripts\\start-minimal-clone.ps1 -InstanceId clone-a -Port 3011 -P
 rejects("netsh interface portproxy set v4tov4 listenaddress=10.203.0.2 listenport=3011 connectaddress=127.0.0.1 connectport=3003");
 rejects("$h=Invoke-RestMethod http://127.0.0.1:3011/health; Stop-Process -Id $h.pid -Force");
 rejects("$h=Invoke-RestMethod http://127.0.0.1:3003/health; taskkill.exe /PID $h.pid /T /F");
+rejects(`if ($false) { taskkill.exe /PID ${process.pid} /T /F }`);
+rejects(`$oldParent=${process.ppid}; if ($false) { taskkill.exe /PID $oldParent /T /F }`);
+rejects(`if ($false) { Stop-Process -Id ${process.pid} -Force }`);
 rejectsProtected("Get-CimInstance Win32_Process | Where-Object CommandLine -Match 'Start-DesktopCommanderFallbackHidden.ps1' | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }");
 rejectsProtected("Get-CimInstance Win32_Process | Where-Object CommandLine -Match '@wonderwhy-er/desktop-commander' | Invoke-CimMethod -MethodName Terminate");
 rejectsProtected("Get-Process node | Stop-Process -Force");

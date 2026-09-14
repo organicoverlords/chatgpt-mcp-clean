@@ -675,12 +675,33 @@ function mcpProductionMutationError(command: string, code: string): string | und
   const terminatesProcess = /\b(?:Stop-Process|taskkill(?:\.exe)?|kill-process)\b/i.test(code)
     || (/\b(?:Invoke-CimMethod|Invoke-WmiMethod)\b/i.test(code) && /\bTerminate\b/i.test(command))
     || /\bwmic(?:\.exe)?\b[^\r\n;]*\bprocess\b[^\r\n;]*\bcall\s+terminate\b/i.test(command);
-  const identifiesServingMcp = /(?:127\.0\.0\.1:(?:3011|3003)\/health|10\.203\.0\.2:3011|McpV3Production3011|ChatGPTMcpMinimal|dist[\\/]front-door\.js|dist[\\/]index\.js)/i.test(command);
+  const protectedServingPids = new Set(
+    [process.pid, process.ppid].filter((value) => Number.isSafeInteger(value) && value > 0),
+  );
+  const assignedPidVariables = new Map<string, number>();
+  for (const match of code.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(\d+)\b/g)) {
+    const value = Number(match[2]);
+    if (Number.isSafeInteger(value) && value > 0) assignedPidVariables.set(match[1]!.toLowerCase(), value);
+  }
+  const terminationPidTokens: Array<number | string> = [];
+  for (const match of code.matchAll(/\btaskkill(?:\.exe)?\b[^\r\n;|]*\/PID\s+(\d+|\$[A-Za-z_][A-Za-z0-9_]*)\b/gi)) {
+    const token = match[1]!;
+    terminationPidTokens.push(token.startsWith("$") ? token.slice(1).toLowerCase() : Number(token));
+  }
+  for (const match of code.matchAll(/\bStop-Process\b[^\r\n;|]*-Id\s+(\d+|\$[A-Za-z_][A-Za-z0-9_]*)\b/gi)) {
+    const token = match[1]!;
+    terminationPidTokens.push(token.startsWith("$") ? token.slice(1).toLowerCase() : Number(token));
+  }
+  const targetsProtectedServingPid = terminationPidTokens.some((token) => {
+    const pid = typeof token === "number" ? token : assignedPidVariables.get(token);
+    return pid !== undefined && protectedServingPids.has(pid);
+  });
+  const identifiesServingMcp = /(?:127\.0\.0\.1:(?:3011|3003)\/health|10\.203\.0\.2:3011|McpV3Production3011|ChatGPTMcpMinimal|dist[\\/](?:front-door|index)\.js)/i.test(command);
   const identifiesOtherProtectedControlPlane = /(?:McpVpsEdgeTunnel|Start-DesktopCommanderFallbackHidden\.ps1|@wonderwhy-er[\\/]desktop-commander|desktop-commander[\\/]dist[\\/]index\.js|home-direct-(?:caddy-)?supervisor\.ps1|keepalive\.ps1|launch-production\.ps1|start-vps-native-tunnels\.ps1|vps_mcp_reverse_tunnel)/i.test(command);
   const selectsSharedControlHostByImage = /\bGet-Process\b[^\r\n;]*(?:\bnode(?:\.exe)?\b|\bpowershell(?:\.exe)?\b|\bpwsh(?:\.exe)?\b|\bpython(?:\.exe)?\b)/i.test(command)
     || /\bStop-Process\b[^\r\n;]*-Name\s+['"]?(?:node|powershell|pwsh|python)(?:\.exe)?['"]?\b/i.test(command)
     || /\btaskkill(?:\.exe)?\b[^\r\n;]*\/IM\s+['"]?(?:node|powershell|pwsh|python)(?:\.exe)?['"]?\b/i.test(command);
-  if (terminatesProcess && identifiesServingMcp) return productionIngressError;
+  if (terminatesProcess && (identifiesServingMcp || targetsProtectedServingPid)) return productionIngressError;
   if (terminatesProcess && (identifiesOtherProtectedControlPlane || selectsSharedControlHostByImage)) return PROTECTED_CONTROL_PLANE_TERMINATION_ERROR;
 
   return undefined;
