@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { resolve } from "node:path";
 import { isBootstrapSnapshot, readBootstrapSnapshot } from "./lib/bootstrap-snapshot.js";
+import { acknowledgeVisualProofSpoolBatch, isVisualProofSnapshot, readVisualProofSpoolBatch } from "./lib/visual-proof-spool.js";
 import { z } from "zod";
 import { BusyStore } from "./lib/busy-store.js";
 import { viewImage } from "./lib/image-viewer.js";
@@ -282,6 +283,12 @@ export function createServer(callerId: string): McpServer {
     },
     async ({ process_id, max_chars, wait_ms }) => {
       const boundedMaxChars = Math.max(1, Math.min(max_chars ?? 32_000, 32_000));
+      if (isVisualProofSnapshot(process_id)) {
+        const batch = await readVisualProofSpoolBatch(boundedMaxChars);
+        const result = await structuredTextResult(batch.value, callerId);
+        await acknowledgeVisualProofSpoolBatch(batch.pending);
+        return result;
+      }
       return structuredTextResult(isBootstrapSnapshot(process_id)
         ? await readBootstrapSnapshot(boundedMaxChars, process_id)
         : await processManager.readOutput(process_id, boundedMaxChars, wait_ms), callerId);
