@@ -115,6 +115,27 @@
         "caller_id": {
           "type": "string"
         },
+        "serving_identity": {
+          "type": "object",
+          "properties": {
+            "tool_contract_version": {
+              "type": "string",
+              "const": "process-tools.v3"
+            },
+            "backend_generation": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          },
+          "required": [
+            "tool_contract_version"
+          ],
+          "additionalProperties": false
+        },
         "process_id": {
           "type": "string"
         },
@@ -169,6 +190,7 @@
       },
       "required": [
         "caller_id",
+        "serving_identity",
         "process_id",
         "pid",
         "killed"
@@ -209,6 +231,27 @@
       "properties": {
         "caller_id": {
           "type": "string"
+        },
+        "serving_identity": {
+          "type": "object",
+          "properties": {
+            "tool_contract_version": {
+              "type": "string",
+              "const": "process-tools.v3"
+            },
+            "backend_generation": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          },
+          "required": [
+            "tool_contract_version"
+          ],
+          "additionalProperties": false
         },
         "mcp_status": {
           "type": "string",
@@ -529,6 +572,25 @@
               "maxLength": 80,
               "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,79}$"
             },
+            "retry_without_change": {
+              "type": "boolean",
+              "const": false
+            },
+            "retry_requires_change": {
+              "type": "boolean",
+              "const": true
+            },
+            "suggested_action": {
+              "type": "string",
+              "enum": [
+                "fix_source",
+                "use_structured_python_script",
+                "use_structured_executable_args",
+                "fix_argv_contract",
+                "fix_executable_or_path",
+                "inspect_process_error"
+              ]
+            },
             "input_target": {
               "type": "object",
               "properties": {
@@ -558,7 +620,10 @@
           "required": [
             "kind",
             "origin",
-            "boundary"
+            "boundary",
+            "retry_without_change",
+            "retry_requires_change",
+            "suggested_action"
           ],
           "additionalProperties": false
         },
@@ -671,6 +736,7 @@
       },
       "required": [
         "caller_id",
+        "serving_identity",
         "mcp_status",
         "process_state",
         "elapsed_ms",
@@ -795,6 +861,27 @@
         "caller_id": {
           "type": "string"
         },
+        "serving_identity": {
+          "type": "object",
+          "properties": {
+            "tool_contract_version": {
+              "type": "string",
+              "const": "process-tools.v3"
+            },
+            "backend_generation": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          },
+          "required": [
+            "tool_contract_version"
+          ],
+          "additionalProperties": false
+        },
         "mcp_status": {
           "type": "string",
           "enum": [
@@ -1114,6 +1201,25 @@
               "maxLength": 80,
               "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,79}$"
             },
+            "retry_without_change": {
+              "type": "boolean",
+              "const": false
+            },
+            "retry_requires_change": {
+              "type": "boolean",
+              "const": true
+            },
+            "suggested_action": {
+              "type": "string",
+              "enum": [
+                "fix_source",
+                "use_structured_python_script",
+                "use_structured_executable_args",
+                "fix_argv_contract",
+                "fix_executable_or_path",
+                "inspect_process_error"
+              ]
+            },
             "input_target": {
               "type": "object",
               "properties": {
@@ -1143,7 +1249,10 @@
           "required": [
             "kind",
             "origin",
-            "boundary"
+            "boundary",
+            "retry_without_change",
+            "retry_requires_change",
+            "suggested_action"
           ],
           "additionalProperties": false
         },
@@ -1256,6 +1365,7 @@
       },
       "required": [
         "caller_id",
+        "serving_identity",
         "mcp_status",
         "process_state",
         "elapsed_ms",

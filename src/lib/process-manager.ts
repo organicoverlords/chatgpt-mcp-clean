@@ -50,6 +50,9 @@ export type ProcessFailureDiagnostic = {
   origin: "powershell" | "python" | "node" | "bash" | "busy_cli" | "stack_atlas_cli" | "swarm_route_cli" | "process";
   boundary: "source" | "legacy_command" | "argv_contract" | "spawn";
   code?: string;
+  retry_without_change: false;
+  retry_requires_change: true;
+  suggested_action: "fix_source" | "use_structured_python_script" | "use_structured_executable_args" | "fix_argv_contract" | "fix_executable_or_path" | "inspect_process_error";
   input_target?: {
     mode: "script" | "executable";
     language?: StructuredScriptLanguage;
@@ -251,6 +254,7 @@ type ProcessState = {
   callerId: string;
   ownerContext: TelemetryContext;
   command: string;
+  dedupeIdentity: string;
   submittedCommand?: string;
   activityTarget?: ActivityTarget;
   actionClass?: string;
@@ -273,6 +277,7 @@ type ProcessState = {
   waiters: Set<() => void>;
   attemptStartedAt: string;
   repairAttempts: ProcessRepairAttempt[];
+  runtimeRepairAllowed: boolean;
   executionMode?: CommandExecutionMode;
   executionReason?: string;
 };
@@ -1239,7 +1244,11 @@ function processFailureDiagnostic(
 ): ProcessFailureDiagnostic | undefined {
   if (!error && (exitCode === null || exitCode === 0)) return undefined;
   const boundedErrorCode = boundedFailureCode(errorCode);
-  if (error && boundedErrorCode) return { kind: "spawn_error", origin: "process", boundary: "spawn", code: boundedErrorCode };
+  if (error && boundedErrorCode) return {
+    kind: "spawn_error", origin: "process", boundary: "spawn", code: boundedErrorCode,
+    retry_without_change: false, retry_requires_change: true,
+    suggested_action: boundedErrorCode === "ENOENT" ? "fix_executable_or_path" : "inspect_process_error",
+  };
   const stripFailureAnsi = (value: string) => value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
   const parserOutput = stripFailureAnsi(`${stderr}\n${error ?? ""}`);
   const output = stripFailureAnsi(`${stderr}\n${stdout}\n${error ?? ""}`);
@@ -1269,7 +1278,19 @@ function processFailureDiagnostic(
     // Parser output identifies the language that rejected the source, but it does not prove
     // that changing transport would make invalid source valid. Report ownership/boundary only.
     const code = parserFailureCode(parserOrigin, parserOutput);
-    return { kind: "parser_error", origin: parserOrigin, boundary: structuredLanguage ? "source" : "legacy_command", ...(code ? { code } : {}) };
+    const powershellWrappedPythonHeredoc = parserOrigin === "powershell"
+      && structuredLanguage === "powershell"
+      && /(?:^|\n)\s*(?:python(?:3)?|py)(?:\.exe)?\s+-\s*<<\s*['"]?[A-Za-z_][A-Za-z0-9_]*/im.test(command);
+    return {
+      kind: "parser_error",
+      origin: parserOrigin,
+      boundary: structuredLanguage ? "source" : "legacy_command",
+      ...(code ? { code } : {}),
+      retry_without_change: false,
+      retry_requires_change: true,
+      suggested_action: powershellWrappedPythonHeredoc ? "use_structured_python_script" : "fix_source",
+      ...(powershellWrappedPythonHeredoc ? { input_target: { mode: "script" as const, language: "python" as const } } : {}),
+    };
   }
 
   const cliOrigin: ProcessFailureDiagnostic["origin"] | undefined = /^usage: busy\b/im.test(output) && /(?:BusyCoordinator|busy(?:-python)?\.(?:cmd|py)|\bbusy\b)/i.test(command)
@@ -1284,6 +1305,9 @@ function processFailureDiagnostic(
       kind: "cli_usage",
       origin: cliOrigin,
       boundary: structuredArgv ? "argv_contract" : "legacy_command",
+      retry_without_change: false,
+      retry_requires_change: true,
+      suggested_action: structuredArgv ? "fix_argv_contract" : "use_structured_executable_args",
       ...(structuredArgv ? {} : { input_target: { mode: "executable" as const } }),
     };
   }
@@ -1671,7 +1695,7 @@ export class ProcessManager {
 
   private tryRuntimeRepair(state: ProcessState, code: number | null, signal: NodeJS.Signals | null): boolean {
     const exitCode = code ?? -1;
-    if (exitCode === 0 || signal || state.killRequested || state.error || state.repairAttempts.length >= 1) return false;
+    if (exitCode === 0 || signal || state.killRequested || state.error || !state.runtimeRepairAllowed || state.repairAttempts.length >= 1) return false;
     const stdout = state.stdout.full().text;
     const stderr = state.stderr.full().text;
     const repair = runtimeRepairCommand(state.command, stdout, stderr);
@@ -2348,6 +2372,23 @@ export class ProcessManager {
     for (const state of remaining.slice(0, Math.max(0, remaining.length - this.maxCompletedProcesses))) this.processes.delete(state.id);
   }
 
+  private executionDedupeIdentity(executionPlan: CommandExecutionPlan): string {
+    const normalizedEnv = executionPlan.env
+      ? Object.fromEntries(Object.entries(executionPlan.env).sort(([left], [right]) => left.localeCompare(right)))
+      : undefined;
+    const normalizedSteps = executionPlan.steps?.map((step) => ({ ...step }));
+    const payload = JSON.stringify({
+      mode: executionPlan.mode,
+      executable: executionPlan.executable,
+      args: executionPlan.args,
+      reason: executionPlan.reason,
+      ...(executionPlan.stdin !== undefined ? { stdin: executionPlan.stdin } : {}),
+      ...(normalizedEnv ? { env: normalizedEnv } : {}),
+      ...(normalizedSteps ? { steps: normalizedSteps } : {}),
+    });
+    return createHash("sha256").update(payload, "utf8").digest("hex");
+  }
+
   private startPrepared(
     effectiveCommand: string,
     executionPlan: CommandExecutionPlan,
@@ -2360,6 +2401,8 @@ export class ProcessManager {
     preflightCommand: string = effectiveCommand,
     preflightMode: "full" | "policy" = "full",
     transportPreflightError?: string,
+    dedupeIdentity: string = effectiveCommand,
+    runtimeRepairAllowed = true,
   ): StartResult {
     const preflightError = transportPreflightError ?? (preflightMode === "policy"
       ? commandPolicyError(preflightCommand)
@@ -2371,7 +2414,7 @@ export class ProcessManager {
       throw new Error(`start_process_preflight_failed: ${preflightError}`);
     }
     const cwd = normalizedCwd(workingDirectory);
-    const duplicate = [...this.processes.values()].find((state) => state.exitCode === null && state.callerId === callerId && state.cwd === cwd && state.command === effectiveCommand && sameActivityTarget(state.activityTarget, activityTarget) && state.actionClass === actionClass);
+    const duplicate = [...this.processes.values()].find((state) => state.exitCode === null && state.callerId === callerId && state.cwd === cwd && state.dedupeIdentity === dedupeIdentity && sameActivityTarget(state.activityTarget, activityTarget) && state.actionClass === actionClass);
     if (duplicate) {
       emitTelemetry({ event: "process_reused", process_id: duplicate.id, pid: duplicate.pid, owner_caller_id: duplicate.callerId });
       return { ...processResponseState(duplicate.startedAt, true), process_id: duplicate.id, pid: duplicate.pid, cwd: duplicate.cwd, running: true, ...(duplicate.launching ? { launching: true } : {}) } as StartResult;
@@ -2386,11 +2429,11 @@ export class ProcessManager {
     let resolveDone!: () => void;
     const done = new Promise<void>((resolve) => { resolveDone = resolve; });
     const state: ProcessState = {
-      id: processId, pid: 0, callerId, ownerContext, command: effectiveCommand, ...(submittedCommand !== undefined ? { submittedCommand } : {}), ...(activityTarget ? { activityTarget } : {}), ...(actionClass ? { actionClass } : {}), cwd,
+      id: processId, pid: 0, callerId, ownerContext, command: effectiveCommand, dedupeIdentity, ...(submittedCommand !== undefined ? { submittedCommand } : {}), ...(activityTarget ? { activityTarget } : {}), ...(actionClass ? { actionClass } : {}), cwd,
       launching: true, terminalObserved: false, resolveDone, killRequested: false,
       stdout: new BoundedCapture(), stderr: new BoundedCapture(), startedAt, exitCode: null,
       done, revision: 0, lastReadRevisionByCaller: new Map<string, number>(), waiters: new Set<() => void>(),
-      attemptStartedAt: startedAt, repairAttempts: [],
+      attemptStartedAt: startedAt, repairAttempts: [], runtimeRepairAllowed,
     };
     this.processes.set(state.id, state);
     sharedLauncherHandlers.set(state.id, (message) => this.handleLauncherMessage(message));
@@ -2441,7 +2484,7 @@ export class ProcessManager {
     const inputText = stdin === undefined ? displayCommand : `${displayCommand}\n${stdin}`;
     const preflightCommand = structuredPolicyText(inputText, environment);
     const transportPreflightError = structuredArgvTransportError(executable, args);
-    return this.startPrepared(displayCommand, executionPlan, workingDirectory, callerId, activityTarget, actionClass, undefined, ["structured_argv", ...(stdin !== undefined ? ["structured_stdin"] : [])], preflightCommand, "full", transportPreflightError);
+    return this.startPrepared(displayCommand, executionPlan, workingDirectory, callerId, activityTarget, actionClass, undefined, ["structured_argv", ...(stdin !== undefined ? ["structured_stdin"] : [])], preflightCommand, "full", transportPreflightError, this.executionDedupeIdentity(executionPlan), false);
   }
 
   startScript(
@@ -2468,6 +2511,9 @@ export class ProcessManager {
       ["structured_script", `structured_script_${language}_stdin`],
       policyCommand,
       "policy",
+      undefined,
+      this.executionDedupeIdentity(executionPlan),
+      false,
     );
   }
 

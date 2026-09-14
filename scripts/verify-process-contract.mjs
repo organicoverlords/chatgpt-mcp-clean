@@ -18,7 +18,8 @@ const readLocalFileDescription = "Read one exact local file and return its uncha
 const mountBridgeDescription = "Mount the one persistent visual-proof bridge. Call once; ordinary command reads remain widget-free.";
 const { createServer } = await import("../dist/server.js");
 const { registerOptionalVisualProofTools } = await import("../dist/lib/visual-proof-registration.js");
-const server = createServer("contract-verifier");
+const contractSourceCommit = "0123456789abcdef0123456789abcdef01234567";
+const server = createServer("contract-verifier", { backend_generation: "backend-contract-test", source_commit: contractSourceCommit });
 registerOptionalVisualProofTools(server, "contract-verifier");
 const actualTools = Object.entries(server._registeredTools)
   .sort(([a], [b]) => a.localeCompare(b))
@@ -77,6 +78,11 @@ async function assertStructuredProcessResult(name, args) {
   const tool = server._registeredTools[name];
   const result = await tool.handler(args, {});
   assert.ok(result.structuredContent, `${name} must return structuredContent`);
+  assert.deepEqual(result.structuredContent.serving_identity, {
+    tool_contract_version: "process-tools.v3",
+    backend_generation: "backend-contract-test",
+    source_commit: contractSourceCommit,
+  }, `${name} must expose exact serving backend/source/contract identity`);
   assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent, `${name} text and structured results must stay compatible`);
   const parsed = await tool.outputSchema.safeParseAsync(result.structuredContent);
   assert.ok(parsed.success, `${name} structuredContent must validate against outputSchema: ${parsed.error || "unknown error"}`);
@@ -116,7 +122,7 @@ const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "9ede6b90221e96af79693f6f601268826e3847ba055b54038570f65025e8b3e9";
+const acceptedContractSha256 = "9d9464bb514fb88e4e63ec88878fb0e186b029ea9fa45ca359917a731a2e49f3";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 const expectedTools = [
