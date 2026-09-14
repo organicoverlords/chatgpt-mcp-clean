@@ -10,6 +10,8 @@ const local = await mkdtemp(join(tmpdir(), "mcp-visual-proof-read-"));
 process.env.LOCALAPPDATA = local;
 process.env.MCP_PROCESS_RECEIPT_DIR = join(local, "receipts");
 process.env.MCP_PUBLIC_ORIGIN = "https://mcp.example.test/";
+delete process.env.MCP_LIBRARY_SPOOL_BRIDGE;
+delete process.env.MCP_RUNTIME_INSTANCE_ID;
 const spool = join(local, "ChatGPTMcpFrozen", "handoff-spool");
 const queue = join(spool, "queue");
 await mkdir(queue, { recursive: true });

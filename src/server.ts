@@ -266,17 +266,11 @@ export function createServer(callerId: string): McpServer {
     "read_output",
     {
       title: "Check command",
-      description: librarySpoolBridgeEnabled()
-        ? "Read process stdout/stderr or mount the persistent visual-proof bridge with process_id=visual-proof. Ordinary start_process remains widget-free; the mounted bridge consumes later proofs without per-proof tool calls."
-        : "Read process stdout/stderr or a named bootstrap snapshot. Returns structured data only; it never mounts an app/widget template. wait_ms may wait up to 10000 ms for output or exit, and each stream is bounded to 32000 characters.",
+      description: "Read process stdout/stderr or a named bootstrap snapshot. Returns structured data only; it never mounts an app/widget template. wait_ms may wait up to 10000 ms for output or exit, and each stream is bounded to 32000 characters.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-      _meta: librarySpoolBridgeEnabled()
-        ? { ui: { resourceUri: FILE_TRANSFER_WIDGET_URI, visibility: ["model", "app"] }, "openai/outputTemplate": FILE_TRANSFER_WIDGET_URI, "openai/toolInvocation/invoking": "Checking command…", "openai/toolInvocation/invoked": "Command checked" }
-        : { "openai/toolInvocation/invoking": "Checking command…", "openai/toolInvocation/invoked": "Command checked" },
+      _meta: { "openai/toolInvocation/invoking": "Checking command\u2026", "openai/toolInvocation/invoked": "Command checked" },
       inputSchema: z.object({
         process_id: z.string().min(1),
-        // Size is a hint, not a failure boundary. Accept any integer and clamp it so a
-        // harmless caller guess cannot burn an MCP turn on schema validation.
         max_chars: z.number().int().optional(),
         wait_ms: z.number().int().min(0).max(10_000).optional(),
       }),
@@ -286,11 +280,10 @@ export function createServer(callerId: string): McpServer {
       const boundedMaxChars = Math.max(1, Math.min(max_chars ?? 32_000, 32_000));
       if (isVisualProofSnapshot(process_id)) {
         if (librarySpoolBridgeEnabled()) {
-          const value = {
-            mcp_status: "OK", process_state: "SNAPSHOT", elapsed_ms: 0, next_action: "READ_SAME_PROCESS_ID",
+          return structuredTextResult({
+            mcp_status: "OK", process_state: "SNAPSHOT", elapsed_ms: 0, next_action: "STOP_READING",
             process_id: "visual-proof", running: true, stdout: "", stderr: "", no_change: true, snapshot_alias: true,
-          };
-          return { ...(await structuredTextResult(value, callerId)), _meta: { library_spool_bridge: createLibrarySpoolBridgeSession() } };
+          }, callerId);
         }
         const batch = await readVisualProofSpoolBatch(boundedMaxChars);
         const result = await structuredTextResult(batch.value, callerId);
@@ -302,6 +295,32 @@ export function createServer(callerId: string): McpServer {
         : await processManager.readOutput(process_id, boundedMaxChars, wait_ms), callerId);
     },
   );
+
+  if (librarySpoolBridgeEnabled()) {
+    server.registerTool(
+      "mount_visual_proof_bridge",
+      {
+        title: "Open visual proof bridge",
+        description: "Mount the one persistent visual-proof bridge. Call once; ordinary command reads remain widget-free.",
+        annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+        _meta: {
+          ui: { resourceUri: FILE_TRANSFER_WIDGET_URI, visibility: ["model", "app"] },
+          "openai/outputTemplate": FILE_TRANSFER_WIDGET_URI,
+          "openai/toolInvocation/invoking": "Opening visual proof bridge.",
+          "openai/toolInvocation/invoked": "Visual proof bridge ready",
+        },
+        inputSchema: z.object({}),
+        outputSchema: processOutputSchema,
+      },
+      async () => ({
+        ...(await structuredTextResult({
+          mcp_status: "OK", process_state: "SNAPSHOT", elapsed_ms: 0, next_action: "STOP_READING",
+          process_id: "visual-proof", running: true, stdout: "", stderr: "", no_change: true, snapshot_alias: true,
+        }, callerId)),
+        _meta: { library_spool_bridge: createLibrarySpoolBridgeSession() },
+      }),
+    );
+  }
 
   server.registerTool(
     "kill_process",
