@@ -251,6 +251,7 @@ type ProcessState = {
   callerId: string;
   ownerContext: TelemetryContext;
   command: string;
+  dedupeIdentity: string;
   submittedCommand?: string;
   activityTarget?: ActivityTarget;
   actionClass?: string;
@@ -2348,6 +2349,23 @@ export class ProcessManager {
     for (const state of remaining.slice(0, Math.max(0, remaining.length - this.maxCompletedProcesses))) this.processes.delete(state.id);
   }
 
+  private executionDedupeIdentity(executionPlan: CommandExecutionPlan): string {
+    const normalizedEnv = executionPlan.env
+      ? Object.fromEntries(Object.entries(executionPlan.env).sort(([left], [right]) => left.localeCompare(right)))
+      : undefined;
+    const normalizedSteps = executionPlan.steps?.map((step) => ({ ...step }));
+    const payload = JSON.stringify({
+      mode: executionPlan.mode,
+      executable: executionPlan.executable,
+      args: executionPlan.args,
+      reason: executionPlan.reason,
+      ...(executionPlan.stdin !== undefined ? { stdin: executionPlan.stdin } : {}),
+      ...(normalizedEnv ? { env: normalizedEnv } : {}),
+      ...(normalizedSteps ? { steps: normalizedSteps } : {}),
+    });
+    return createHash("sha256").update(payload, "utf8").digest("hex");
+  }
+
   private startPrepared(
     effectiveCommand: string,
     executionPlan: CommandExecutionPlan,
@@ -2360,6 +2378,7 @@ export class ProcessManager {
     preflightCommand: string = effectiveCommand,
     preflightMode: "full" | "policy" = "full",
     transportPreflightError?: string,
+    dedupeIdentity: string = effectiveCommand,
   ): StartResult {
     const preflightError = transportPreflightError ?? (preflightMode === "policy"
       ? commandPolicyError(preflightCommand)
@@ -2371,7 +2390,7 @@ export class ProcessManager {
       throw new Error(`start_process_preflight_failed: ${preflightError}`);
     }
     const cwd = normalizedCwd(workingDirectory);
-    const duplicate = [...this.processes.values()].find((state) => state.exitCode === null && state.callerId === callerId && state.cwd === cwd && state.command === effectiveCommand && sameActivityTarget(state.activityTarget, activityTarget) && state.actionClass === actionClass);
+    const duplicate = [...this.processes.values()].find((state) => state.exitCode === null && state.callerId === callerId && state.cwd === cwd && state.dedupeIdentity === dedupeIdentity && sameActivityTarget(state.activityTarget, activityTarget) && state.actionClass === actionClass);
     if (duplicate) {
       emitTelemetry({ event: "process_reused", process_id: duplicate.id, pid: duplicate.pid, owner_caller_id: duplicate.callerId });
       return { ...processResponseState(duplicate.startedAt, true), process_id: duplicate.id, pid: duplicate.pid, cwd: duplicate.cwd, running: true, ...(duplicate.launching ? { launching: true } : {}) } as StartResult;
@@ -2386,7 +2405,7 @@ export class ProcessManager {
     let resolveDone!: () => void;
     const done = new Promise<void>((resolve) => { resolveDone = resolve; });
     const state: ProcessState = {
-      id: processId, pid: 0, callerId, ownerContext, command: effectiveCommand, ...(submittedCommand !== undefined ? { submittedCommand } : {}), ...(activityTarget ? { activityTarget } : {}), ...(actionClass ? { actionClass } : {}), cwd,
+      id: processId, pid: 0, callerId, ownerContext, command: effectiveCommand, dedupeIdentity, ...(submittedCommand !== undefined ? { submittedCommand } : {}), ...(activityTarget ? { activityTarget } : {}), ...(actionClass ? { actionClass } : {}), cwd,
       launching: true, terminalObserved: false, resolveDone, killRequested: false,
       stdout: new BoundedCapture(), stderr: new BoundedCapture(), startedAt, exitCode: null,
       done, revision: 0, lastReadRevisionByCaller: new Map<string, number>(), waiters: new Set<() => void>(),
@@ -2441,7 +2460,7 @@ export class ProcessManager {
     const inputText = stdin === undefined ? displayCommand : `${displayCommand}\n${stdin}`;
     const preflightCommand = structuredPolicyText(inputText, environment);
     const transportPreflightError = structuredArgvTransportError(executable, args);
-    return this.startPrepared(displayCommand, executionPlan, workingDirectory, callerId, activityTarget, actionClass, undefined, ["structured_argv", ...(stdin !== undefined ? ["structured_stdin"] : [])], preflightCommand, "full", transportPreflightError);
+    return this.startPrepared(displayCommand, executionPlan, workingDirectory, callerId, activityTarget, actionClass, undefined, ["structured_argv", ...(stdin !== undefined ? ["structured_stdin"] : [])], preflightCommand, "full", transportPreflightError, this.executionDedupeIdentity(executionPlan));
   }
 
   startScript(
@@ -2468,6 +2487,8 @@ export class ProcessManager {
       ["structured_script", `structured_script_${language}_stdin`],
       policyCommand,
       "policy",
+      undefined,
+      this.executionDedupeIdentity(executionPlan),
     );
   }
 
