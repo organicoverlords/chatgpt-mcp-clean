@@ -38,6 +38,7 @@ const mountTool = server._registeredTools.mount_visual_proof_bridge;
 assert.equal(mountTool?._meta?.["openai/outputTemplate"], "ui://process/file-transfer-v7.html", "only the dedicated mount action may mount the persistent widget");
 const legacyMount = await readTool.handler({ process_id: "visual-proof" }, {});
 assert.ok(legacyMount._meta?.library_spool_bridge, "stale read_output descriptors must still receive one bridge session for visual-proof only");
+assert.match(legacyMount.structuredContent?.stdout || "", /^VISUAL_PROOF_BRIDGE=\{.*"next_url".*"ack_url".*\}\n$/, "visual-proof read must expose one compact direct handoff session to the model");
 assert.equal((await readdir(queue)).length, 1, "legacy bridge mount must not consume queued proof");
 const mount = await mountTool.handler({}, {});
 assert.equal((await readdir(queue)).length, 1, "mount must not consume queued proof");
