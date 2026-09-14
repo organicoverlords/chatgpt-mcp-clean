@@ -76,8 +76,6 @@ const server = spawn(process.execPath, [resolve("dist/index.js")], {
     MCP_RUNTIME_DIST_SHA256: "",
     MCP_RUNTIME_SOURCE_DIRTY: "",
     MCP_TOOL_PROFILE: "process",
-    MCP_VISUAL_PROOF_UI: "0",
-    MCP_VISUAL_PROOF_REVIEW: "0",
     MCP_PUBLIC_ORIGIN: publicOrigin,
     MCP_OWNER_AUTH_ORIGIN: ownerAuthOrigin,
     MCP_OWNER_AUTH_MODE: "tailscale",

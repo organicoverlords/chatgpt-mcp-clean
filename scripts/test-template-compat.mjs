@@ -7,7 +7,6 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 process.env.MCP_PUBLIC_ORIGIN = "https://mcp.example.test/";
 process.env.MCP_PROCESS_RECEIPT_DIR = join(await mkdtemp(join(tmpdir(), "mcp-template-compat-")), "receipts");
-delete process.env.MCP_VISUAL_PROOF_UI;
 process.env.MCP_TOOL_PROFILE = "process";
 
 const { FILE_TRANSFER_WIDGET_URI } = await import("../dist/lib/file-transfer.js");

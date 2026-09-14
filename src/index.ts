@@ -15,7 +15,6 @@ import { observeSocket, sessionFingerprint, setTelemetrySink, withTelemetryConte
 import { startStallWatchdog } from "./lib/stall-watchdog.js";
 import { createResponseByteCounter } from "./lib/response-bytes.js";
 import { createServer, processRuntimeStatus } from "./server.js";
-import { registerOptionalVisualProofTools } from "./lib/visual-proof-registration.js";
 import { serveLibrarySpoolBridgeAck, serveLibrarySpoolBridgeNext, serveLocalFileTransfer } from "./lib/file-transfer.js";
 
 const PORT = Number(process.env.PORT || 3000);
@@ -140,7 +139,6 @@ async function handleStateless(req: Request, res: Response, body: unknown): Prom
     ...(backendGeneration ? { backend_generation: backendGeneration } : {}),
     ...(runtimeIdentity.source_commit ? { source_commit: runtimeIdentity.source_commit } : {}),
   });
-  registerOptionalVisualProofTools(server, requestCallerId);
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,

@@ -8,8 +8,6 @@ import { z } from "zod";
 // explicitly, but the default must remain production-safe so audits/tests that omit
 // deployment env cannot accidentally inspect the internal full profile.
 delete process.env.MCP_TOOL_PROFILE;
-process.env.MCP_VISUAL_PROOF_UI = "1";
-process.env.MCP_VISUAL_PROOF_REVIEW = "1";
 process.env.MCP_PROCESS_RECEIPT_DIR = resolve(".state/process-contract-verifier-receipts");
 const localFileToolName = (process.env.MCP_LOCAL_FILE_TOOL_NAME || "upload_local_file").trim();
 assert.ok(["upload_local_file", "read_local_file"].includes(localFileToolName), `unsupported MCP_LOCAL_FILE_TOOL_NAME=${localFileToolName}`);
@@ -17,10 +15,8 @@ const librarySpoolBridgeEnabled = localFileToolName === "upload_local_file" && (
 const readLocalFileDescription = "Read one exact local file and return its unchanged bytes as a native MCP file resource for ChatGPT. This read-only tool does not modify local state, mount an app/widget, or invoke the Library upload API. Transfers preserve exact bytes and SHA-256; images remain compact lazy resources and ZIP review members remain exact resource links.";
 const mountBridgeDescription = "Mount the one persistent visual-proof bridge. Call once; ordinary command reads remain widget-free.";
 const { createServer } = await import("../dist/server.js");
-const { registerOptionalVisualProofTools } = await import("../dist/lib/visual-proof-registration.js");
 const contractSourceCommit = "0123456789abcdef0123456789abcdef01234567";
 const server = createServer("contract-verifier", { backend_generation: "backend-contract-test", source_commit: contractSourceCommit });
-registerOptionalVisualProofTools(server, "contract-verifier");
 const actualTools = Object.entries(server._registeredTools)
   .sort(([a], [b]) => a.localeCompare(b))
   .map(([name, tool]) => ({ name, description: tool.description || "", inputSchema: z.toJSONSchema(tool.inputSchema), ...(tool.outputSchema ? { outputSchema: z.toJSONSchema(tool.outputSchema) } : {}) }));

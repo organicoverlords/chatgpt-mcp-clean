@@ -87,8 +87,6 @@ try {
   const commonBackendEnv = {
     MCP_BACKEND_MODE: "1",
     MCP_TOOL_PROFILE: "process",
-    MCP_VISUAL_PROOF_UI: "0",
-    MCP_VISUAL_PROOF_REVIEW: "0",
     MCP_FRONT_DOOR_HOST: frontDoorHost,
     MCP_PUBLIC_ORIGIN: publicOrigin,
     MCP_OWNER_AUTH_ORIGIN: "",
