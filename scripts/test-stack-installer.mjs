@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const install = join(root, "scripts", "install-stack.ps1");
+const installSource = readFileSync(install, "utf8");
+const doctorSource = readFileSync(join(root, "scripts", "stack-doctor.ps1"), "utf8");
 const start = readFileSync(join(root, "scripts", "start-stack.ps1"), "utf8");
 const serverSource = readFileSync(join(root, "src", "server.ts"), "utf8");
 const fileTransferSource = readFileSync(join(root, "src", "lib", "file-transfer.ts"), "utf8");
@@ -30,19 +32,31 @@ assert.match(fileTransferSource, /FILE_TRANSFER_WIDGET_URI/);
 assert.match(fileTransferSource, /openai\/fileParams/);
 assert.equal(caddySpec.version, '2.11.3');
 assert.match(caddySpec.sha256, /^[0-9a-f]{64}$/);
-assert.equal(busyContract.contract_version, 6);
+assert.equal(busyContract.contract_version, 10);
 assert.equal(busyContract.authority, "standalone_busy_coordinator");
-assert.ok(busyContract.invariants.some((x) => x.includes("queue selection")));
+const expectedBusyCommands = ["list", "sweep", "snapshot", "recover", "claim", "heartbeat", "release", "inspect"];
+assert.deepEqual(busyContract.required_commands, expectedBusyCommands);
+assert.deepEqual(busyContract.core_required_commands, expectedBusyCommands);
+assert.equal(existsSync(join(root, "stack", "busy", "audit_wrapper.py")), false, "retired Busy audit wrapper must not ship");
+assert.equal(existsSync(join(root, "stack", "busy", "busy.py")), false, "duplicate root Busy core must not ship");
+assert.equal(existsSync(join(root, "stack", "busy", "python", "busy.py")), true, "canonical nested Busy core must ship");
 
 const busyCmd = join(root, "stack", "busy", "busy-python.cmd");
-const busy = spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/c", busyCmd, "contract"], {
+const busyHelp = spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/c", busyCmd, "--help"], {
   cwd: root,
   encoding: "utf8",
 });
-assert.equal(busy.status, 0, busy.stderr || busy.stdout);
-const liveContract = JSON.parse(busy.stdout.trim());
-assert.equal(liveContract.contract_version, 6);
-assert.equal(liveContract.authority, "standalone_busy_coordinator");
+assert.equal(busyHelp.status, 0, busyHelp.stderr || busyHelp.stdout);
+for (const command of expectedBusyCommands) assert.match(busyHelp.stdout, new RegExp(`\\b${command}\\b`));
+for (const retired of ["contract", "audit", "log"]) assert.doesNotMatch(busyHelp.stdout, new RegExp(`\\b${retired}\\b`));
+const retiredContract = spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/c", busyCmd, "contract"], { cwd: root, encoding: "utf8" });
+assert.notEqual(retiredContract.status, 0, "retired Busy contract subcommand must stay absent");
+assert.match(installSource, /coordinator-contract\.json/);
+assert.match(installSource, /busy-python\.cmd'\) --help/);
+assert.doesNotMatch(installSource, /busy-python\.cmd'\) contract/);
+assert.match(doctorSource, /coordinator-contract\.json/);
+assert.match(doctorSource, /\$busyCmd --help/);
+assert.doesNotMatch(doctorSource, /\$busyCmd contract/);
 
 const temp = mkdtempSync(join(tmpdir(), "mcp-stack-plan-"));
 const installRoot = join(temp, "install");
