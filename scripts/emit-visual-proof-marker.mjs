@@ -1,0 +1,23 @@
+import { createHash } from "node:crypto";
+import { readFile, stat } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+
+const localAppData = (process.env.LOCALAPPDATA || "").trim();
+if (!localAppData) throw new Error("LOCALAPPDATA is required");
+const spoolRoot = resolve(localAppData, "ChatGPTMcpFrozen", "handoff-spool");
+const manifestPath = resolve(spoolRoot, "latest.json");
+const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+const filePath = String(manifest.path || "");
+const expectedBytes = Number(manifest.bytes);
+const expectedSha256 = String(manifest.sha256 || "").toLowerCase();
+if (!isAbsolute(filePath)) throw new Error("visual proof manifest path must be absolute");
+const rel = relative(spoolRoot, resolve(filePath));
+if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error("visual proof manifest path must stay inside the MCP handoff spool");
+if (!Number.isSafeInteger(expectedBytes) || expectedBytes <= 0) throw new Error("visual proof manifest bytes must be positive");
+if (!/^[0-9a-f]{64}$/.test(expectedSha256)) throw new Error("visual proof manifest sha256 invalid");
+const info = await stat(filePath);
+if (!info.isFile() || info.size !== expectedBytes) throw new Error("visual proof file size does not match manifest");
+const data = await readFile(filePath);
+const sha256 = createHash("sha256").update(data).digest("hex");
+if (sha256 !== expectedSha256) throw new Error("visual proof file hash does not match manifest");
+process.stdout.write(`CHATGPT_LIBRARY_UPLOAD=${filePath}\n`);

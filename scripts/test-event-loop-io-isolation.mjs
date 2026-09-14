@@ -3,7 +3,9 @@ import { readFileSync } from "node:fs";
 import { ProcessManager } from "../dist/lib/process-manager.js";
 
 const source = readFileSync(new URL("../src/lib/process-manager.ts", import.meta.url), "utf8");
-assert.match(source, /setInterval\(\(\) => \{ void this\.sweepControlRequestsAsync\(\); \}, CONTROL_POLL_MS\)/);
+assert.match(source, /watch\(this\.controlRequestDirectory, \(\) => this\.scheduleControlRequestSweep\(\)\)/);
+assert.match(source, /setImmediate\(\(\) => \{\s*this\.controlSweepScheduled = false;\s*void this\.sweepControlRequestsAsync\(\);/);
+assert.doesNotMatch(source, /setInterval\(\(\) => \{ void this\.sweepControlRequestsAsync\(\); \}, CONTROL_POLL_MS\)/);
 assert.match(source, /const cwd = await boundedValidatedCwd\(workingDirectory\)/);
 assert.match(source, /await this\.writeControlFileAsync\(requestPath, request\)/);
 assert.match(source, /await this\.readReceiptAsync\(processId, maxChars\)/);

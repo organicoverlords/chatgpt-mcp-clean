@@ -366,7 +366,7 @@ try {
   assert.equal(eightySlotProcess.running, true, "slot 80 must be admitted");
   assert.throws(
     () => eightySlotManager.start("Start-Sleep -Seconds 10 # slot eighty one blocked", undefined, "caller_slot_eighty_one"),
-    /start_process_host_concurrency_limited: shared MCP host already has 80 live process slots; max=80/,
+    /start_process_host_concurrency_limited: live_process_count=80; max_live_processes=80/,
     "slot 81 must be rejected without requiring 80 real child processes",
   );
   await eightySlotManager.kill(eightySlotProcess.process_id);
@@ -375,3 +375,5 @@ try {
   rmSync(eightySlotDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 console.log("PASS process guard enforces duplicate reuse, per-caller live concurrency, uncapped shared-host defaults with optional explicit host caps, protected control-plane kill refusal, restart receipts, cross-clone control, fast-start collapse, compact no-change waits, nonblocking zero-wait, and bounded-wait behavior, and time-based receipt retention");
+// Standalone guard intentionally constructs long-lived mailbox managers; all assertions are complete here.
+process.exit(0);

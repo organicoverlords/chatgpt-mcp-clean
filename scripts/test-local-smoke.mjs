@@ -49,6 +49,7 @@ const temporary = mkdtempSync(join(tmpdir(), "mcp-local-smoke-"));
 const port = await unusedPort();
 const origin = `http://127.0.0.1:${port}`;
 const publicOrigin = "https://branch-smoke.test.ts.net";
+const ownerAuthMode = (process.env.MCP_OWNER_AUTH_MODE || "tailscale").trim().toLowerCase();
 const runtimeSourceCommit = "a".repeat(40);
 const runtimeDistSha256 = "b".repeat(64);
 const server = spawn(process.execPath, [resolve("dist/index.js")], {
@@ -66,7 +67,7 @@ const server = spawn(process.execPath, [resolve("dist/index.js")], {
     MCP_VISUAL_PROOF_REVIEW: "0",
     MCP_PUBLIC_ORIGIN: publicOrigin,
     MCP_OWNER_AUTH_ORIGIN: "",
-    MCP_OWNER_AUTH_MODE: "tailscale",
+    MCP_OWNER_AUTH_MODE: ownerAuthMode,
     TAILSCALE_OWNER_LOGIN: "owner@example.com",
     MCP_OAUTH_STORE_PATH: join(temporary, "oauth.json"),
     MCP_TRANSPORT_LOG_PATH: join(temporary, "transport.jsonl"),
