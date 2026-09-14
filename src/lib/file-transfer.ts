@@ -10,6 +10,7 @@ import { constants as zlibConstants, createZstdCompress } from "node:zlib";
 import type { Request, Response as ExpressResponse } from "express";
 import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { acknowledgeVisualProofSpoolBatch, readVisualProofSpoolBatch, type PendingVisualProof } from "./visual-proof-spool.js";
 
 export const FILE_TRANSFER_WIDGET_URI = "ui://process/file-transfer-v7.html";
 export const FILE_TRANSFER_MARKER_PREFIX = "CHATGPT_LIBRARY_UPLOAD=";
@@ -235,6 +236,17 @@ export function localTransferSummary(item: LocalFileTransfer) {
   };
 }
 
+function localTransferMeta(item: LocalFileTransfer) {
+  return {
+    direction: "local_to_chatgpt" as const,
+    phase: "ready" as const,
+    transfer_url: localTransferUrl(item.token),
+    file_name: item.file_name,
+    mime_type: item.mime_type,
+    bytes: item.bytes,
+    sha256: item.sha256,
+  };
+}
 export function localFileResourceLink(item: LocalFileTransfer) {
   return {
     type: "resource_link" as const,
@@ -628,6 +640,72 @@ export async function downloadChatgptFile(
   }
 }
 
+const LIBRARY_SPOOL_BRIDGE_TTL_MS = 8 * 60 * 60 * 1000;
+type LibrarySpoolBridgeSession = {
+  expires_at: number;
+  in_flight?: { id: string; pending: PendingVisualProof; item: LocalFileTransfer };
+};
+const librarySpoolBridgeSessions = new Map<string, LibrarySpoolBridgeSession>();
+
+function cleanupLibrarySpoolBridgeSessions(now = Date.now()): void {
+  for (const [token, session] of librarySpoolBridgeSessions) if (session.expires_at <= now) librarySpoolBridgeSessions.delete(token);
+}
+
+function librarySpoolBridgeUrl(kind: "next" | "ack", token: string): string {
+  const url = new URL(`visual-proof/library-bridge/${kind}`, publicOrigin());
+  url.searchParams.set("token", token);
+  return url.href;
+}
+
+export function createLibrarySpoolBridgeSession() {
+  cleanupLibrarySpoolBridgeSessions();
+  const token = randomUUID();
+  const expires_at = Date.now() + LIBRARY_SPOOL_BRIDGE_TTL_MS;
+  librarySpoolBridgeSessions.set(token, { expires_at });
+  return {
+    next_url: librarySpoolBridgeUrl("next", token),
+    ack_url: librarySpoolBridgeUrl("ack", token),
+    expires_at,
+    poll_ms: 250,
+  };
+}
+
+function bridgeSession(req: Request): LibrarySpoolBridgeSession | undefined {
+  cleanupLibrarySpoolBridgeSessions();
+  const token = typeof req.query.token === "string" ? req.query.token : "";
+  const session = token ? librarySpoolBridgeSessions.get(token) : undefined;
+  if (session) session.expires_at = Date.now() + LIBRARY_SPOOL_BRIDGE_TTL_MS;
+  return session;
+}
+
+export async function serveLibrarySpoolBridgeNext(req: Request, res: ExpressResponse): Promise<void> {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Cache-Control", "private, no-store, max-age=0");
+  const session = bridgeSession(req);
+  if (!session) { res.status(404).send("Library spool bridge token is invalid or expired"); return; }
+  if (!session.in_flight) {
+    const batch = await readVisualProofSpoolBatch(512);
+    const pending = batch.pending[0];
+    if (!pending) { res.status(204).end(); return; }
+    const item = await prepareLocalFileTransfer(pending.filePath);
+    session.in_flight = { id: basename(pending.manifestPath), pending, item };
+  }
+  const current = session.in_flight;
+  res.json({ status: "ready", id: current.id, file_transfer: localTransferMeta(current.item) });
+}
+
+export async function serveLibrarySpoolBridgeAck(req: Request, res: ExpressResponse): Promise<void> {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Cache-Control", "private, no-store, max-age=0");
+  const session = bridgeSession(req);
+  if (!session) { res.status(404).send("Library spool bridge token is invalid or expired"); return; }
+  const id = typeof req.query.id === "string" ? req.query.id : "";
+  if (!session.in_flight || !id || id !== session.in_flight.id) { res.status(409).send("Library spool bridge acknowledgement does not match current proof"); return; }
+  await acknowledgeVisualProofSpoolBatch([session.in_flight.pending]);
+  session.in_flight = undefined;
+  res.json({ status: "ok", id });
+}
+
 function widgetResourceMeta() {
   let origin = "";
   try { origin = publicOrigin().origin; } catch { origin = ""; }
@@ -664,11 +742,19 @@ function localFileToolPresentation(name: LocalFileToolName) {
   };
 }
 
+function librarySpoolBridgeEnabled(): boolean { return process.env.MCP_LIBRARY_SPOOL_BRIDGE === '1' || (process.env.MCP_RUNTIME_INSTANCE_ID || '').startsWith('issue333-persistent-widget-'); }
+
 function uploadToolMeta(name: LocalFileToolName) {
   const presentation = localFileToolPresentation(name);
+  if (name === "read_local_file" || !librarySpoolBridgeEnabled()) {
+    return {
+      "openai/toolInvocation/invoking": presentation.invoking,
+      "openai/toolInvocation/invoked": "File ready",
+    };
+  }
   return {
-    // Invocation status text is presentation-only. Deliberately omit every
-    // widget/app binding key so both supported local-file tool identities stay native MCP handoffs.
+    ui: { resourceUri: FILE_TRANSFER_WIDGET_URI, visibility: ["model", "app"] },
+    "openai/outputTemplate": FILE_TRANSFER_WIDGET_URI,
     "openai/toolInvocation/invoking": presentation.invoking,
     "openai/toolInvocation/invoked": "File ready",
   };
@@ -723,12 +809,14 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
     },
     async ({ path }) => {
       const handoff = await localFileTransferHandoff(await prepareLocalFileTransfer(path));
+      const bridge = localFileName === "upload_local_file" && librarySpoolBridgeEnabled() ? createLibrarySpoolBridgeSession() : undefined;
       return {
         content: [
           { type: "text" as const, text: JSON.stringify({ caller_id: callerId, ...handoff.summary }) },
           ...handoff.content,
         ],
         structuredContent: handoff.summary,
+        ...(bridge ? { _meta: { file_transfer: localTransferMeta(handoff.item), library_spool_bridge: bridge } } : {}),
       };
     },
   );
@@ -762,8 +850,48 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
 }
 
 export function fileTransferWidgetHtml(): string {
+  if (!librarySpoolBridgeEnabled()) return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color-scheme:light dark}html,body{margin:0;padding:0;background:transparent;overflow:hidden}.status{box-sizing:border-box;height:28px;line-height:28px;padding:0 8px;font:12px/28px ui-monospace,SFMono-Regular,Consolas,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}</style></head><body><div class="status">FILE_TRANSFER_NATIVE_RESOURCE</div></body></html>`;
   return `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color-scheme:light dark}html,body{margin:0;padding:0;background:transparent;overflow:hidden}.status{box-sizing:border-box;height:28px;line-height:28px;padding:0 8px;font:12px/28px ui-monospace,SFMono-Regular,Consolas,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}</style></head>
-<body><div class="status">FILE_TRANSFER_NATIVE_RESOURCE</div></body></html>`;
+<style>:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color-scheme:light dark}body{margin:0;background:transparent}.image{display:none;max-width:100%;height:auto;border-radius:8px}.image.on{display:block}.status{padding:6px 8px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-word}</style>
+<body><img id="image" class="image" alt="Uploaded image"><div id="status" class="status">VISUAL_PROOF_BRIDGE_READY</div>
+<script>
+const statusEl=document.getElementById('status');const imageEl=document.getElementById('image');let started='';let bridgeStarted='';
+function setStatus(v){statusEl.textContent=v;window.openai?.notifyIntrinsicHeight?.();}
+function hex(bytes){return [...new Uint8Array(bytes)].map(b=>b.toString(16).padStart(2,'0')).join('');}
+function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
+async function uploadTransfer(p,label){
+ if(!p||p.direction!=='local_to_chatgpt'||!p.transfer_url)return null;
+ if(typeof window.openai?.uploadFile!=='function')throw new Error('UPLOAD_FILE_UNAVAILABLE');
+ setStatus('VISUAL_PROOF_UPLOAD '+(label||p.file_name));
+ const r=await fetch(p.transfer_url,{cache:'no-store'});if(!r.ok)throw new Error('TRANSFER_HTTP_'+r.status);
+ const data=await r.arrayBuffer();if(data.byteLength!==p.bytes)throw new Error('BYTE_COUNT_MISMATCH');
+ const digest=hex(await crypto.subtle.digest('SHA-256',data));if(digest!==p.sha256)throw new Error('SHA256_MISMATCH');
+ const blob=new Blob([data],{type:p.mime_type});
+ if(p.mime_type.startsWith('image/')){imageEl.src=URL.createObjectURL(blob);imageEl.classList.add('on');window.openai?.notifyIntrinsicHeight?.();}
+ const file=new File([blob],p.file_name,{type:p.mime_type});const out=await window.openai.uploadFile(file,{library:true});
+ const fileId=out?.fileId||'';if(!fileId)throw new Error('UPLOAD_FILE_ID_MISSING');
+ window.openai?.setWidgetState?.({modelContent:{visual_proof_bridge:{status:'ok',fileId,fileName:p.file_name,bytes:p.bytes,sha256:p.sha256}},privateContent:{visual_proof_bridge:{status:'ok',fileId,fileName:p.file_name,bytes:p.bytes,sha256:p.sha256}},imageIds:p.mime_type.startsWith('image/')?[fileId]:[]});
+ setStatus('VISUAL_PROOF_OK '+p.file_name+' '+p.bytes+' bytes'); return fileId;
+}
+async function oneShot(p){const key=p?.sha256+':'+p?.transfer_url;if(!p||started===key)return;started=key;try{await uploadTransfer(p,p.file_name);}catch(e){setStatus('VISUAL_PROOF_ERROR '+String(e?.message||e));}}
+async function bridgeLoop(b){
+ const key=b?.next_url+':'+b?.ack_url;if(!b||!b.next_url||!b.ack_url||bridgeStarted===key)return;bridgeStarted=key;
+ for(;;){
+  try{
+   const r=await fetch(b.next_url,{cache:'no-store'});
+   if(r.status===204){await sleep(Number(b.poll_ms)||250);continue;}
+   if(!r.ok)throw new Error('BRIDGE_NEXT_HTTP_'+r.status);
+   const next=await r.json();if(next?.status!=='ready'||!next?.file_transfer)throw new Error('BRIDGE_NEXT_INVALID');
+   await uploadTransfer(next.file_transfer,next.id||next.file_transfer.file_name);
+   const ack=new URL(b.ack_url);ack.searchParams.set('id',next.id);
+   const a=await fetch(ack.href,{method:'POST',cache:'no-store'});if(!a.ok)throw new Error('BRIDGE_ACK_HTTP_'+a.status);
+  }catch(e){setStatus('VISUAL_PROOF_BRIDGE_ERROR '+String(e?.message||e));await sleep(1000);}
+ }
+}
+function render(result){const p=result?._meta?.file_transfer||null;const b=result?._meta?.library_spool_bridge||null;if(p)oneShot(p);if(b)bridgeLoop(b);}
+window.addEventListener('message',event=>{if(event.source!==window.parent)return;const m=event.data;if(m?.jsonrpc!=='2.0')return;if(m.id==='file-transfer-init'&&('result'in m||'error'in m)){if(!m.error)window.parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*');return;}if(m.method==='ui/notifications/tool-result')render(m.params||{});});
+const envelope=window.openai?.toolResponseMetadata?.mcp_tool_result;if(envelope)render(envelope);
+window.parent.postMessage({jsonrpc:'2.0',id:'file-transfer-init',method:'ui/initialize',params:{protocolVersion:'2026-01-26',appInfo:{name:'persistent-visual-proof-bridge',version:'1.0.0'},appCapabilities:{availableDisplayModes:['inline']}}},'*');
+</script></body></html>`;
 }

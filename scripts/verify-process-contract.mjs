@@ -13,6 +13,7 @@ process.env.MCP_VISUAL_PROOF_REVIEW = "1";
 process.env.MCP_PROCESS_RECEIPT_DIR = resolve(".state/process-contract-verifier-receipts");
 const localFileToolName = (process.env.MCP_LOCAL_FILE_TOOL_NAME || "upload_local_file").trim();
 assert.ok(["upload_local_file", "read_local_file"].includes(localFileToolName), `unsupported MCP_LOCAL_FILE_TOOL_NAME=${localFileToolName}`);
+const librarySpoolBridgeEnabled = localFileToolName === "upload_local_file" && (process.env.MCP_LIBRARY_SPOOL_BRIDGE === "1" || (process.env.MCP_RUNTIME_INSTANCE_ID || "").startsWith("issue333-persistent-widget-"));
 const readLocalFileDescription = "Read one exact local file and return its unchanged bytes as a native MCP file resource for ChatGPT. This read-only tool does not modify local state, mount an app/widget, or invoke the Library upload API. Transfers preserve exact bytes and SHA-256; images remain compact lazy resources and ZIP review members remain exact resource links.";
 const { createServer } = await import("../dist/server.js");
 const { registerOptionalVisualProofTools } = await import("../dist/lib/visual-proof-registration.js");
@@ -44,12 +45,13 @@ for (const name of structuredProcessToolNames) {
   assert.ok(server._registeredTools[name]?.outputSchema, `${name} must declare outputSchema`);
 }
 
-for (const name of ["start_process", "read_output", localFileToolName]) {
+for (const name of ["start_process", "read_output", ...(librarySpoolBridgeEnabled ? [] : [localFileToolName])]) {
   const meta = server._registeredTools[name]?._meta;
   assert.equal(meta?.["openai/outputTemplate"], undefined, `${name} must not mount an app/widget template`);
   assert.equal(meta?.["ui/resourceUri"], undefined, `${name} must not advertise an app resource URI`);
   assert.equal(meta?.ui, undefined, `${name} must not advertise nested app UI metadata`);
 }
+if (librarySpoolBridgeEnabled) { const meta = server._registeredTools[localFileToolName]?._meta; assert.equal(meta?.["openai/outputTemplate"], "ui://process/file-transfer-v7.html", "persistent bridge must mount existing file-transfer widget"); assert.equal(meta?.ui?.resourceUri, "ui://process/file-transfer-v7.html", "persistent bridge must advertise existing app resource URI"); }
 const startInputSchema = server._registeredTools.start_process?.inputSchema;
 assert.ok(startInputSchema, "start_process input schema missing");
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output LEGACY" })).success, true, "legacy command input must remain valid");
