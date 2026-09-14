@@ -20,6 +20,7 @@ const mod = await import("../dist/lib/file-transfer.js");
 const html = mod.fileTransferWidgetHtml();
 assert.match(html, /window\.openai\?\.uploadFile/);
 assert.match(html, /bridgeLoop/);
+assert.doesNotMatch(html, /VISUAL_PROOF_BRIDGE_READY/, "idle bridge must be visually silent");
 assert.match(html, /ui\/message/);
 assert.match(html, /type:'resource_link'/);
 assert.match(html, /RESOURCE_URI_MISSING/);
@@ -33,6 +34,9 @@ assert.equal(readTool?._meta?.["openai/outputTemplate"], undefined, "ordinary re
 assert.equal(server._registeredTools.upload_local_file?._meta?.["openai/outputTemplate"], undefined, "ordinary file handoff must stay widget-free in bridge runtime");
 const mountTool = server._registeredTools.mount_visual_proof_bridge;
 assert.equal(mountTool?._meta?.["openai/outputTemplate"], "ui://process/file-transfer-v7.html", "only the dedicated mount action may mount the persistent widget");
+const legacyMount = await readTool.handler({ process_id: "visual-proof" }, {});
+assert.ok(legacyMount._meta?.library_spool_bridge, "stale read_output descriptors must still receive one bridge session for visual-proof only");
+assert.equal((await readdir(queue)).length, 1, "legacy bridge mount must not consume queued proof");
 const mount = await mountTool.handler({}, {});
 assert.equal((await readdir(queue)).length, 1, "mount must not consume queued proof");
 assert.equal(mount.content.filter((item) => item?.type === "resource_link").length, 0, "mount itself must not hand off a proof resource");
