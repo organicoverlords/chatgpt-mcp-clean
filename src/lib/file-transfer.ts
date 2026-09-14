@@ -750,6 +750,10 @@ function uploadToolMeta(name: LocalFileToolName) {
   return {
     "openai/toolInvocation/invoking": presentation.invoking,
     "openai/toolInvocation/invoked": "File ready",
+    ...(name === "upload_local_file" && librarySpoolBridgeEnabled() ? {
+      ui: { resourceUri: FILE_TRANSFER_WIDGET_URI, visibility: ["model", "app"] },
+      "openai/outputTemplate": FILE_TRANSFER_WIDGET_URI,
+    } : {}),
   };
 }
 
@@ -808,6 +812,9 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
           ...handoff.content,
         ],
         structuredContent: handoff.summary,
+        ...(localFileName === "upload_local_file" && librarySpoolBridgeEnabled()
+          ? { _meta: { library_spool_bridge: createLibrarySpoolBridgeSession() } }
+          : {}),
       };
     },
   );

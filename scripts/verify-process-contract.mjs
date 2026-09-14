@@ -48,11 +48,19 @@ for (const name of structuredProcessToolNames) {
   assert.ok(server._registeredTools[name]?.outputSchema, `${name} must declare outputSchema`);
 }
 
-for (const name of ["start_process", "read_output", localFileToolName]) {
+for (const name of ["start_process", "read_output"]) {
   const meta = server._registeredTools[name]?._meta;
   assert.equal(meta?.["openai/outputTemplate"], undefined, `${name} must not mount an app/widget template`);
   assert.equal(meta?.["ui/resourceUri"], undefined, `${name} must not advertise an app resource URI`);
   assert.equal(meta?.ui, undefined, `${name} must not advertise nested app UI metadata`);
+}
+const localFileMeta = server._registeredTools[localFileToolName]?._meta || {};
+if (librarySpoolBridgeEnabled && localFileToolName === "upload_local_file") {
+  assert.equal(localFileMeta["openai/outputTemplate"], "ui://process/file-transfer-v7.html", "bridge runtime upload_local_file must bootstrap the persistent bridge through an existing approved tool");
+  assert.equal(localFileMeta.ui?.resourceUri, "ui://process/file-transfer-v7.html", "bridge runtime upload_local_file must advertise the existing bridge app resource");
+} else {
+  assert.equal(localFileMeta["openai/outputTemplate"], undefined, `${localFileToolName} must stay widget-free outside bridge runtime`);
+  assert.equal(localFileMeta.ui, undefined, `${localFileToolName} must stay widget-free outside bridge runtime`);
 }
 if (librarySpoolBridgeEnabled) {
   const meta = server._registeredTools.mount_visual_proof_bridge?._meta || {};
