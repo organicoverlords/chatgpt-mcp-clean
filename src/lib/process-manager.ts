@@ -274,6 +274,7 @@ type ProcessState = {
   waiters: Set<() => void>;
   attemptStartedAt: string;
   repairAttempts: ProcessRepairAttempt[];
+  runtimeRepairAllowed: boolean;
   executionMode?: CommandExecutionMode;
   executionReason?: string;
 };
@@ -1672,7 +1673,7 @@ export class ProcessManager {
 
   private tryRuntimeRepair(state: ProcessState, code: number | null, signal: NodeJS.Signals | null): boolean {
     const exitCode = code ?? -1;
-    if (exitCode === 0 || signal || state.killRequested || state.error || state.repairAttempts.length >= 1) return false;
+    if (exitCode === 0 || signal || state.killRequested || state.error || !state.runtimeRepairAllowed || state.repairAttempts.length >= 1) return false;
     const stdout = state.stdout.full().text;
     const stderr = state.stderr.full().text;
     const repair = runtimeRepairCommand(state.command, stdout, stderr);
@@ -2379,6 +2380,7 @@ export class ProcessManager {
     preflightMode: "full" | "policy" = "full",
     transportPreflightError?: string,
     dedupeIdentity: string = effectiveCommand,
+    runtimeRepairAllowed = true,
   ): StartResult {
     const preflightError = transportPreflightError ?? (preflightMode === "policy"
       ? commandPolicyError(preflightCommand)
@@ -2409,7 +2411,7 @@ export class ProcessManager {
       launching: true, terminalObserved: false, resolveDone, killRequested: false,
       stdout: new BoundedCapture(), stderr: new BoundedCapture(), startedAt, exitCode: null,
       done, revision: 0, lastReadRevisionByCaller: new Map<string, number>(), waiters: new Set<() => void>(),
-      attemptStartedAt: startedAt, repairAttempts: [],
+      attemptStartedAt: startedAt, repairAttempts: [], runtimeRepairAllowed,
     };
     this.processes.set(state.id, state);
     sharedLauncherHandlers.set(state.id, (message) => this.handleLauncherMessage(message));
@@ -2460,7 +2462,7 @@ export class ProcessManager {
     const inputText = stdin === undefined ? displayCommand : `${displayCommand}\n${stdin}`;
     const preflightCommand = structuredPolicyText(inputText, environment);
     const transportPreflightError = structuredArgvTransportError(executable, args);
-    return this.startPrepared(displayCommand, executionPlan, workingDirectory, callerId, activityTarget, actionClass, undefined, ["structured_argv", ...(stdin !== undefined ? ["structured_stdin"] : [])], preflightCommand, "full", transportPreflightError, this.executionDedupeIdentity(executionPlan));
+    return this.startPrepared(displayCommand, executionPlan, workingDirectory, callerId, activityTarget, actionClass, undefined, ["structured_argv", ...(stdin !== undefined ? ["structured_stdin"] : [])], preflightCommand, "full", transportPreflightError, this.executionDedupeIdentity(executionPlan), false);
   }
 
   startScript(
@@ -2489,6 +2491,7 @@ export class ProcessManager {
       "policy",
       undefined,
       this.executionDedupeIdentity(executionPlan),
+      false,
     );
   }
 
