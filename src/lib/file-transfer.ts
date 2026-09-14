@@ -852,7 +852,7 @@ function setStatus(v){statusEl.textContent=v;statusEl.style.display=v&&v.include
 function hex(bytes){return [...new Uint8Array(bytes)].map(b=>b.toString(16).padStart(2,'0')).join('');}
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
 function rpcRequest(method,params){return new Promise((resolve,reject)=>{const id='visual-proof-rpc-'+(++rpcSeq);const timer=setTimeout(()=>{rpcPending.delete(id);reject(new Error('RPC_TIMEOUT_'+method));},10000);rpcPending.set(id,{resolve,reject,timer});window.parent.postMessage({jsonrpc:'2.0',id,method,params},'*');});}
-async function sendProofMessage(p,label){if(!p?.resource_uri)throw new Error('RESOURCE_URI_MISSING');setStatus('VISUAL_PROOF_MESSAGE '+(label||p.file_name));const result=await rpcRequest('ui/message',{role:'user',content:[{type:'text',text:'Visual proof ready. Inspect the attached exact full-resolution image and continue the current task. File: '+p.file_name+'; bytes: '+p.bytes+'; sha256: '+p.sha256},{type:'resource_link',uri:p.resource_uri,name:p.file_name,title:p.file_name,mimeType:p.mime_type,size:p.bytes}]});if(result?.isError)throw new Error('UI_MESSAGE_REJECTED');setStatus('VISUAL_PROOF_MESSAGE_OK '+p.file_name);}
+async function sendProofMessage(p,label,fileId){if(!fileId)throw new Error('LIBRARY_FILE_ID_MISSING');setStatus('VISUAL_PROOF_MESSAGE '+(label||p.file_name));const result=await rpcRequest('ui/message',{role:'user',content:[{type:'text',text:'Visual proof uploaded to ChatGPT Library with exact verified source bytes. Inspect the image pixels through Files/Library and continue the current task. File: '+p.file_name+'; bytes: '+p.bytes+'; sha256: '+p.sha256+'; fileId: '+fileId}]});if(result?.isError)throw new Error('UI_MESSAGE_REJECTED');setStatus('VISUAL_PROOF_MESSAGE_OK '+p.file_name);}
 async function uploadTransfer(p,label){
  if(!p||p.direction!=='local_to_chatgpt'||!p.transfer_url)return null;
  if(typeof window.openai?.uploadFile!=='function')throw new Error('UPLOAD_FILE_UNAVAILABLE');
@@ -876,8 +876,9 @@ async function bridgeLoop(b){
    if(r.status===204){await sleep(Number(b.poll_ms)||250);continue;}
    if(!r.ok)throw new Error('BRIDGE_NEXT_HTTP_'+r.status);
    const next=await r.json();if(next?.status!=='ready'||!next?.file_transfer)throw new Error('BRIDGE_NEXT_INVALID');
-   await sendProofMessage(next.file_transfer,next.id||next.file_transfer.file_name);
-   const ack=new URL(b.ack_url);ack.searchParams.set('id',next.id);
+    const fileId=await uploadTransfer(next.file_transfer,next.id||next.file_transfer.file_name);
+    await sendProofMessage(next.file_transfer,next.id||next.file_transfer.file_name,fileId);
+    const ack=new URL(b.ack_url);ack.searchParams.set('id',next.id);
    const a=await fetch(ack.href,{method:'POST',cache:'no-store'});if(!a.ok)throw new Error('BRIDGE_ACK_HTTP_'+a.status);
   }catch(e){setStatus('VISUAL_PROOF_BRIDGE_ERROR '+String(e?.message||e));await sleep(1000);}
  }
