@@ -12,6 +12,7 @@ import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/sdk/serv
 import { z } from "zod";
 
 export const FILE_TRANSFER_WIDGET_URI = "ui://process/file-transfer-v7.html";
+export const FILE_TRANSFER_MARKER_PREFIX = "CHATGPT_LIBRARY_UPLOAD=";
 const MCP_APP_MIME_TYPE = "text/html;profile=mcp-app";
 const LEGACY_FILE_TRANSFER_WIDGET_URIS = ["ui://process/file-transfer-v1.html", "ui://process/file-transfer-v4.html", "ui://process/file-transfer-v5.html"] as const;
 const LOCAL_TRANSFER_TTL_MS = 5 * 60 * 1000;
@@ -200,6 +201,22 @@ export async function prepareLocalFileTransfer(path: string): Promise<LocalFileT
   }
   return item;
 }
+
+export async function prepareMarkedLocalFileTransfer(value: unknown): Promise<LocalFileTransfer | null> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const stdout = (value as Record<string, unknown>).stdout;
+  if (typeof stdout !== "string") return null;
+  const marker = stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .reverse()
+    .find((line) => line.startsWith(FILE_TRANSFER_MARKER_PREFIX));
+  if (!marker) return null;
+  const path = marker.slice(FILE_TRANSFER_MARKER_PREFIX.length).trim();
+  if (!path) throw new Error("CHATGPT_LIBRARY_UPLOAD marker must name an absolute local file path");
+  return prepareLocalFileTransfer(path);
+}
+
 
 export function localTransferSummary(item: LocalFileTransfer) {
   return {
