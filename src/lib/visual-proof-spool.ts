@@ -108,10 +108,20 @@ async function recoverAbandonedVisualProofClaims(root: string): Promise<void> {
     try { owner = JSON.parse(await readFile(join(claimDir, CLAIM_OWNER_FILE), "utf8")); } catch {}
     if (owner?.pid && processIsAlive(owner.pid)) continue;
     if (!owner) {
-      const info = await stat(claimDir);
+      let info;
+      try { info = await stat(claimDir); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code === "ENOENT") continue;
+        throw error;
+      }
       if (Date.now() - info.mtimeMs < CLAIM_OWNER_WRITE_GRACE_MS) continue;
     }
-    const manifests = (await readdir(claimDir)).filter((name) => name.toLowerCase().endsWith(".json"));
+    let manifests: string[];
+    try { manifests = (await readdir(claimDir)).filter((name) => name.toLowerCase().endsWith(".json")); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") continue;
+      throw error;
+    }
     for (const name of manifests) {
       const source = join(claimDir, name);
       let target = join(queueDir, name);
@@ -119,7 +129,11 @@ async function recoverAbandonedVisualProofClaims(root: string): Promise<void> {
         await stat(target);
         target = join(queueDir, `recovered-${Date.now()}-${randomUUID()}-${name}`);
       } catch {}
-      await rename(source, target);
+      try { await rename(source, target); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code === "ENOENT") continue;
+        throw error;
+      }
     }
     await rm(claimDir, { recursive: true, force: true });
   }
