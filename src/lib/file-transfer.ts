@@ -12,10 +12,10 @@ import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/sdk/serv
 import { z } from "zod";
 import { acknowledgeVisualProofSpoolBatch, claimVisualProofSpoolItem, readVisualProofSpoolBatch, waitForVisualProofSpoolItem, type PendingVisualProof } from "./visual-proof-spool.js";
 
-export const FILE_TRANSFER_WIDGET_URI = "ui://process/file-transfer-v7.html";
+export const FILE_TRANSFER_WIDGET_URI = "ui://process/file-transfer-v8.html";
 export const FILE_TRANSFER_MARKER_PREFIX = "CHATGPT_LIBRARY_UPLOAD=";
 const MCP_APP_MIME_TYPE = "text/html;profile=mcp-app";
-const LEGACY_FILE_TRANSFER_WIDGET_URIS = ["ui://process/file-transfer-v1.html", "ui://process/file-transfer-v4.html", "ui://process/file-transfer-v5.html"] as const;
+const LEGACY_FILE_TRANSFER_WIDGET_URIS = ["ui://process/file-transfer-v1.html", "ui://process/file-transfer-v4.html", "ui://process/file-transfer-v5.html", "ui://process/file-transfer-v7.html"] as const;
 const LOCAL_TRANSFER_TTL_MS = 5 * 60 * 1000;
 const LOCAL_RESOURCE_TTL_MS = 8 * 60 * 60 * 1000;
 const DEFAULT_MAX_FILE_BYTES = 512 * 1024 * 1024;
@@ -645,6 +645,7 @@ const LIBRARY_SPOOL_BRIDGE_TTL_MS = 8 * 60 * 60 * 1000;
 type LibrarySpoolBridgeSession = {
   expires_at: number;
   in_flight?: { id: string; pending: PendingVisualProof; item: LocalFileTransfer };
+  last_ack?: { id: string; file_id: string };
 };
 const librarySpoolBridgeSessions = new Map<string, LibrarySpoolBridgeSession>();
 
@@ -717,10 +718,17 @@ export async function serveLibrarySpoolBridgeAck(req: Request, res: ExpressRespo
   const session = bridgeSession(req);
   if (!session) { res.status(404).send("Library spool bridge token is invalid or expired"); return; }
   const id = typeof req.query.id === "string" ? req.query.id : "";
+  const fileId = typeof req.query.file_id === "string" ? req.query.file_id.trim() : "";
+  if (!fileId || !/^file[_-][A-Za-z0-9_-]+$/.test(fileId)) { res.status(400).send("Library spool bridge acknowledgement requires uploaded file id"); return; }
+  if (session.last_ack?.id === id && session.last_ack.file_id === fileId) {
+    res.json({ status: "ok", id, file_id: fileId, replayed: true });
+    return;
+  }
   if (!session.in_flight || !id || id !== session.in_flight.id) { res.status(409).send("Library spool bridge acknowledgement does not match current proof"); return; }
   await acknowledgeVisualProofSpoolBatch([session.in_flight.pending]);
   session.in_flight = undefined;
-  res.json({ status: "ok", id });
+  session.last_ack = { id, file_id: fileId };
+  res.json({ status: "ok", id, file_id: fileId });
 }
 
 function widgetResourceMeta() {
@@ -766,6 +774,10 @@ function uploadToolMeta(name: LocalFileToolName) {
   return {
     "openai/toolInvocation/invoking": presentation.invoking,
     "openai/toolInvocation/invoked": "File ready",
+    ...(name === "upload_local_file" && librarySpoolBridgeEnabled() ? {
+      ui: { resourceUri: FILE_TRANSFER_WIDGET_URI, visibility: ["model", "app"] },
+      "openai/outputTemplate": FILE_TRANSFER_WIDGET_URI,
+    } : {}),
   };
 }
 
@@ -824,6 +836,9 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
           ...handoff.content,
         ],
         structuredContent: handoff.summary,
+        ...(localFileName === "upload_local_file" && librarySpoolBridgeEnabled()
+          ? { _meta: { library_spool_bridge: createLibrarySpoolBridgeSession() } }
+          : {}),
       };
     },
   );
@@ -868,7 +883,7 @@ function setStatus(v){statusEl.textContent=v;statusEl.style.display=v&&v.include
 function hex(bytes){return [...new Uint8Array(bytes)].map(b=>b.toString(16).padStart(2,'0')).join('');}
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
 function rpcRequest(method,params){return new Promise((resolve,reject)=>{const id='visual-proof-rpc-'+(++rpcSeq);const timer=setTimeout(()=>{rpcPending.delete(id);reject(new Error('RPC_TIMEOUT_'+method));},10000);rpcPending.set(id,{resolve,reject,timer});window.parent.postMessage({jsonrpc:'2.0',id,method,params},'*');});}
-async function sendProofMessage(p,label){if(!p?.resource_uri)throw new Error('RESOURCE_URI_MISSING');setStatus('VISUAL_PROOF_MESSAGE '+(label||p.file_name));const result=await rpcRequest('ui/message',{role:'user',content:[{type:'text',text:'Visual proof ready. Inspect the attached exact full-resolution image and continue the current task. File: '+p.file_name+'; bytes: '+p.bytes+'; sha256: '+p.sha256},{type:'resource_link',uri:p.resource_uri,name:p.file_name,title:p.file_name,mimeType:p.mime_type,size:p.bytes}]});if(result?.isError)throw new Error('UI_MESSAGE_REJECTED');setStatus('VISUAL_PROOF_MESSAGE_OK '+p.file_name);}
+async function sendProofMessage(p,label,fileId){if(!fileId)throw new Error('LIBRARY_FILE_ID_MISSING');setStatus('VISUAL_PROOF_MESSAGE '+(label||p.file_name));const result=await rpcRequest('ui/message',{role:'user',content:[{type:'text',text:'Visual proof uploaded to ChatGPT Library with exact verified source bytes. Inspect the image pixels through Files/Library and continue the current task. File: '+p.file_name+'; bytes: '+p.bytes+'; sha256: '+p.sha256+'; fileId: '+fileId}]});if(result?.isError)throw new Error('UI_MESSAGE_REJECTED');setStatus('VISUAL_PROOF_MESSAGE_OK '+p.file_name);}
 async function uploadTransfer(p,label){
  if(!p||p.direction!=='local_to_chatgpt'||!p.transfer_url)return null;
  if(typeof window.openai?.uploadFile!=='function')throw new Error('UPLOAD_FILE_UNAVAILABLE');
@@ -892,8 +907,9 @@ async function bridgeLoop(b){
    if(r.status===204){continue;}
    if(!r.ok)throw new Error('BRIDGE_NEXT_HTTP_'+r.status);
    const next=await r.json();if(next?.status!=='ready'||!next?.file_transfer)throw new Error('BRIDGE_NEXT_INVALID');
-   await sendProofMessage(next.file_transfer,next.id||next.file_transfer.file_name);
-   const ack=new URL(b.ack_url);ack.searchParams.set('id',next.id);
+   const fileId=await uploadTransfer(next.file_transfer,next.id||next.file_transfer.file_name);
+   await sendProofMessage(next.file_transfer,next.id||next.file_transfer.file_name,fileId);
+   const ack=new URL(b.ack_url);ack.searchParams.set('id',next.id);ack.searchParams.set('file_id',fileId);
    for(;;){
     try{const a=await fetch(ack.href,{method:'POST',cache:'no-store'});if(!a.ok)throw new Error('BRIDGE_ACK_HTTP_'+a.status);break;}
     catch(e){setStatus('VISUAL_PROOF_BRIDGE_ACK_ERROR '+String(e?.message||e));await sleep(1000);}
