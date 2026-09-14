@@ -106,12 +106,26 @@ const snapshotFreshnessSchema = z.object({
   read_mode: z.literal("MATERIALIZED_ONLY"),
 }).strict();
 
+export const PROCESS_TOOL_CONTRACT_VERSION = "process-tools.v2" as const;
+
+export type ProcessServingIdentity = {
+  backend_generation?: string;
+  source_commit?: string;
+};
+
+const processServingIdentitySchema = z.object({
+  tool_contract_version: z.literal(PROCESS_TOOL_CONTRACT_VERSION),
+  backend_generation: z.string().min(1).optional(),
+  source_commit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+}).strict();
+
 // start_process may return either its immediate launch receipt or the same completed/read
 // shape as read_output. read_output also serves the bounded bootstrap/timeline snapshots.
 // Keep one strict object schema for that shared result family so future top-level fields
 // cannot silently bypass MCP structured-output validation.
 const processOutputSchema = z.object({
   caller_id: z.string(),
+  serving_identity: processServingIdentitySchema,
   mcp_status: z.enum(["OK", "STALE"]),
   process_state: z.enum(["RUNNING", "COMPLETED", "SNAPSHOT"]),
   elapsed_ms: z.number().nonnegative(),
@@ -165,6 +179,7 @@ const processOutputSchema = z.object({
 
 const killProcessOutputSchema = z.object({
   caller_id: z.string(),
+  serving_identity: processServingIdentitySchema,
   process_id: z.string(),
   pid: z.number().int().nonnegative(),
   killed: z.boolean(),
@@ -183,10 +198,11 @@ const busyStore = fullToolProfile ? new BusyStore((scope) => {
   return liveSessions.has(sessionId) || processManager.hasLiveScope(scope);
 }) : undefined;
 
-function resultData(value: unknown, id: string): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
+function resultData(value: unknown, id: string, servingIdentity?: Record<string, unknown>): Record<string, unknown> {
+  const base = value && typeof value === "object" && !Array.isArray(value)
     ? { ...(value as Record<string, unknown>), caller_id: id }
     : { value, caller_id: id };
+  return servingIdentity ? { ...base, serving_identity: servingIdentity } : base;
 }
 
 function textResult(value: unknown, id: string) {
@@ -194,8 +210,8 @@ function textResult(value: unknown, id: string) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
 }
 
-async function structuredTextResult(value: unknown, id: string) {
-  const data = resultData(value, id);
+async function structuredTextResult(value: unknown, id: string, servingIdentity: Record<string, unknown>) {
+  const data = resultData(value, id, servingIdentity);
   const transfers = await prepareMarkedLocalFileTransfers(value);
   const handoffs = await Promise.all(transfers.map((transfer) => localFileTransferHandoff(transfer)));
   return {
@@ -215,7 +231,12 @@ export function markSessionLive(sessionId: string, live: boolean): void {
   else liveSessions.delete(sessionId);
 }
 
-export function createServer(callerId: string): McpServer {
+export function createServer(callerId: string, runtimeIdentity: ProcessServingIdentity = {}): McpServer {
+  const servingIdentity = {
+    tool_contract_version: PROCESS_TOOL_CONTRACT_VERSION,
+    ...(runtimeIdentity.backend_generation ? { backend_generation: runtimeIdentity.backend_generation } : {}),
+    ...(runtimeIdentity.source_commit ? { source_commit: runtimeIdentity.source_commit } : {}),
+  };
   const server = new McpServer({ name: "shell-mcp", version: "0.1.0" });
   registerFileTransferTools(server, callerId);
   registerTemplateCompatibilityResources(server);
@@ -258,7 +279,7 @@ export function createServer(callerId: string): McpServer {
         : typedInput.executable !== undefined
           ? await processManager.startStructuredWithWait(typedInput.executable, typedInput.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, typedInput.stdin, typedInput.env)
           : await processManager.startScriptWithWait(typedInput.language!, typedInput.script!, working_directory, callerId, wait_ms ?? 750, activity_target, action_class, typedInput.env);
-      return structuredTextResult(value, callerId);
+      return structuredTextResult(value, callerId, servingIdentity);
     },
   );
 
@@ -293,13 +314,13 @@ export function createServer(callerId: string): McpServer {
           return { ...(await structuredTextResult(value, callerId)), _meta: { library_spool_bridge: createLibrarySpoolBridgeSession() } };
         }
         const batch = await readVisualProofSpoolBatch(boundedMaxChars);
-        const result = await structuredTextResult(batch.value, callerId);
+        const result = await structuredTextResult(batch.value, callerId, servingIdentity);
         await acknowledgeVisualProofSpoolBatch(batch.pending);
         return result;
       }
       return structuredTextResult(isBootstrapSnapshot(process_id)
         ? await readBootstrapSnapshot(boundedMaxChars, process_id)
-        : await processManager.readOutput(process_id, boundedMaxChars, wait_ms), callerId);
+        : await processManager.readOutput(process_id, boundedMaxChars, wait_ms), callerId, servingIdentity);
     },
   );
 
@@ -316,7 +337,7 @@ export function createServer(callerId: string): McpServer {
       inputSchema: z.object({ process_id: z.string().min(1) }),
       outputSchema: killProcessOutputSchema,
     },
-    async ({ process_id }) => structuredTextResult(await processManager.kill(process_id), callerId),
+    async ({ process_id }) => structuredTextResult(await processManager.kill(process_id), callerId, servingIdentity),
   );
 
   if (fullToolProfile) {
