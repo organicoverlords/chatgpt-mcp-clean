@@ -120,7 +120,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v2"
+              "const": "process-tools.v3"
             },
             "backend_generation": {
               "type": "string",
@@ -237,7 +237,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v2"
+              "const": "process-tools.v3"
             },
             "backend_generation": {
               "type": "string",
@@ -572,6 +572,25 @@
               "maxLength": 80,
               "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,79}$"
             },
+            "retry_without_change": {
+              "type": "boolean",
+              "const": false
+            },
+            "retry_requires_change": {
+              "type": "boolean",
+              "const": true
+            },
+            "suggested_action": {
+              "type": "string",
+              "enum": [
+                "fix_source",
+                "use_structured_python_script",
+                "use_structured_executable_args",
+                "fix_argv_contract",
+                "fix_executable_or_path",
+                "inspect_process_error"
+              ]
+            },
             "input_target": {
               "type": "object",
               "properties": {
@@ -601,7 +620,10 @@
           "required": [
             "kind",
             "origin",
-            "boundary"
+            "boundary",
+            "retry_without_change",
+            "retry_requires_change",
+            "suggested_action"
           ],
           "additionalProperties": false
         },
@@ -844,7 +866,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v2"
+              "const": "process-tools.v3"
             },
             "backend_generation": {
               "type": "string",
@@ -1179,6 +1201,25 @@
               "maxLength": 80,
               "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,79}$"
             },
+            "retry_without_change": {
+              "type": "boolean",
+              "const": false
+            },
+            "retry_requires_change": {
+              "type": "boolean",
+              "const": true
+            },
+            "suggested_action": {
+              "type": "string",
+              "enum": [
+                "fix_source",
+                "use_structured_python_script",
+                "use_structured_executable_args",
+                "fix_argv_contract",
+                "fix_executable_or_path",
+                "inspect_process_error"
+              ]
+            },
             "input_target": {
               "type": "object",
               "properties": {
@@ -1208,7 +1249,10 @@
           "required": [
             "kind",
             "origin",
-            "boundary"
+            "boundary",
+            "retry_without_change",
+            "retry_requires_change",
+            "suggested_action"
           ],
           "additionalProperties": false
         },

@@ -51,18 +51,18 @@ assert.equal(structuredPsPid.submitted_command, undefined);
 const structuredPsInvalid = await manager.startScriptWithWait("powershell", `if (`, undefined, "caller_structured_ps_invalid", commandWaitMs);
 assert.notEqual(structuredPsInvalid.exit_code, 0, JSON.stringify(structuredPsInvalid));
 assert.match(structuredPsInvalid.stderr, /Exception calling \"Create\"|ParserError|Missing closing|Unexpected token/i);
-assert.deepEqual(structuredPsInvalid.failure_diagnostic, { kind: "parser_error", origin: "powershell", boundary: "source" });
+assert.deepEqual(structuredPsInvalid.failure_diagnostic, { kind: "parser_error", origin: "powershell", boundary: "source", retry_without_change: false, retry_requires_change: true, suggested_action: "fix_source" });
 assert.equal(structuredPsScript.failure_diagnostic, undefined);
 const legacyPythonParser = await run(`python -c "if"`, "caller_legacy_python_parser_route");
 assert.notEqual(legacyPythonParser.exit_code, 0, JSON.stringify(legacyPythonParser));
-assert.deepEqual(legacyPythonParser.failure_diagnostic, { kind: "parser_error", origin: "python", boundary: "legacy_command", code: "SyntaxError" });
+assert.deepEqual(legacyPythonParser.failure_diagnostic, { kind: "parser_error", origin: "python", boundary: "legacy_command", code: "SyntaxError", retry_without_change: false, retry_requires_change: true, suggested_action: "fix_source" });
 const legacyPowerShellParserCode = replayFailureDiagnostic({
   command: `Write-Output before < $file`,
   stderr: `At line:1 char:21\n+ Write-Output before < $file\n+                     ~\nThe '<' operator is reserved for future use.\n    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException\n    + FullyQualifiedErrorId : RedirectionNotSupported`,
   exit_code: 1,
   execution_reason: "powershell_fallback",
 });
-assert.deepEqual(legacyPowerShellParserCode, { kind: "parser_error", origin: "powershell", boundary: "legacy_command", code: "RedirectionNotSupported" });
+assert.deepEqual(legacyPowerShellParserCode, { kind: "parser_error", origin: "powershell", boundary: "legacy_command", code: "RedirectionNotSupported", retry_without_change: false, retry_requires_change: true, suggested_action: "fix_source" });
 const parserTextOnlyInStdout = replayFailureDiagnostic({
   command: `rg -n ParserError archive`,
   stdout: `archived receipt says ParserError: old failure\nLine |\nFullyQualifiedErrorId : UnexpectedToken`,
@@ -71,10 +71,19 @@ const parserTextOnlyInStdout = replayFailureDiagnostic({
   execution_reason: "powershell_shell_syntax",
 });
 assert.equal(parserTextOnlyInStdout, undefined, JSON.stringify(parserTextOnlyInStdout));
+const powershellPythonHeredocDiagnostic = replayFailureDiagnostic({
+  command: `[powershell script]\npython - <<'PY'\nprint('ok')\nPY`,
+  stderr: `Exception calling "Create" with "1" argument(s): "At line:2 char:11\n+ python - <<'PY'\n+           ~\nMissing file specification after redirection operator."`,
+  exit_code: 1,
+  execution_reason: "structured_script_powershell_stdin_scriptblock",
+});
+assert.deepEqual(powershellPythonHeredocDiagnostic, { kind: "parser_error", origin: "powershell", boundary: "source", retry_without_change: false, retry_requires_change: true, suggested_action: "use_structured_python_script", input_target: { mode: "script", language: "python" } });
+const missingExecutableDiagnostic = replayFailureDiagnostic({ command: `definitely-missing.exe`, error: `spawn definitely-missing.exe ENOENT`, error_code: `ENOENT`, exit_code: -1, execution_reason: "structured_argv" });
+assert.deepEqual(missingExecutableDiagnostic, { kind: "spawn_error", origin: "process", boundary: "spawn", code: "ENOENT", retry_without_change: false, retry_requires_change: true, suggested_action: "fix_executable_or_path" });
 const busyUsageDiagnostic = replayFailureDiagnostic({ command: `busy-python.cmd claim`, stderr: `usage: busy claim [-h] actor scope`, exit_code: 2, execution_reason: "native_argv_direct" });
-assert.deepEqual(busyUsageDiagnostic, { kind: "cli_usage", origin: "busy_cli", boundary: "legacy_command", input_target: { mode: "executable" } });
+assert.deepEqual(busyUsageDiagnostic, { kind: "cli_usage", origin: "busy_cli", boundary: "legacy_command", retry_without_change: false, retry_requires_change: true, suggested_action: "use_structured_executable_args", input_target: { mode: "executable" } });
 const structuredBusyUsageDiagnostic = replayFailureDiagnostic({ command: `busy-python.cmd claim`, stderr: `usage: busy claim [-h] actor scope`, exit_code: 2, execution_reason: "structured_argv" });
-assert.deepEqual(structuredBusyUsageDiagnostic, { kind: "cli_usage", origin: "busy_cli", boundary: "argv_contract" });
+assert.deepEqual(structuredBusyUsageDiagnostic, { kind: "cli_usage", origin: "busy_cli", boundary: "argv_contract", retry_without_change: false, retry_requires_change: true, suggested_action: "fix_argv_contract" });
 assert.equal(replayFailureDiagnostic({ command: "python -m pytest", stderr: "1 failed", exit_code: 1, execution_reason: "native_argv_direct" }), undefined);
 
 const nativeFailure = await run("cmd.exe /c exit 7", "caller_pwsh_preflight_native_failure");

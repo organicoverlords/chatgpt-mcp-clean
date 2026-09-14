@@ -255,7 +255,7 @@ assert.equal(scriptNode.stdin, `process.stdout.write("NODE_SCRIPT")`);
 const missingStructuredExecutable = await manager.startStructuredWithWait("__mcp_definitely_missing_executable__", [], process.cwd(), "caller_execution_plan_missing_executable", waitMs);
 assert.equal(missingStructuredExecutable.execution_outcome, "error", JSON.stringify(missingStructuredExecutable));
 assert.equal(missingStructuredExecutable.error_code, "ENOENT", JSON.stringify(missingStructuredExecutable));
-assert.deepEqual(missingStructuredExecutable.failure_diagnostic, { kind: "spawn_error", origin: "process", boundary: "spawn", code: "ENOENT" });
+assert.deepEqual(missingStructuredExecutable.failure_diagnostic, { kind: "spawn_error", origin: "process", boundary: "spawn", code: "ENOENT", retry_without_change: false, retry_requires_change: true, suggested_action: "fix_executable_or_path" });
 assert.equal(missingStructuredExecutable.stdout, "");
 
 console.log("PASS command_execution_plan native_argv=true inline_code_opaque=true worker_execargv_sanitized=true native_sequence=true native_pipeline=true python_heredoc_stdin=true structured_stdin=true cmd_wrapper_elision=true explicit_shell_direct=true powershell_repairs=true structured_script_stdin=true powershell_fallback=true cmd_multiline_guard=true spawn_error_code=true structured_env=true nested_powershell_direct=true structured_cmd_composition=true structured_ps7_chain=true structured_nul_script=true");

@@ -50,6 +50,9 @@ export type ProcessFailureDiagnostic = {
   origin: "powershell" | "python" | "node" | "bash" | "busy_cli" | "stack_atlas_cli" | "swarm_route_cli" | "process";
   boundary: "source" | "legacy_command" | "argv_contract" | "spawn";
   code?: string;
+  retry_without_change: false;
+  retry_requires_change: true;
+  suggested_action: "fix_source" | "use_structured_python_script" | "use_structured_executable_args" | "fix_argv_contract" | "fix_executable_or_path" | "inspect_process_error";
   input_target?: {
     mode: "script" | "executable";
     language?: StructuredScriptLanguage;
@@ -1241,7 +1244,11 @@ function processFailureDiagnostic(
 ): ProcessFailureDiagnostic | undefined {
   if (!error && (exitCode === null || exitCode === 0)) return undefined;
   const boundedErrorCode = boundedFailureCode(errorCode);
-  if (error && boundedErrorCode) return { kind: "spawn_error", origin: "process", boundary: "spawn", code: boundedErrorCode };
+  if (error && boundedErrorCode) return {
+    kind: "spawn_error", origin: "process", boundary: "spawn", code: boundedErrorCode,
+    retry_without_change: false, retry_requires_change: true,
+    suggested_action: boundedErrorCode === "ENOENT" ? "fix_executable_or_path" : "inspect_process_error",
+  };
   const stripFailureAnsi = (value: string) => value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
   const parserOutput = stripFailureAnsi(`${stderr}\n${error ?? ""}`);
   const output = stripFailureAnsi(`${stderr}\n${stdout}\n${error ?? ""}`);
@@ -1271,7 +1278,19 @@ function processFailureDiagnostic(
     // Parser output identifies the language that rejected the source, but it does not prove
     // that changing transport would make invalid source valid. Report ownership/boundary only.
     const code = parserFailureCode(parserOrigin, parserOutput);
-    return { kind: "parser_error", origin: parserOrigin, boundary: structuredLanguage ? "source" : "legacy_command", ...(code ? { code } : {}) };
+    const powershellWrappedPythonHeredoc = parserOrigin === "powershell"
+      && structuredLanguage === "powershell"
+      && /(?:^|\n)\s*(?:python(?:3)?|py)(?:\.exe)?\s+-\s*<<\s*['"]?[A-Za-z_][A-Za-z0-9_]*/im.test(command);
+    return {
+      kind: "parser_error",
+      origin: parserOrigin,
+      boundary: structuredLanguage ? "source" : "legacy_command",
+      ...(code ? { code } : {}),
+      retry_without_change: false,
+      retry_requires_change: true,
+      suggested_action: powershellWrappedPythonHeredoc ? "use_structured_python_script" : "fix_source",
+      ...(powershellWrappedPythonHeredoc ? { input_target: { mode: "script" as const, language: "python" as const } } : {}),
+    };
   }
 
   const cliOrigin: ProcessFailureDiagnostic["origin"] | undefined = /^usage: busy\b/im.test(output) && /(?:BusyCoordinator|busy(?:-python)?\.(?:cmd|py)|\bbusy\b)/i.test(command)
@@ -1286,6 +1305,9 @@ function processFailureDiagnostic(
       kind: "cli_usage",
       origin: cliOrigin,
       boundary: structuredArgv ? "argv_contract" : "legacy_command",
+      retry_without_change: false,
+      retry_requires_change: true,
+      suggested_action: structuredArgv ? "fix_argv_contract" : "use_structured_executable_args",
       ...(structuredArgv ? {} : { input_target: { mode: "executable" as const } }),
     };
   }

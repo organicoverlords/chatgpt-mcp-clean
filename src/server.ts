@@ -80,6 +80,9 @@ const failureDiagnosticSchema = z.object({
   origin: z.enum(["powershell", "python", "node", "bash", "busy_cli", "stack_atlas_cli", "swarm_route_cli", "process"]),
   boundary: z.enum(["source", "legacy_command", "argv_contract", "spawn"]),
   code: z.string().max(80).regex(/^[A-Za-z][A-Za-z0-9_.-]{0,79}$/).optional(),
+  retry_without_change: z.literal(false),
+  retry_requires_change: z.literal(true),
+  suggested_action: z.enum(["fix_source", "use_structured_python_script", "use_structured_executable_args", "fix_argv_contract", "fix_executable_or_path", "inspect_process_error"]),
   input_target: z.object({
     mode: z.enum(["script", "executable"]),
     language: z.enum(["powershell", "python", "node", "bash"]).optional(),
@@ -106,7 +109,7 @@ const snapshotFreshnessSchema = z.object({
   read_mode: z.literal("MATERIALIZED_ONLY"),
 }).strict();
 
-export const PROCESS_TOOL_CONTRACT_VERSION = "process-tools.v2" as const;
+export const PROCESS_TOOL_CONTRACT_VERSION = "process-tools.v3" as const;
 
 export type ProcessServingIdentity = {
   backend_generation?: string;

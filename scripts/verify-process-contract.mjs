@@ -78,7 +78,7 @@ async function assertStructuredProcessResult(name, args) {
   const result = await tool.handler(args, {});
   assert.ok(result.structuredContent, `${name} must return structuredContent`);
   assert.deepEqual(result.structuredContent.serving_identity, {
-    tool_contract_version: "process-tools.v2",
+    tool_contract_version: "process-tools.v3",
     backend_generation: "backend-contract-test",
     source_commit: contractSourceCommit,
   }, `${name} must expose exact serving backend/source/contract identity`);
@@ -121,7 +121,7 @@ const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "e078318e4acb135d59b5334cbdb46a9ff4bdb77510f4cf24c714d5976bb787de";
+const acceptedContractSha256 = "9d9464bb514fb88e4e63ec88878fb0e186b029ea9fa45ca359917a731a2e49f3";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 const expectedTools = baseExpectedTools
