@@ -56,16 +56,16 @@ for (const name of ["start_process", "read_output"]) {
 }
 const localFileMeta = server._registeredTools[localFileToolName]?._meta || {};
 if (librarySpoolBridgeEnabled && localFileToolName === "upload_local_file") {
-  assert.equal(localFileMeta["openai/outputTemplate"], "ui://process/file-transfer-v7.html", "bridge runtime upload_local_file must bootstrap the persistent bridge through an existing approved tool");
-  assert.equal(localFileMeta.ui?.resourceUri, "ui://process/file-transfer-v7.html", "bridge runtime upload_local_file must advertise the existing bridge app resource");
+  assert.equal(localFileMeta["openai/outputTemplate"], "ui://process/file-transfer-v8.html", "bridge runtime upload_local_file must bootstrap the persistent bridge through an existing approved tool");
+  assert.equal(localFileMeta.ui?.resourceUri, "ui://process/file-transfer-v8.html", "bridge runtime upload_local_file must advertise the existing bridge app resource");
 } else {
   assert.equal(localFileMeta["openai/outputTemplate"], undefined, `${localFileToolName} must stay widget-free outside bridge runtime`);
   assert.equal(localFileMeta.ui, undefined, `${localFileToolName} must stay widget-free outside bridge runtime`);
 }
 if (librarySpoolBridgeEnabled) {
   const meta = server._registeredTools.mount_visual_proof_bridge?._meta || {};
-  assert.equal(meta?.["openai/outputTemplate"], "ui://process/file-transfer-v7.html", "dedicated visual-proof mount must mount existing file-transfer widget");
-  assert.equal(meta?.ui?.resourceUri, "ui://process/file-transfer-v7.html", "dedicated visual-proof mount must advertise existing app resource URI");
+  assert.equal(meta?.["openai/outputTemplate"], "ui://process/file-transfer-v8.html", "dedicated visual-proof mount must mount existing file-transfer widget");
+  assert.equal(meta?.ui?.resourceUri, "ui://process/file-transfer-v8.html", "dedicated visual-proof mount must advertise existing app resource URI");
 } else {
   assert.equal(server._registeredTools.mount_visual_proof_bridge, undefined, "normal runtime must not advertise bridge-only mount action");
 }

@@ -12,10 +12,10 @@ import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/sdk/serv
 import { z } from "zod";
 import { acknowledgeVisualProofSpoolBatch, readVisualProofSpoolBatch, type PendingVisualProof } from "./visual-proof-spool.js";
 
-export const FILE_TRANSFER_WIDGET_URI = "ui://process/file-transfer-v7.html";
+export const FILE_TRANSFER_WIDGET_URI = "ui://process/file-transfer-v8.html";
 export const FILE_TRANSFER_MARKER_PREFIX = "CHATGPT_LIBRARY_UPLOAD=";
 const MCP_APP_MIME_TYPE = "text/html;profile=mcp-app";
-const LEGACY_FILE_TRANSFER_WIDGET_URIS = ["ui://process/file-transfer-v1.html", "ui://process/file-transfer-v4.html", "ui://process/file-transfer-v5.html"] as const;
+const LEGACY_FILE_TRANSFER_WIDGET_URIS = ["ui://process/file-transfer-v1.html", "ui://process/file-transfer-v4.html", "ui://process/file-transfer-v5.html", "ui://process/file-transfer-v7.html"] as const;
 const LOCAL_TRANSFER_TTL_MS = 5 * 60 * 1000;
 const LOCAL_RESOURCE_TTL_MS = 8 * 60 * 60 * 1000;
 const DEFAULT_MAX_FILE_BYTES = 512 * 1024 * 1024;
@@ -701,10 +701,12 @@ export async function serveLibrarySpoolBridgeAck(req: Request, res: ExpressRespo
   const session = bridgeSession(req);
   if (!session) { res.status(404).send("Library spool bridge token is invalid or expired"); return; }
   const id = typeof req.query.id === "string" ? req.query.id : "";
+  const fileId = typeof req.query.file_id === "string" ? req.query.file_id.trim() : "";
   if (!session.in_flight || !id || id !== session.in_flight.id) { res.status(409).send("Library spool bridge acknowledgement does not match current proof"); return; }
+  if (!fileId || !/^file[_-][A-Za-z0-9_-]+$/.test(fileId)) { res.status(400).send("Library spool bridge acknowledgement requires uploaded file id"); return; }
   await acknowledgeVisualProofSpoolBatch([session.in_flight.pending]);
   session.in_flight = undefined;
-  res.json({ status: "ok", id });
+  res.json({ status: "ok", id, file_id: fileId });
 }
 
 function widgetResourceMeta() {
@@ -885,7 +887,7 @@ async function bridgeLoop(b){
    const next=await r.json();if(next?.status!=='ready'||!next?.file_transfer)throw new Error('BRIDGE_NEXT_INVALID');
     const fileId=await uploadTransfer(next.file_transfer,next.id||next.file_transfer.file_name);
     await sendProofMessage(next.file_transfer,next.id||next.file_transfer.file_name,fileId);
-    const ack=new URL(b.ack_url);ack.searchParams.set('id',next.id);
+    const ack=new URL(b.ack_url);ack.searchParams.set('id',next.id);ack.searchParams.set('file_id',fileId);
    const a=await fetch(ack.href,{method:'POST',cache:'no-store'});if(!a.ok)throw new Error('BRIDGE_ACK_HTTP_'+a.status);
   }catch(e){setStatus('VISUAL_PROOF_BRIDGE_ERROR '+String(e?.message||e));await sleep(1000);}
  }
