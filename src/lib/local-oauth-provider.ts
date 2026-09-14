@@ -45,6 +45,7 @@ interface StoreShape {
   clients: Record<string, OAuthClientInformationFull>;
   access: Record<string, TokenRecord>;
   refresh: Record<string, TokenRecord>;
+  codes?: Record<string, CodeRecord>;
 }
 
 function freshToken(): string { return randomBytes(32).toString("base64url"); }
@@ -121,11 +122,12 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     };
   }
   async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response): Promise<void> {
+    this.load();
     this.prune();
     const resource = this.validateResource(params.resource);
     const scopes = this.validateScopes(params.scopes);
     const code = freshToken();
-    this.codes.set(code, {
+    this.codes.set(digest(code), {
       clientId: client.client_id,
       redirectUri: params.redirectUri,
       codeChallenge: params.codeChallenge,
@@ -133,6 +135,7 @@ export class LocalOAuthProvider implements OAuthServerProvider {
       resource,
       expiresAt: Date.now() + CODE_TTL_MS,
     });
+    this.persist();
     const redirect = new URL(params.redirectUri);
     redirect.searchParams.set("code", code);
     if (params.state) redirect.searchParams.set("state", params.state);
@@ -148,10 +151,7 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     const rec = this.getCode(client, code);
     if (redirectUri && redirectUri !== rec.redirectUri) throw new InvalidGrantError("redirect_uri mismatch");
     if (resource && canonical(resource) !== rec.resource) throw new InvalidTargetError("resource mismatch");
-    this.codes.delete(code);
-    // Another backend generation may have written durable registrations or
-    // tokens while this authorization code stayed local to the active backend.
-    this.load();
+    this.codes.delete(digest(code));
     return this.issuePair(client.client_id, rec.scopes, rec.resource);
   }
   async exchangeRefreshToken(client: OAuthClientInformationFull, refreshToken: string, scopes?: string[], resource?: URL): Promise<OAuthTokens> {
@@ -236,8 +236,9 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     this.persist();
   }
   private getCode(client: OAuthClientInformationFull, code: string): CodeRecord {
+    this.load();
     this.prune();
-    const rec = this.codes.get(code);
+    const rec = this.codes.get(digest(code));
     if (!rec || rec.clientId !== client.client_id || rec.expiresAt <= Date.now()) throw new InvalidGrantError("Invalid or expired authorization code");
     return rec;
   }
@@ -346,12 +347,15 @@ export class LocalOAuthProvider implements OAuthServerProvider {
       const clients = new Map(Object.entries(data.clients ?? {}));
       const access = new Map(Object.entries(data.access ?? {}));
       const refresh = new Map(Object.entries(data.refresh ?? {}));
+      const codes = new Map(Object.entries(data.codes ?? {}));
       this.clients.clear();
       this.access.clear();
       this.refresh.clear();
+      this.codes.clear();
       for (const [id, client] of clients) this.clients.set(id, client);
       for (const [key, rec] of access) this.access.set(key, rec);
       for (const [key, rec] of refresh) this.refresh.set(key, rec);
+      for (const [key, rec] of codes) this.codes.set(key, rec);
       this.prune();
     } catch {
       // A transient read or parse failure must not erase the last good in-memory
@@ -365,6 +369,7 @@ export class LocalOAuthProvider implements OAuthServerProvider {
       clients: Object.fromEntries(this.clients),
       access: Object.fromEntries(this.access),
       refresh: Object.fromEntries(this.refresh),
+      codes: Object.fromEntries(this.codes),
     };
     mkdirSync(dirname(this.storePath), { recursive: true });
     const tmp = `${this.storePath}.${randomUUID()}.tmp`;

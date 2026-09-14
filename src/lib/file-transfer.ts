@@ -10,7 +10,7 @@ import { constants as zlibConstants, createZstdCompress } from "node:zlib";
 import type { Request, Response as ExpressResponse } from "express";
 import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { acknowledgeVisualProofSpoolBatch, readVisualProofSpoolBatch, waitForVisualProofSpoolItem, type PendingVisualProof } from "./visual-proof-spool.js";
+import { acknowledgeVisualProofSpoolBatch, claimVisualProofSpoolItem, readVisualProofSpoolBatch, waitForVisualProofSpoolItem, type PendingVisualProof } from "./visual-proof-spool.js";
 
 export const FILE_TRANSFER_WIDGET_URI = "ui://process/file-transfer-v7.html";
 export const FILE_TRANSFER_MARKER_PREFIX = "CHATGPT_LIBRARY_UPLOAD=";
@@ -685,8 +685,7 @@ export async function serveLibrarySpoolBridgeNext(req: Request, res: ExpressResp
   const session = bridgeSession(req);
   if (!session) { res.status(404).send("Library spool bridge token is invalid or expired"); return; }
   if (!session.in_flight) {
-    let batch = await readVisualProofSpoolBatch(512);
-    let pending = batch.pending[0];
+    let pending = await claimVisualProofSpoolItem();
     if (!pending) {
       // Hold one mounted bridge request open until the spool changes instead of making
       // thousands of empty HTTP polls per hour. Abort the local watcher when the host
@@ -698,8 +697,7 @@ export async function serveLibrarySpoolBridgeNext(req: Request, res: ExpressResp
       try {
         const ready = await waitForVisualProofSpoolItem(abort.signal);
         if (!ready) return;
-        batch = await readVisualProofSpoolBatch(512);
-        pending = batch.pending[0];
+        pending = await claimVisualProofSpoolItem();
         if (!pending) { res.status(204).end(); return; }
       } finally {
         req.off("aborted", onAbort);
@@ -707,7 +705,7 @@ export async function serveLibrarySpoolBridgeNext(req: Request, res: ExpressResp
       }
     }
     const item = await prepareLocalFileTransfer(pending.filePath);
-    session.in_flight = { id: basename(pending.manifestPath), pending, item };
+    session.in_flight = { id: pending.id, pending, item };
   }
   const current = session.in_flight;
   res.json({ status: "ready", id: current.id, file_transfer: localTransferMeta(current.item) });
@@ -896,7 +894,10 @@ async function bridgeLoop(b){
    const next=await r.json();if(next?.status!=='ready'||!next?.file_transfer)throw new Error('BRIDGE_NEXT_INVALID');
    await sendProofMessage(next.file_transfer,next.id||next.file_transfer.file_name);
    const ack=new URL(b.ack_url);ack.searchParams.set('id',next.id);
-   const a=await fetch(ack.href,{method:'POST',cache:'no-store'});if(!a.ok)throw new Error('BRIDGE_ACK_HTTP_'+a.status);
+   for(;;){
+    try{const a=await fetch(ack.href,{method:'POST',cache:'no-store'});if(!a.ok)throw new Error('BRIDGE_ACK_HTTP_'+a.status);break;}
+    catch(e){setStatus('VISUAL_PROOF_BRIDGE_ACK_ERROR '+String(e?.message||e));await sleep(1000);}
+   }
   }catch(e){setStatus('VISUAL_PROOF_BRIDGE_ERROR '+String(e?.message||e));await sleep(1000);}
  }
 }
