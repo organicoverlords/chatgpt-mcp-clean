@@ -234,7 +234,7 @@ try {
 const listedByName = Object.fromEntries(listed.tools.map((tool) => [tool.name, tool]));
 assert.ok(listedByName.upload_local_file.outputSchema, "upload tool must declare outputSchema for structuredContent");
 assert.ok(listedByName.download_chatgpt_file.outputSchema, "download tool must declare outputSchema for structuredContent");
-assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v7.html", "legacy compatibility URI remains readable while upload_local_file is widget-free");
+assert.equal(FILE_TRANSFER_WIDGET_URI, "ui://process/file-transfer-v8.html", "legacy compatibility URI remains readable while upload_local_file is widget-free");
   const start = listed.tools.find((tool) => tool.name === "start_process");
   const read = listed.tools.find((tool) => tool.name === "read_output");
   const upload = listed.tools.find((tool) => tool.name === "upload_local_file");
