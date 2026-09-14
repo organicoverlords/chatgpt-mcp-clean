@@ -115,6 +115,27 @@
         "caller_id": {
           "type": "string"
         },
+        "serving_identity": {
+          "type": "object",
+          "properties": {
+            "tool_contract_version": {
+              "type": "string",
+              "const": "process-tools.v2"
+            },
+            "backend_generation": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          },
+          "required": [
+            "tool_contract_version"
+          ],
+          "additionalProperties": false
+        },
         "process_id": {
           "type": "string"
         },
@@ -169,6 +190,7 @@
       },
       "required": [
         "caller_id",
+        "serving_identity",
         "process_id",
         "pid",
         "killed"
@@ -209,6 +231,27 @@
       "properties": {
         "caller_id": {
           "type": "string"
+        },
+        "serving_identity": {
+          "type": "object",
+          "properties": {
+            "tool_contract_version": {
+              "type": "string",
+              "const": "process-tools.v2"
+            },
+            "backend_generation": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          },
+          "required": [
+            "tool_contract_version"
+          ],
+          "additionalProperties": false
         },
         "mcp_status": {
           "type": "string",
@@ -671,6 +714,7 @@
       },
       "required": [
         "caller_id",
+        "serving_identity",
         "mcp_status",
         "process_state",
         "elapsed_ms",
@@ -795,6 +839,27 @@
         "caller_id": {
           "type": "string"
         },
+        "serving_identity": {
+          "type": "object",
+          "properties": {
+            "tool_contract_version": {
+              "type": "string",
+              "const": "process-tools.v2"
+            },
+            "backend_generation": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          },
+          "required": [
+            "tool_contract_version"
+          ],
+          "additionalProperties": false
+        },
         "mcp_status": {
           "type": "string",
           "enum": [
@@ -1256,6 +1321,7 @@
       },
       "required": [
         "caller_id",
+        "serving_identity",
         "mcp_status",
         "process_state",
         "elapsed_ms",

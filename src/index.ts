@@ -136,7 +136,10 @@ function jsonError(res: Response, status: number, message: string): void {
 
 async function handleStateless(req: Request, res: Response, body: unknown): Promise<void> {
   const requestCallerId = callerId(req);
-  const server: McpServer = createServer(requestCallerId);
+  const server: McpServer = createServer(requestCallerId, {
+    ...(backendGeneration ? { backend_generation: backendGeneration } : {}),
+    ...(runtimeIdentity.source_commit ? { source_commit: runtimeIdentity.source_commit } : {}),
+  });
   registerOptionalVisualProofTools(server, requestCallerId);
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
