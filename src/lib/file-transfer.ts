@@ -844,11 +844,11 @@ export function fileTransferWidgetHtml(): string {
   if (!librarySpoolBridgeEnabled()) return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color-scheme:light dark}html,body{margin:0;padding:0;background:transparent;overflow:hidden}.status{box-sizing:border-box;height:28px;line-height:28px;padding:0 8px;font:12px/28px ui-monospace,SFMono-Regular,Consolas,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}</style></head><body><div class="status">FILE_TRANSFER_NATIVE_RESOURCE</div></body></html>`;
   return `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color-scheme:light dark}body{margin:0;background:transparent}.image{display:none;max-width:100%;height:auto;border-radius:8px}.image.on{display:block}.status{padding:6px 8px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-word}</style>
-<body><img id="image" class="image" alt="Uploaded image"><div id="status" class="status">VISUAL_PROOF_BRIDGE_READY</div>
+<style>:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color-scheme:light dark}html,body{margin:0;padding:0;background:transparent;overflow:hidden}.image{display:none;max-width:100%;height:auto;border-radius:8px}.image.on{display:block}.status{display:none;padding:6px 8px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-word}</style>
+<body><img id="image" class="image" alt="Uploaded image"><div id="status" class="status"></div>
 <script>
 const statusEl=document.getElementById('status');const imageEl=document.getElementById('image');let started='';let bridgeStarted='';let rpcSeq=0;const rpcPending=new Map();
-function setStatus(v){statusEl.textContent=v;window.openai?.notifyIntrinsicHeight?.();}
+function setStatus(v){statusEl.textContent=v;statusEl.style.display=v&&v.includes('ERROR')?'block':'none';window.openai?.notifyIntrinsicHeight?.();}
 function hex(bytes){return [...new Uint8Array(bytes)].map(b=>b.toString(16).padStart(2,'0')).join('');}
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
 function rpcRequest(method,params){return new Promise((resolve,reject)=>{const id='visual-proof-rpc-'+(++rpcSeq);const timer=setTimeout(()=>{rpcPending.delete(id);reject(new Error('RPC_TIMEOUT_'+method));},10000);rpcPending.set(id,{resolve,reject,timer});window.parent.postMessage({jsonrpc:'2.0',id,method,params},'*');});}

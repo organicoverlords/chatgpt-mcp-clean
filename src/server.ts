@@ -304,11 +304,15 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       const boundedMaxChars = Math.max(1, Math.min(max_chars ?? 32_000, 32_000));
       if (isVisualProofSnapshot(process_id)) {
         if (librarySpoolBridgeEnabled()) {
-          return structuredTextResult({
-            mcp_status: "OK", process_state: "SNAPSHOT", elapsed_ms: 0, next_action: "STOP_READING",
-            process_id: "visual-proof", running: true, stdout: "", stderr: "", no_change: true, snapshot_alias: true,
-          }, callerId, servingIdentity);
-        }
+          return {
+            ...(await structuredTextResult({
+              mcp_status: "OK", process_state: "SNAPSHOT", elapsed_ms: 0, next_action: "STOP_READING",
+              process_id: "visual-proof", running: true, stdout: "", stderr: "", no_change: true, snapshot_alias: true,
+            }, callerId, servingIdentity)),
+            // Backward compatibility for hosts holding the pre-flood-fix read_output descriptor.
+            // Fresh descriptors use mount_visual_proof_bridge instead.
+            _meta: { library_spool_bridge: createLibrarySpoolBridgeSession() },
+          };        }
         const batch = await readVisualProofSpoolBatch(boundedMaxChars);
         const result = await structuredTextResult(batch.value, callerId, servingIdentity);
         await acknowledgeVisualProofSpoolBatch(batch.pending);
