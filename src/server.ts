@@ -314,7 +314,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
             mcp_status: "OK", process_state: "SNAPSHOT", elapsed_ms: 0, next_action: "READ_SAME_PROCESS_ID",
             process_id: "visual-proof", running: true, stdout: "", stderr: "", no_change: true, snapshot_alias: true,
           };
-          return { ...(await structuredTextResult(value, callerId)), _meta: { library_spool_bridge: createLibrarySpoolBridgeSession() } };
+          return { ...(await structuredTextResult(value, callerId, servingIdentity)), _meta: { library_spool_bridge: createLibrarySpoolBridgeSession() } };
         }
         const batch = await readVisualProofSpoolBatch(boundedMaxChars);
         const result = await structuredTextResult(batch.value, callerId, servingIdentity);
