@@ -33,11 +33,5 @@ export function registerTemplateCompatibilityResources(server: McpServer): void 
   LEGACY_PROCESS_LIBRARY_UPLOAD_WIDGET_URIS.forEach((uri, index) =>
     registerCompatResource(server, `legacy-process-library-upload-widget-v${index + 1}-compat`, uri));
 
-  // The full visual-proof profile registers the real resource later in index.ts.
-  // Process/file-transfer profiles still keep the historical visual URI readable.
-  const toolProfile = (process.env.MCP_TOOL_PROFILE || "process").trim().toLowerCase();
-  const realVisualAppWillRegister = toolProfile === "full" && process.env.MCP_VISUAL_PROOF_UI === "1";
-  if (!realVisualAppWillRegister) {
-    registerCompatResource(server, "legacy-visual-proof-widget-compat", LEGACY_VISUAL_PROOF_WIDGET_URI);
-  }
+  registerCompatResource(server, "legacy-visual-proof-widget-compat", LEGACY_VISUAL_PROOF_WIDGET_URI);
 }

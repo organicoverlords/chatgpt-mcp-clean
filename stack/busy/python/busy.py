@@ -72,8 +72,9 @@ def canonical_scope(scope: str) -> str:
     if os.path.isabs(value):
         return os.path.normcase(os.path.normpath(value))
 
-    # Keep arbitrary logical scopes opaque. Normalize only known repository
-    # identities so short and owner-qualified spellings share one collision key.
+    # Known repository aliases are the only logical-scope spellings normalized.
+    # This keeps arbitrary logical identifiers opaque while making owner-qualified
+    # and short repo scopes collide for the same exact file/ref/resource suffix.
     repo, separator, suffix = value.partition(":")
     canonical_repo = REPO_SCOPE_ALIASES.get(repo.casefold())
     if canonical_repo is not None:
@@ -231,7 +232,7 @@ def normalize_jobs(state: dict) -> bool:
     jobs = state["coordinator"]["jobs"]
     raw_jobs: dict[str, dict] = {}
     known = {"job_id", "scope", "state", "owner", "lease_expires_at", "claim_timestamp", "checkpoint", "updated_at"}
-    for raw_scope, raw_job in jobs.items():
+    for raw_scope, raw_job in sorted(jobs.items(), key=lambda item: str(item[0])):
         if not isinstance(raw_job, dict):
             continue
         try:

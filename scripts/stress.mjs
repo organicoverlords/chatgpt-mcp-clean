@@ -167,7 +167,7 @@ console.log(`\nphase 3 - ${PROCS} concurrent start_process/read_output/kill_proc
   const { lats, errors } = await pool(PROCS, PROCS, async (i) => {
     const r = await mcpPost({
       jsonrpc: "2.0", id: 100 + i, method: "tools/call",
-      params: { name: "start_process", arguments: { command: `Write-Output 'STRESS_${i}'; Start-Sleep -Seconds 20` } },
+      params: { name: "start_process", arguments: { language: "powershell", script: `Write-Output 'STRESS_${i}'; Start-Sleep -Seconds 20` } },
     });
     const text = r.body?.result?.content?.[0]?.text || "";
     let data = null;

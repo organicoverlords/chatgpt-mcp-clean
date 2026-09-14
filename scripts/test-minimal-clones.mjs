@@ -60,8 +60,6 @@ function startClone(id, port, extraEnv = {}) {
       HOST: "127.0.0.1",
       MCP_BACKEND_MODE: "1",
       MCP_TOOL_PROFILE: "process",
-      MCP_VISUAL_PROOF_UI: "0",
-      MCP_VISUAL_PROOF_REVIEW: "0",
       MCP_PUBLIC_ORIGIN: publicOrigin,
       MCP_OWNER_AUTH_ORIGIN: "",
       MCP_OWNER_AUTH_MODE: "tailscale",
@@ -204,6 +202,7 @@ try {
     assert.deepEqual(byName.start_process.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: true });
     assert.deepEqual(byName.read_output.annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: false });
     assert.deepEqual(byName.kill_process.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: false });
+    assert.deepEqual(byName.upload_local_file.annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: false });
     const expectedInvocationUi = {
       start_process: { title: "Run command", invoking: "Running command…", invoked: "Command returned" },
       read_output: { title: "Check command", invoking: "Checking command…", invoked: "Command checked" },
@@ -217,9 +216,11 @@ try {
       assert.equal(byName[name]._meta?.["openai/toolInvocation/invoked"], expectedUi.invoked, `${name} should expose concise invoked status`);
       assert.ok(expectedUi.invoking.length <= 64 && expectedUi.invoked.length <= 64, `${name} invocation statuses must stay within Apps SDK limits`);
     }
-    assert.equal(byName.start_process?._meta?.["openai/outputTemplate"], undefined);
-    assert.equal(byName.read_output?._meta?.["openai/outputTemplate"], undefined);
-    assert.equal(byName.upload_local_file?._meta?.["openai/outputTemplate"], FILE_TRANSFER_WIDGET_URI);
+    for (const name of ["start_process", "read_output", "upload_local_file"]) {
+      assert.equal(byName[name]?._meta?.["openai/outputTemplate"], undefined, `${name} must not mount an app/widget template`);
+      assert.equal(byName[name]?._meta?.["ui/resourceUri"], undefined, `${name} must not advertise an app resource URI`);
+      assert.equal(byName[name]?._meta?.ui, undefined, `${name} must not advertise nested app UI metadata`);
+    }
   }
 
   const historicalTemplateUris = [

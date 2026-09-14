@@ -167,7 +167,7 @@ check(interopLeaseMs > 0 && interopLeaseMs <= 4 * 60 * 1000, "compatibility clai
 check(interopJob?.claim_timestamp === interopClaim.claim?.timestamp, "coordinator metadata binds the exact compatibility claim timestamp", JSON.stringify(interopJob));
 
 const pythonExe = process.env.PYTHON || (process.platform === "win32" ? "python" : "python3");
-const coordinatorPath = resolve(ROOT, "stack/busy/busy.py");
+const coordinatorPath = resolve(ROOT, "stack/busy/python/busy.py");
 const standalone = spawnSync(pythonExe, [coordinatorPath, "--store", STORE, "snapshot", "--limit", "32"], { encoding: "utf8" });
 check(standalone.status === 0, "standalone coordinator reads compatibility claim", `${standalone.status}: ${standalone.stderr}`);
 let standaloneSnapshot = {};

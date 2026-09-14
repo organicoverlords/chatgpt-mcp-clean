@@ -1,11 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { resolve } from "node:path";
 import { isBootstrapSnapshot, readBootstrapSnapshot } from "./lib/bootstrap-snapshot.js";
+import { acknowledgeVisualProofSpoolBatch, isVisualProofSnapshot, readVisualProofSpoolBatch } from "./lib/visual-proof-spool.js";
 import { z } from "zod";
 import { BusyStore } from "./lib/busy-store.js";
 import { viewImage } from "./lib/image-viewer.js";
 import { ProcessManager } from "./lib/process-manager.js";
-import { registerFileTransferTools } from "./lib/file-transfer.js";
+import { FILE_TRANSFER_WIDGET_URI, createLibrarySpoolBridgeSession, librarySpoolBridgeEnabled, localFileTransferHandoff, prepareMarkedLocalFileTransfers, registerFileTransferTools } from "./lib/file-transfer.js";
 import { registerTemplateCompatibilityResources } from "./lib/template-compat.js";
 
 // The deployed ChatGPT connector surface is the process profile. Keep the broader
@@ -28,6 +29,66 @@ const activityTargetSchema = z.object({
 }).strict();
 const actionClassSchema = z.string().min(1).max(64).regex(activityToken);
 
+const processEnvironmentSchema = z.record(
+  z.string().min(1).max(128).regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+  z.string().max(65_536),
+).refine((value) => Object.keys(value).length <= 128, "env may contain at most 128 entries")
+  .refine((value) => Object.entries(value).reduce((sum, [key, item]) => sum + key.length + item.length, 0) <= 1_000_000, "env payload exceeds 1000000 characters");
+
+const startProcessCommonShape = {
+  working_directory: z.string().optional(),
+  wait_ms: z.number().int().min(0).max(10_000).optional(),
+  activity_target: activityTargetSchema.optional(),
+  action_class: actionClassSchema.optional(),
+};
+const legacyStartProcessCommandVisible = (process.env.MCP_START_PROCESS_LEGACY_COMMAND_VISIBLE || "1").trim() !== "0";
+const startProcessInputSchema = z.object({
+  executable: z.string().min(1).describe("Program name or absolute executable path; paired with args and optional stdin; no shell re-parsing.").optional(),
+  args: z.array(z.string()).max(512).describe("Argument vector passed directly to executable without shell re-parsing.").optional(),
+  stdin: z.string().max(1_000_000).describe("Optional standard input passed directly to executable.").optional(),
+  env: processEnvironmentSchema.describe("Child-process environment overrides for executable or script input.").optional(),
+  script: z.string().min(1).max(1_000_000).describe("Multiline source text for the selected runtime; transported through stdin.").optional(),
+  language: z.enum(["powershell", "python", "node", "bash"]).describe("Runtime for script.").optional(),
+  ...(legacyStartProcessCommandVisible ? {
+    command: z.string().min(1).describe("Legacy shell-command compatibility for shell composition.").optional(),
+  } : {}),
+  ...startProcessCommonShape,
+}).strict().superRefine((value, ctx) => {
+  const input = value as typeof value & { command?: string };
+  const legacy = input.command !== undefined;
+  const structured = input.executable !== undefined;
+  const scripted = input.script !== undefined;
+  if (Number(legacy) + Number(structured) + Number(scripted) !== 1) ctx.addIssue({ code: "custom", message: legacyStartProcessCommandVisible ? "provide exactly one of command, executable, or script" : "provide exactly one of executable or script" });
+  if (!structured && input.args !== undefined) ctx.addIssue({ code: "custom", path: ["args"], message: "args is only valid with executable" });
+  if (!structured && input.stdin !== undefined) ctx.addIssue({ code: "custom", path: ["stdin"], message: "stdin is only valid with executable" });
+  if (legacy && input.env !== undefined) ctx.addIssue({ code: "custom", path: ["env"], message: "env is only valid with executable or script" });
+  if (scripted !== (input.language !== undefined)) ctx.addIssue({ code: "custom", path: ["language"], message: "language is required exactly when script is provided" });
+});
+
+const repairAttemptSchema = z.object({
+  reason: z.string(),
+  command: z.string(),
+  stdout: z.string(),
+  stderr: z.string(),
+  exit_code: z.number().int(),
+  started_at: z.string(),
+  finished_at: z.string(),
+}).strict();
+
+const failureDiagnosticSchema = z.object({
+  kind: z.enum(["parser_error", "cli_usage", "spawn_error"]),
+  origin: z.enum(["powershell", "python", "node", "bash", "busy_cli", "stack_atlas_cli", "swarm_route_cli", "process"]),
+  boundary: z.enum(["source", "legacy_command", "argv_contract", "spawn"]),
+  code: z.string().max(80).regex(/^[A-Za-z][A-Za-z0-9_.-]{0,79}$/).optional(),
+  retry_without_change: z.literal(false),
+  retry_requires_change: z.literal(true),
+  suggested_action: z.enum(["fix_source", "use_structured_python_script", "use_structured_executable_args", "fix_argv_contract", "fix_executable_or_path", "inspect_process_error"]),
+  input_target: z.object({
+    mode: z.enum(["script", "executable"]),
+    language: z.enum(["powershell", "python", "node", "bash"]).optional(),
+  }).strict().optional(),
+}).strict();
+
 const outputPageSchema = z.object({
   stdout_start: z.number().int().nonnegative(),
   stdout_end: z.number().int().nonnegative(),
@@ -48,12 +109,26 @@ const snapshotFreshnessSchema = z.object({
   read_mode: z.literal("MATERIALIZED_ONLY"),
 }).strict();
 
+export const PROCESS_TOOL_CONTRACT_VERSION = "process-tools.v3" as const;
+
+export type ProcessServingIdentity = {
+  backend_generation?: string;
+  source_commit?: string;
+};
+
+const processServingIdentitySchema = z.object({
+  tool_contract_version: z.literal(PROCESS_TOOL_CONTRACT_VERSION),
+  backend_generation: z.string().min(1).optional(),
+  source_commit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+}).strict();
+
 // start_process may return either its immediate launch receipt or the same completed/read
 // shape as read_output. read_output also serves the bounded bootstrap/timeline snapshots.
 // Keep one strict object schema for that shared result family so future top-level fields
 // cannot silently bypass MCP structured-output validation.
 const processOutputSchema = z.object({
   caller_id: z.string(),
+  serving_identity: processServingIdentitySchema,
   mcp_status: z.enum(["OK", "STALE"]),
   process_state: z.enum(["RUNNING", "COMPLETED", "SNAPSHOT"]),
   elapsed_ms: z.number().nonnegative(),
@@ -65,6 +140,9 @@ const processOutputSchema = z.object({
   launching: z.literal(true).optional(),
   activity_target: activityTargetSchema.optional(),
   action_class: actionClassSchema.optional(),
+  execution_mode: z.enum(["powershell", "native", "explicit_shell", "native_sequence", "native_pipeline"]).optional(),
+  execution_reason: z.string().optional(),
+  repair_attempts: z.array(repairAttemptSchema).optional(),
   command: z.string().optional(),
   command_truncated: z.literal(true).optional(),
   submitted_command: z.string().optional(),
@@ -77,6 +155,7 @@ const processOutputSchema = z.object({
   started_at: z.string().optional(),
   finished_at: z.string().nullable().optional(),
   error: z.string().optional(),
+  error_code: z.string().max(80).regex(/^[A-Za-z][A-Za-z0-9_.-]{0,79}$/).optional(),
   stdout_truncated: z.literal(true).optional(),
   stderr_truncated: z.literal(true).optional(),
   stdout_dropped_from_start: z.number().int().nonnegative().optional(),
@@ -93,6 +172,7 @@ const processOutputSchema = z.object({
   stderr_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   evidence_completeness: z.enum(["complete", "bounded"]).optional(),
   execution_outcome: z.enum(["success", "nonzero_exit", "signaled", "error", "unknown"]).optional(),
+  failure_diagnostic: failureDiagnosticSchema.optional(),
   output_page: outputPageSchema.optional(),
   generated_at: z.string().optional(),
   freshness: snapshotFreshnessSchema.optional(),
@@ -102,6 +182,7 @@ const processOutputSchema = z.object({
 
 const killProcessOutputSchema = z.object({
   caller_id: z.string(),
+  serving_identity: processServingIdentitySchema,
   process_id: z.string(),
   pid: z.number().int().nonnegative(),
   killed: z.boolean(),
@@ -120,10 +201,11 @@ const busyStore = fullToolProfile ? new BusyStore((scope) => {
   return liveSessions.has(sessionId) || processManager.hasLiveScope(scope);
 }) : undefined;
 
-function resultData(value: unknown, id: string): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
+function resultData(value: unknown, id: string, servingIdentity?: Record<string, unknown>): Record<string, unknown> {
+  const base = value && typeof value === "object" && !Array.isArray(value)
     ? { ...(value as Record<string, unknown>), caller_id: id }
     : { value, caller_id: id };
+  return servingIdentity ? { ...base, serving_identity: servingIdentity } : base;
 }
 
 function textResult(value: unknown, id: string) {
@@ -131,10 +213,14 @@ function textResult(value: unknown, id: string) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
 }
 
-async function structuredTextResult(value: unknown, id: string) {
-  const data = resultData(value, id);
+async function structuredTextResult(value: unknown, id: string, servingIdentity: Record<string, unknown>) {
+  const data = resultData(value, id, servingIdentity);
+  const transfers = await prepareMarkedLocalFileTransfers(value);
+  const handoffs = await Promise.all(transfers.map((transfer) => localFileTransferHandoff(transfer)));
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(data) }],
+    content: [{ type: "text" as const, text: JSON.stringify(data) }, ...handoffs.flatMap((handoff) => handoff.content || [])],
+    // Keep the frozen process output contract unchanged. Native file references are MCP
+    // CallToolResult content, not new structured fields or app/widget metadata.
     structuredContent: data,
   };
 }
@@ -148,7 +234,12 @@ export function markSessionLive(sessionId: string, live: boolean): void {
   else liveSessions.delete(sessionId);
 }
 
-export function createServer(callerId: string): McpServer {
+export function createServer(callerId: string, runtimeIdentity: ProcessServingIdentity = {}): McpServer {
+  const servingIdentity = {
+    tool_contract_version: PROCESS_TOOL_CONTRACT_VERSION,
+    ...(runtimeIdentity.backend_generation ? { backend_generation: runtimeIdentity.backend_generation } : {}),
+    ...(runtimeIdentity.source_commit ? { source_commit: runtimeIdentity.source_commit } : {}),
+  };
   const server = new McpServer({ name: "shell-mcp", version: "0.1.0" });
   registerFileTransferTools(server, callerId);
   registerTemplateCompatibilityResources(server);
@@ -172,45 +263,95 @@ export function createServer(callerId: string): McpServer {
     "start_process",
     {
       title: "Run command",
-      description: "Start a noninteractive PowerShell process. wait_ms controls how long the call may wait for completion before returning a process_id; the default is 750 ms and the supported range is 0 to 10 seconds.",
+      description: legacyStartProcessCommandVisible
+        ? "Execute a local process. Input forms: executable+args with optional stdin/env, script+language with optional env for PowerShell/Python/Node/Bash source, or legacy command for shell composition. Structured source is transported through stdin. wait_ms defaults to 750 ms and is bounded to 0..10000 ms."
+        : "Execute a local process. Input forms: executable+args with optional stdin/env, or script+language with optional env for PowerShell/Python/Node/Bash source. Structured source is transported through stdin. wait_ms defaults to 750 ms and is bounded to 0..10000 ms.",
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
       _meta: {
         "openai/toolInvocation/invoking": "Running command…",
         "openai/toolInvocation/invoked": "Command returned",
       },
-      inputSchema: z.object({
-        command: z.string().min(1),
-        working_directory: z.string().optional(),
-        wait_ms: z.number().int().min(0).max(10_000).optional(),
-        activity_target: activityTargetSchema.optional(),
-        action_class: actionClassSchema.optional(),
-      }),
+      inputSchema: startProcessInputSchema,
       outputSchema: processOutputSchema,
     },
-    async ({ command, working_directory, wait_ms, activity_target, action_class }) => structuredTextResult(await processManager.startWithWait(command, working_directory, callerId, wait_ms ?? 750, activity_target, action_class), callerId),
+    async (input) => {
+      const typedInput = input as typeof input & { command?: string };
+      const { working_directory, wait_ms, activity_target, action_class } = typedInput;
+      const value = typedInput.command !== undefined
+        ? await processManager.startWithWait(typedInput.command, working_directory, callerId, wait_ms ?? 750, activity_target, action_class)
+        : typedInput.executable !== undefined
+          ? await processManager.startStructuredWithWait(typedInput.executable, typedInput.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, typedInput.stdin, typedInput.env)
+          : await processManager.startScriptWithWait(typedInput.language!, typedInput.script!, working_directory, callerId, wait_ms ?? 750, activity_target, action_class, typedInput.env);
+      return structuredTextResult(value, callerId, servingIdentity);
+    },
   );
 
   server.registerTool(
     "read_output",
     {
       title: "Check command",
-      description: "Read a bounded tail of accumulated stdout and stderr for a process_id. wait_ms optionally sets the maximum wait for output or process exit; 0 is nonblocking. An unchanged timed wait returns no_change=true. elapsed_ms is process age. Each stream is limited to 32,000 characters.",
+      description: "Read process stdout/stderr or a named bootstrap snapshot. Returns structured data only; it never mounts an app/widget template. wait_ms may wait up to 10000 ms for output or exit, and each stream is bounded to 32000 characters.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-      _meta: {
-        "openai/toolInvocation/invoking": "Checking command…",
-        "openai/toolInvocation/invoked": "Command checked",
-      },
+      _meta: { "openai/toolInvocation/invoking": "Checking command\u2026", "openai/toolInvocation/invoked": "Command checked" },
       inputSchema: z.object({
         process_id: z.string().min(1),
-        max_chars: z.number().int().min(1).max(32_000).optional(),
+        max_chars: z.number().int().optional(),
         wait_ms: z.number().int().min(0).max(10_000).optional(),
       }),
       outputSchema: processOutputSchema,
     },
-    async ({ process_id, max_chars, wait_ms }) => structuredTextResult(isBootstrapSnapshot(process_id)
-      ? await readBootstrapSnapshot(max_chars ?? 32_000, process_id)
-      : await processManager.readOutput(process_id, max_chars, wait_ms), callerId),
+    async ({ process_id, max_chars, wait_ms }) => {
+      const boundedMaxChars = Math.max(1, Math.min(max_chars ?? 32_000, 32_000));
+      if (isVisualProofSnapshot(process_id)) {
+        if (librarySpoolBridgeEnabled()) {
+          const bridge = createLibrarySpoolBridgeSession();
+          const bridgeLine = `VISUAL_PROOF_BRIDGE=${JSON.stringify(bridge)}\n`;
+          return {
+            ...(await structuredTextResult({
+              mcp_status: "OK", process_state: "SNAPSHOT", elapsed_ms: 0, next_action: "STOP_READING",
+              process_id: "visual-proof", running: true, stdout: bridgeLine, stderr: "", snapshot_alias: true,
+            }, callerId, servingIdentity)),
+            // Keep the bridge coordinates model-visible for stale hosts that cannot mount the
+            // dedicated action. The same session remains in _meta for hosts that can mount it.
+            _meta: { library_spool_bridge: bridge },
+          };
+        }
+        const batch = await readVisualProofSpoolBatch(boundedMaxChars);
+        const result = await structuredTextResult(batch.value, callerId, servingIdentity);
+        await acknowledgeVisualProofSpoolBatch(batch.pending);
+        return result;
+      }
+      return structuredTextResult(isBootstrapSnapshot(process_id)
+        ? await readBootstrapSnapshot(boundedMaxChars, process_id)
+        : await processManager.readOutput(process_id, boundedMaxChars, wait_ms), callerId, servingIdentity);
+    },
   );
+
+  if (librarySpoolBridgeEnabled()) {
+    server.registerTool(
+      "mount_visual_proof_bridge",
+      {
+        title: "Open visual proof bridge",
+        description: "Mount the one persistent visual-proof bridge. Call once; ordinary command reads remain widget-free.",
+        annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+        _meta: {
+          ui: { resourceUri: FILE_TRANSFER_WIDGET_URI, visibility: ["model", "app"] },
+          "openai/outputTemplate": FILE_TRANSFER_WIDGET_URI,
+          "openai/toolInvocation/invoking": "Opening visual proof bridge.",
+          "openai/toolInvocation/invoked": "Visual proof bridge ready",
+        },
+        inputSchema: z.object({}),
+        outputSchema: processOutputSchema,
+      },
+      async () => ({
+        ...(await structuredTextResult({
+          mcp_status: "OK", process_state: "SNAPSHOT", elapsed_ms: 0, next_action: "STOP_READING",
+          process_id: "visual-proof", running: true, stdout: "", stderr: "", no_change: true, snapshot_alias: true,
+        }, callerId, servingIdentity)),
+        _meta: { library_spool_bridge: createLibrarySpoolBridgeSession() },
+      }),
+    );
+  }
 
   server.registerTool(
     "kill_process",
@@ -225,7 +366,7 @@ export function createServer(callerId: string): McpServer {
       inputSchema: z.object({ process_id: z.string().min(1) }),
       outputSchema: killProcessOutputSchema,
     },
-    async ({ process_id }) => structuredTextResult(await processManager.kill(process_id), callerId),
+    async ({ process_id }) => structuredTextResult(await processManager.kill(process_id), callerId, servingIdentity),
   );
 
   if (fullToolProfile) {

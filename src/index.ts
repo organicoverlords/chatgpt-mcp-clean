@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
+import { isIP } from "node:net";
 import { resolve } from "node:path";
 import express, { type Request, type Response } from "express";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
@@ -14,8 +15,7 @@ import { observeSocket, sessionFingerprint, setTelemetrySink, withTelemetryConte
 import { startStallWatchdog } from "./lib/stall-watchdog.js";
 import { createResponseByteCounter } from "./lib/response-bytes.js";
 import { createServer, processRuntimeStatus } from "./server.js";
-import { registerOptionalVisualProofTools } from "./lib/visual-proof-registration.js";
-import { serveLocalFileTransfer } from "./lib/file-transfer.js";
+import { serveLibrarySpoolBridgeAck, serveLibrarySpoolBridgeNext, serveLocalFileTransfer } from "./lib/file-transfer.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "127.0.0.1";
@@ -86,6 +86,27 @@ const resource = publicUrl("mcp");
 const oauth = new LocalOAuthProvider(resource, OWNER, STORE);
 const bearer = requireBearerAuth({ verifier: oauth, requiredScopes: ["mcp"], resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resource) });
 
+function isPrivateOrLocalClientAddress(raw: string | undefined): boolean {
+  let address = (raw || "").trim().toLowerCase();
+  if (!address) return false;
+  if (address.startsWith("::ffff:")) address = address.slice(7);
+  if (address === "::1") return true;
+  const version = isIP(address);
+  if (version === 4) {
+    const parts = address.split(".").map(Number);
+    if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+    const [a, b] = parts;
+    return a === 10
+      || a === 127
+      || (a === 169 && b === 254)
+      || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 168)
+      || (a === 100 && b >= 64 && b <= 127);
+  }
+  if (version === 6) return address.startsWith("fc") || address.startsWith("fd") || /^fe[89ab]/.test(address);
+  return false;
+}
+
 const transportLogPath = resolve(process.env.MCP_TRANSPORT_LOG_PATH || ".state/transport.jsonl");
 const transportLogWriter = new BoundedJsonlWriter(transportLogPath, {
   onError: (error) => console.error("transport telemetry write failed:", error.message),
@@ -114,8 +135,10 @@ function jsonError(res: Response, status: number, message: string): void {
 
 async function handleStateless(req: Request, res: Response, body: unknown): Promise<void> {
   const requestCallerId = callerId(req);
-  const server: McpServer = createServer(requestCallerId);
-  registerOptionalVisualProofTools(server, requestCallerId);
+  const server: McpServer = createServer(requestCallerId, {
+    ...(backendGeneration ? { backend_generation: backendGeneration } : {}),
+    ...(runtimeIdentity.source_commit ? { source_commit: runtimeIdentity.source_commit } : {}),
+  });
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
@@ -216,9 +239,16 @@ app.use("/authorize", (req, res, next) => {
       res.status(403).send("Owner authorization required");
       return;
     }
-  } else if (authorizationHost && host !== authorizationHost) {
-    res.status(403).send("Owner authorization required");
-    return;
+  } else {
+    const directLocalAuthorizationHosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, frontDoorHost]);
+    const directLocal = directLocalAuthorizationHosts.has(host) && isPrivateOrLocalClientAddress(req.ip);
+    const forwardedPrivate = Boolean(req.header("x-forwarded-for"))
+      && authorizationHost === host
+      && isPrivateOrLocalClientAddress(req.ip);
+    if (!directLocal && !forwardedPrivate) {
+      res.status(403).send("Owner authorization required");
+      return;
+    }
   }
   if (req.method === "GET") {
     const clientId = typeof req.query.client_id === "string" ? req.query.client_id : "";
@@ -273,6 +303,16 @@ app.get(fileTransferPath, (req, res) => { void serveLocalFileTransfer(req, res).
   console.error("file transfer failed:", error instanceof Error ? error.message : String(error));
   if (!res.headersSent) res.status(500).send("File transfer failed");
   else res.destroy();
+}); });
+const librarySpoolNextPath = `${publicBasePath}/visual-proof/library-bridge/next` || "/visual-proof/library-bridge/next";
+const librarySpoolAckPath = `${publicBasePath}/visual-proof/library-bridge/ack` || "/visual-proof/library-bridge/ack";
+app.get(librarySpoolNextPath, (req, res) => { void serveLibrarySpoolBridgeNext(req, res).catch((error) => {
+  console.error("library spool bridge next failed:", error instanceof Error ? error.message : String(error));
+  if (!res.headersSent) res.status(500).send("Library spool bridge failed"); else res.destroy();
+}); });
+app.post(librarySpoolAckPath, (req, res) => { void serveLibrarySpoolBridgeAck(req, res).catch((error) => {
+  console.error("library spool bridge ack failed:", error instanceof Error ? error.message : String(error));
+  if (!res.headersSent) res.status(500).send("Library spool bridge failed"); else res.destroy();
 }); });
 app.post("/mcp", bearer, handleMcp);
 app.get("/mcp", bearer, (_req, res) => res.status(405).set("Allow", "POST").send("Method not allowed."));

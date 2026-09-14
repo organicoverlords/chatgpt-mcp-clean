@@ -115,6 +115,27 @@
         "caller_id": {
           "type": "string"
         },
+        "serving_identity": {
+          "type": "object",
+          "properties": {
+            "tool_contract_version": {
+              "type": "string",
+              "const": "process-tools.v3"
+            },
+            "backend_generation": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          },
+          "required": [
+            "tool_contract_version"
+          ],
+          "additionalProperties": false
+        },
         "process_id": {
           "type": "string"
         },
@@ -169,6 +190,7 @@
       },
       "required": [
         "caller_id",
+        "serving_identity",
         "process_id",
         "pid",
         "killed"
@@ -178,7 +200,7 @@
   },
   {
     "name": "read_output",
-    "description": "Read a bounded tail of accumulated stdout and stderr for a process_id. wait_ms optionally sets the maximum wait for output or process exit; 0 is nonblocking. An unchanged timed wait returns no_change=true. elapsed_ms is process age. Each stream is limited to 32,000 characters.",
+    "description": "Read process stdout/stderr or a named bootstrap snapshot. Returns structured data only; it never mounts an app/widget template. wait_ms may wait up to 10000 ms for output or exit, and each stream is bounded to 32000 characters.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -189,8 +211,8 @@
         },
         "max_chars": {
           "type": "integer",
-          "minimum": 1,
-          "maximum": 32000
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
         },
         "wait_ms": {
           "type": "integer",
@@ -209,6 +231,27 @@
       "properties": {
         "caller_id": {
           "type": "string"
+        },
+        "serving_identity": {
+          "type": "object",
+          "properties": {
+            "tool_contract_version": {
+              "type": "string",
+              "const": "process-tools.v3"
+            },
+            "backend_generation": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          },
+          "required": [
+            "tool_contract_version"
+          ],
+          "additionalProperties": false
         },
         "mcp_status": {
           "type": "string",
@@ -290,6 +333,60 @@
           "maxLength": 64,
           "pattern": "^[A-Za-z0-9._/:_-]+$"
         },
+        "execution_mode": {
+          "type": "string",
+          "enum": [
+            "powershell",
+            "native",
+            "explicit_shell",
+            "native_sequence",
+            "native_pipeline"
+          ]
+        },
+        "execution_reason": {
+          "type": "string"
+        },
+        "repair_attempts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "stdout": {
+                "type": "string"
+              },
+              "stderr": {
+                "type": "string"
+              },
+              "exit_code": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "started_at": {
+                "type": "string"
+              },
+              "finished_at": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "command",
+              "stdout",
+              "stderr",
+              "exit_code",
+              "started_at",
+              "finished_at"
+            ],
+            "additionalProperties": false
+          }
+        },
         "command": {
           "type": "string"
         },
@@ -351,6 +448,11 @@
         },
         "error": {
           "type": "string"
+        },
+        "error_code": {
+          "type": "string",
+          "maxLength": 80,
+          "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,79}$"
         },
         "stdout_truncated": {
           "type": "boolean",
@@ -431,6 +533,99 @@
             "error",
             "unknown"
           ]
+        },
+        "failure_diagnostic": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "parser_error",
+                "cli_usage",
+                "spawn_error"
+              ]
+            },
+            "origin": {
+              "type": "string",
+              "enum": [
+                "powershell",
+                "python",
+                "node",
+                "bash",
+                "busy_cli",
+                "stack_atlas_cli",
+                "swarm_route_cli",
+                "process"
+              ]
+            },
+            "boundary": {
+              "type": "string",
+              "enum": [
+                "source",
+                "legacy_command",
+                "argv_contract",
+                "spawn"
+              ]
+            },
+            "code": {
+              "type": "string",
+              "maxLength": 80,
+              "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,79}$"
+            },
+            "retry_without_change": {
+              "type": "boolean",
+              "const": false
+            },
+            "retry_requires_change": {
+              "type": "boolean",
+              "const": true
+            },
+            "suggested_action": {
+              "type": "string",
+              "enum": [
+                "fix_source",
+                "use_structured_python_script",
+                "use_structured_executable_args",
+                "fix_argv_contract",
+                "fix_executable_or_path",
+                "inspect_process_error"
+              ]
+            },
+            "input_target": {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "script",
+                    "executable"
+                  ]
+                },
+                "language": {
+                  "type": "string",
+                  "enum": [
+                    "powershell",
+                    "python",
+                    "node",
+                    "bash"
+                  ]
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "kind",
+            "origin",
+            "boundary",
+            "retry_without_change",
+            "retry_requires_change",
+            "suggested_action"
+          ],
+          "additionalProperties": false
         },
         "output_page": {
           "type": "object",
@@ -541,6 +736,7 @@
       },
       "required": [
         "caller_id",
+        "serving_identity",
         "mcp_status",
         "process_state",
         "elapsed_ms",
@@ -553,14 +749,63 @@
   },
   {
     "name": "start_process",
-    "description": "Start a noninteractive PowerShell process. wait_ms controls how long the call may wait for completion before returning a process_id; the default is 750 ms and the supported range is 0 to 10 seconds.",
+    "description": "Execute a local process. Input forms: executable+args with optional stdin/env, script+language with optional env for PowerShell/Python/Node/Bash source, or legacy command for shell composition. Structured source is transported through stdin. wait_ms defaults to 750 ms and is bounded to 0..10000 ms.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
       "properties": {
+        "executable": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Program name or absolute executable path; paired with args and optional stdin; no shell re-parsing."
+        },
+        "args": {
+          "maxItems": 512,
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Argument vector passed directly to executable without shell re-parsing."
+        },
+        "stdin": {
+          "type": "string",
+          "maxLength": 1000000,
+          "description": "Optional standard input passed directly to executable."
+        },
+        "env": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 65536
+          },
+          "description": "Child-process environment overrides for executable or script input."
+        },
+        "script": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000000,
+          "description": "Multiline source text for the selected runtime; transported through stdin."
+        },
+        "language": {
+          "type": "string",
+          "enum": [
+            "powershell",
+            "python",
+            "node",
+            "bash"
+          ],
+          "description": "Runtime for script."
+        },
         "command": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "Legacy shell-command compatibility for shell composition."
         },
         "working_directory": {
           "type": "string"
@@ -607,9 +852,6 @@
           "pattern": "^[A-Za-z0-9._/:_-]+$"
         }
       },
-      "required": [
-        "command"
-      ],
       "additionalProperties": false
     },
     "outputSchema": {
@@ -618,6 +860,27 @@
       "properties": {
         "caller_id": {
           "type": "string"
+        },
+        "serving_identity": {
+          "type": "object",
+          "properties": {
+            "tool_contract_version": {
+              "type": "string",
+              "const": "process-tools.v3"
+            },
+            "backend_generation": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          },
+          "required": [
+            "tool_contract_version"
+          ],
+          "additionalProperties": false
         },
         "mcp_status": {
           "type": "string",
@@ -699,6 +962,60 @@
           "maxLength": 64,
           "pattern": "^[A-Za-z0-9._/:_-]+$"
         },
+        "execution_mode": {
+          "type": "string",
+          "enum": [
+            "powershell",
+            "native",
+            "explicit_shell",
+            "native_sequence",
+            "native_pipeline"
+          ]
+        },
+        "execution_reason": {
+          "type": "string"
+        },
+        "repair_attempts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "stdout": {
+                "type": "string"
+              },
+              "stderr": {
+                "type": "string"
+              },
+              "exit_code": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "started_at": {
+                "type": "string"
+              },
+              "finished_at": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "command",
+              "stdout",
+              "stderr",
+              "exit_code",
+              "started_at",
+              "finished_at"
+            ],
+            "additionalProperties": false
+          }
+        },
         "command": {
           "type": "string"
         },
@@ -760,6 +1077,11 @@
         },
         "error": {
           "type": "string"
+        },
+        "error_code": {
+          "type": "string",
+          "maxLength": 80,
+          "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,79}$"
         },
         "stdout_truncated": {
           "type": "boolean",
@@ -840,6 +1162,99 @@
             "error",
             "unknown"
           ]
+        },
+        "failure_diagnostic": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "parser_error",
+                "cli_usage",
+                "spawn_error"
+              ]
+            },
+            "origin": {
+              "type": "string",
+              "enum": [
+                "powershell",
+                "python",
+                "node",
+                "bash",
+                "busy_cli",
+                "stack_atlas_cli",
+                "swarm_route_cli",
+                "process"
+              ]
+            },
+            "boundary": {
+              "type": "string",
+              "enum": [
+                "source",
+                "legacy_command",
+                "argv_contract",
+                "spawn"
+              ]
+            },
+            "code": {
+              "type": "string",
+              "maxLength": 80,
+              "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,79}$"
+            },
+            "retry_without_change": {
+              "type": "boolean",
+              "const": false
+            },
+            "retry_requires_change": {
+              "type": "boolean",
+              "const": true
+            },
+            "suggested_action": {
+              "type": "string",
+              "enum": [
+                "fix_source",
+                "use_structured_python_script",
+                "use_structured_executable_args",
+                "fix_argv_contract",
+                "fix_executable_or_path",
+                "inspect_process_error"
+              ]
+            },
+            "input_target": {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "script",
+                    "executable"
+                  ]
+                },
+                "language": {
+                  "type": "string",
+                  "enum": [
+                    "powershell",
+                    "python",
+                    "node",
+                    "bash"
+                  ]
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "kind",
+            "origin",
+            "boundary",
+            "retry_without_change",
+            "retry_requires_change",
+            "suggested_action"
+          ],
+          "additionalProperties": false
         },
         "output_page": {
           "type": "object",
@@ -950,6 +1365,7 @@
       },
       "required": [
         "caller_id",
+        "serving_identity",
         "mcp_status",
         "process_state",
         "elapsed_ms",
@@ -962,7 +1378,7 @@
   },
   {
     "name": "upload_local_file",
-    "description": "Return one exact local file as a native MCP file resource and, for supported non-ZIP files, persist the same verified bytes into ChatGPT Library through the dedicated HTTPS file-transfer widget. ZIP files remain exact resource-only transfers. start_process/read_output never mount this widget.",
+    "description": "Return one exact local file as a native MCP file resource for ChatGPT to materialize as a native conversation file. This tool never mounts an app/widget or invokes the Library upload API. Transfers preserve exact bytes and SHA-256; images remain compact lazy resources and ZIP review members remain exact resource links.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
