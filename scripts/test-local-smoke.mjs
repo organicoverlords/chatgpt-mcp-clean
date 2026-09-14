@@ -63,8 +63,6 @@ const server = spawn(process.execPath, [resolve("dist/index.js")], {
     MCP_FORCE_CONNECTION_CLOSE: "0",
     MCP_FRONT_DOOR_HOST: "127.0.0.1:3003",
     MCP_TOOL_PROFILE: "full",
-    MCP_VISUAL_PROOF_UI: "0",
-    MCP_VISUAL_PROOF_REVIEW: "0",
     MCP_PUBLIC_ORIGIN: publicOrigin,
     MCP_OWNER_AUTH_ORIGIN: "",
     MCP_OWNER_AUTH_MODE: ownerAuthMode,
