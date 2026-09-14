@@ -31,10 +31,20 @@ if ($config) {
     $profile = [string]$config.plan_only_profile
     Add-Check 'mcp-dist' (Test-Path -LiteralPath (Join-Path $mcpRoot 'dist\index.js') -PathType Leaf) $mcpRoot
     $busyCmd = Join-Path $busyRoot 'busy-python.cmd'
-    if (Test-Path -LiteralPath $busyCmd -PathType Leaf) {
-        $contractOut = @(& $busyCmd contract 2>&1)
-        Add-Check 'busy-contract' ($LASTEXITCODE -eq 0) ($contractOut -join ' ')
-    } else { Add-Check 'busy-contract' $false $busyCmd }
+    $busyContractPath = Join-Path $busyRoot 'coordinator-contract.json'
+    if ((Test-Path -LiteralPath $busyCmd -PathType Leaf) -and (Test-Path -LiteralPath $busyContractPath -PathType Leaf)) {
+        try {
+            $busyContract = Get-Content -LiteralPath $busyContractPath -Raw | ConvertFrom-Json
+            $requiredBusyCommands = @($busyContract.required_commands | ForEach-Object { [string]$_ } | Sort-Object)
+            $coreBusyCommands = @($busyContract.core_required_commands | ForEach-Object { [string]$_ } | Sort-Object)
+            $busyHelp = @(& $busyCmd --help 2>&1)
+            $busyHelpOk = $LASTEXITCODE -eq 0
+            $busyHelpText = $busyHelp -join "`n"
+            $missingBusyCommands = @($requiredBusyCommands | Where-Object { $busyHelpText -notmatch ('(?<![A-Za-z0-9_-])' + [regex]::Escape($_) + '(?![A-Za-z0-9_-])') })
+            $busyOk = ([string]$busyContract.authority -eq 'standalone_busy_coordinator') -and (($requiredBusyCommands -join "`n") -eq ($coreBusyCommands -join "`n")) -and $busyHelpOk -and ($missingBusyCommands.Count -eq 0)
+            Add-Check 'busy-contract' $busyOk ("version={0} commands={1} missing={2}" -f $busyContract.contract_version,($requiredBusyCommands -join ','),($missingBusyCommands -join ','))
+        } catch { Add-Check 'busy-contract' $false $_.Exception.Message }
+    } else { Add-Check 'busy-contract' $false ("cmd={0}; contract={1}" -f $busyCmd,$busyContractPath) }
     Add-Check 'rules' ((Test-Path -LiteralPath (Join-Path $rulesRoot 'RULES.md') -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $rulesRoot 'AGENTS.md') -PathType Leaf)) $rulesRoot
     Add-Check 'topology' ([string]$config.topology -eq 'local-home-direct') ([string]$config.topology)
     Add-Check 'five-tool-profile' (([string]$config.tool_profile -eq 'process') -and ([int]$config.tool_count -eq 5)) ("profile={0} count={1}" -f $config.tool_profile,$config.tool_count)

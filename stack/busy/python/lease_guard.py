@@ -56,27 +56,17 @@ def source_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[1]
 
 
-def core_command(implementation: str, store: pathlib.Path | None) -> list[str]:
+def core_command(store: pathlib.Path | None) -> list[str]:
     root = source_root()
-    if implementation == "python":
-        command = [sys.executable, str(root / "python" / "busy.py")]
-    else:
-        candidates = (
-            root / "rust" / "busy-coordinator.exe",
-            root / "rust" / "target" / "release" / "busy-coordinator.exe",
-        )
-        binary = next((path for path in candidates if path.exists()), None)
-        if binary is None:
-            raise RuntimeError("rust BusyCoordinator binary is not installed or built")
-        command = [str(binary)]
+    command = [sys.executable, str(root / "python" / "busy.py")]
     if store is not None:
         command.extend(["--store", str(store)])
     return command
 
 
-def invoke_core(implementation: str, store: pathlib.Path | None, *args: str) -> dict:
+def invoke_core(store: pathlib.Path | None, *args: str) -> dict:
     cp = subprocess.run(
-        [*core_command(implementation, store), *args],
+        [*core_command(store), *args],
         capture_output=True,
         text=True,
         check=False,
@@ -268,7 +258,6 @@ def build_outer_parser() -> argparse.ArgumentParser:
             "and ordinary lease expiry clears the stale claim."
         ),
     )
-    parser.add_argument("--impl", choices=("python", "rust"), default="python")
     parser.add_argument("--store", type=pathlib.Path)
     parser.add_argument("--lease-seconds", type=int, default=DEFAULT_LEASE_SECONDS)
     parser.add_argument("--heartbeat-seconds", type=float)
@@ -306,7 +295,6 @@ def run_guarded(args: argparse.Namespace, command: list[str]) -> int:
     lease = str(args.lease_seconds)
 
     claim = invoke_core(
-        args.impl,
         args.store,
         "claim",
         owner,
@@ -342,7 +330,6 @@ def run_guarded(args: argparse.Namespace, command: list[str]) -> int:
             if now >= next_heartbeat:
                 try:
                     heartbeat = invoke_core(
-                        args.impl,
                         args.store,
                         "heartbeat",
                         owner,
@@ -395,7 +382,6 @@ def run_guarded(args: argparse.Namespace, command: list[str]) -> int:
     finally:
         try:
             release = invoke_core(
-                args.impl,
                 args.store,
                 "release",
                 owner,

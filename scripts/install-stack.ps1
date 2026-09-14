@@ -186,8 +186,22 @@ $busyParent = Split-Path -Parent ([IO.Path]::GetFullPath($BusyRoot))
 if (-not (Test-Path -LiteralPath $busyParent)) { New-Item -ItemType Directory -Force -Path $busyParent | Out-Null }
 $preparedBusy = "$BusyRoot.next-$([Guid]::NewGuid().ToString('N'))"
 Copy-Item -LiteralPath $busySource -Destination $preparedBusy -Recurse -Force
-$busyContractOut = @(& (Join-Path $preparedBusy 'busy-python.cmd') contract 2>&1)
-if ($LASTEXITCODE -ne 0) { Remove-Item -LiteralPath $preparedBusy -Recurse -Force -ErrorAction SilentlyContinue; throw "BusyCoordinator contract check failed: $($busyContractOut -join ' ')" }
+try {
+    $busyContract = Get-Content -LiteralPath (Join-Path $preparedBusy 'coordinator-contract.json') -Raw | ConvertFrom-Json
+    if ([string]$busyContract.authority -ne 'standalone_busy_coordinator') { throw 'unexpected BusyCoordinator authority' }
+    $requiredBusyCommands = @($busyContract.required_commands | ForEach-Object { [string]$_ } | Sort-Object)
+    $coreBusyCommands = @($busyContract.core_required_commands | ForEach-Object { [string]$_ } | Sort-Object)
+    if (($requiredBusyCommands -join "`n") -ne ($coreBusyCommands -join "`n")) { throw 'BusyCoordinator required/core command surfaces differ' }
+    $busyHelp = @(& (Join-Path $preparedBusy 'busy-python.cmd') --help 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw "BusyCoordinator CLI help failed: $($busyHelp -join ' ')" }
+    $busyHelpText = $busyHelp -join "`n"
+    foreach ($command in $requiredBusyCommands) {
+        if ($busyHelpText -notmatch ('(?<![A-Za-z0-9_-])' + [regex]::Escape($command) + '(?![A-Za-z0-9_-])')) { throw "BusyCoordinator CLI is missing required command: $command" }
+    }
+} catch {
+    Remove-Item -LiteralPath $preparedBusy -Recurse -Force -ErrorAction SilentlyContinue
+    throw "BusyCoordinator contract check failed: $($_.Exception.Message)"
+}
 Swap-Directory $preparedBusy $BusyRoot
 
 $profilesRoot = Join-Path $InstallRoot 'profiles'

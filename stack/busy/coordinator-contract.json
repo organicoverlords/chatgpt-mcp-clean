@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "contract_version": 6,
+  "contract_version": 10,
   "authority": "standalone_busy_coordinator",
   "canonical_store": {
     "windows": "%LOCALAPPDATA%\\\\ChatGPTMcpClean\\\\.state\\\\busy-claims.json",
@@ -25,10 +25,7 @@
     "claim",
     "heartbeat",
     "release",
-    "inspect",
-    "contract",
-    "log",
-    "audit"
+    "inspect"
   ],
   "scope_metadata_states": [
     "active"
@@ -44,26 +41,28 @@
   "limits": {
     "max_operations": 512,
     "max_snapshot_items": 32,
-    "max_audit_detail_chars": 2048,
-    "default_audit_max_bytes": 5242880,
-    "default_audit_backups": 3,
-    "max_audit_checkpoint_chars": 1024,
-    "max_audit_expired_items": 32,
-    "max_sweep_temp_items": 32
+    "max_sweep_temp_items": 32,
+    "default_lease_seconds": 240,
+    "max_lease_seconds": 240
   },
   "invariants": [
     "one canonical claims store",
     "one claim per exact scope",
+    "BUSY authority is exact-scope collision avoidance only; work lifecycle, progress, scheduling, recovery orchestration, workspace cleanup, branch/worktree cleanup, worker reports, and issue state are outside coordinator authority",
+    "claim and heartbeat lease horizons are capped at 240 seconds from the accepted operation",
+    "heartbeat absence expires collision ownership only and does not imply work completion, abandonment, or cleanup eligibility",
+    "lease expiry removes only the matching BUSY claim and BUSY scope lease metadata; it never deletes or rewrites workspaces, worktrees, branches, reports, issues, or other continuation artifacts",
+    "claims without current lease metadata are normalized to a bounded lease no later than claim timestamp plus 240 seconds",
+    "legacy-only claims are not retained after coordinator normalization",
+    "new and renewed claim owners identify an approved harness plus task/session suffix; explicit compatibility recovery may address legacy owner strings",
     "active scope metadata has a matching claim and owner",
     "unowned scope metadata is not retained in the BUSY store",
     "queue selection, priority, blocked, completed, and handoff scheduling are outside coordinator authority",
     "operation replay history stays bounded",
-    "legacy-only claims remain distinct from coordinator-managed ownership metadata",
-    "python and rust cores expose the same required ownership commands",
-    "installed wrappers expose the same contract and observability commands",
     "runtime may add compatible metadata but may not omit required commands",
-    "new and renewed claim owners identify an approved harness plus task/session suffix; cleanup/recovery may address legacy owner strings",
     "sweep removes only exact-store temp files at least 60 seconds old whose encoded writer PID is positively dead; fresh, live, malformed, unknown-writer, and unrelated temp files are preserved",
-    "new path-like relative claims are rejected; filesystem scopes must be absolute or namespaced logical identifiers such as <repo>:file:<path>"
+    "new path-like relative claims are rejected; filesystem scopes must be absolute or namespaced logical identifiers such as <repo>:file:<path>",
+    "known repository scope aliases normalize to one canonical exact-scope identity; owner-qualified and short forms cannot hold simultaneous claims",
+    "the installed Python wrapper exposes exactly the required ownership commands and does not add a second logging or workflow authority"
   ]
 }
