@@ -5,7 +5,7 @@ import { z } from "zod";
 import { BusyStore } from "./lib/busy-store.js";
 import { viewImage } from "./lib/image-viewer.js";
 import { ProcessManager } from "./lib/process-manager.js";
-import { localFileTransferHandoff, prepareMarkedLocalFileTransfer, registerFileTransferTools } from "./lib/file-transfer.js";
+import { localFileTransferHandoff, prepareMarkedLocalFileTransfers, registerFileTransferTools } from "./lib/file-transfer.js";
 import { registerTemplateCompatibilityResources } from "./lib/template-compat.js";
 
 // The deployed ChatGPT connector surface is the process profile. Keep the broader
@@ -195,10 +195,10 @@ function textResult(value: unknown, id: string) {
 
 async function structuredTextResult(value: unknown, id: string) {
   const data = resultData(value, id);
-  const transfer = await prepareMarkedLocalFileTransfer(value);
-  const handoff = transfer ? await localFileTransferHandoff(transfer) : null;
+  const transfers = await prepareMarkedLocalFileTransfers(value);
+  const handoffs = await Promise.all(transfers.map((transfer) => localFileTransferHandoff(transfer)));
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(data) }, ...(handoff?.content || [])],
+    content: [{ type: "text" as const, text: JSON.stringify(data) }, ...handoffs.flatMap((handoff) => handoff.content || [])],
     // Keep the frozen process output contract unchanged. Native file references are MCP
     // CallToolResult content, not new structured fields or app/widget metadata.
     structuredContent: data,

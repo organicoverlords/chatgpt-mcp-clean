@@ -202,19 +202,23 @@ export async function prepareLocalFileTransfer(path: string): Promise<LocalFileT
   return item;
 }
 
-export async function prepareMarkedLocalFileTransfer(value: unknown): Promise<LocalFileTransfer | null> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+export async function prepareMarkedLocalFileTransfers(value: unknown): Promise<LocalFileTransfer[]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
   const stdout = (value as Record<string, unknown>).stdout;
-  if (typeof stdout !== "string") return null;
-  const marker = stdout
+  if (typeof stdout !== "string") return [];
+  const paths = stdout
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .reverse()
-    .find((line) => line.startsWith(FILE_TRANSFER_MARKER_PREFIX));
-  if (!marker) return null;
-  const path = marker.slice(FILE_TRANSFER_MARKER_PREFIX.length).trim();
-  if (!path) throw new Error("CHATGPT_LIBRARY_UPLOAD marker must name an absolute local file path");
-  return prepareLocalFileTransfer(path);
+    .filter((line) => line.startsWith(FILE_TRANSFER_MARKER_PREFIX))
+    .map((line) => line.slice(FILE_TRANSFER_MARKER_PREFIX.length).trim())
+    .filter((path) => path.length > 0);
+  const uniquePaths = [...new Set(paths)];
+  return Promise.all(uniquePaths.map((path) => prepareLocalFileTransfer(path)));
+}
+
+export async function prepareMarkedLocalFileTransfer(value: unknown): Promise<LocalFileTransfer | null> {
+  const transfers = await prepareMarkedLocalFileTransfers(value);
+  return transfers.at(-1) || null;
 }
 
 

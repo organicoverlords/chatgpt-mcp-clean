@@ -11,7 +11,9 @@ process.env.MCP_PROCESS_RECEIPT_DIR = join(dir, "receipts");
 process.env.MCP_PUBLIC_ORIGIN = "https://mcp.example.test/";
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z7WQAAAAASUVORK5CYII=", "base64");
 const pngPath = join(dir, "proof.png");
+const pngPath2 = join(dir, "proof-2.png");
 await writeFile(pngPath, png);
+await writeFile(pngPath2, png);
 const sha256 = createHash("sha256").update(png).digest("hex");
 
 const { createServer } = await import("../dist/server.js");
@@ -65,9 +67,28 @@ try {
   assert.ok(readLink, "read_output must append the same native resource_link when the marker arrives asynchronously");
   const readResource = await client.readResource({ uri: readLink.uri });
   assert.equal(Buffer.from(readResource.contents[0].blob, "base64").compare(png), 0);
+
+  const batchedMarkers = `setTimeout(()=>process.stdout.write(${JSON.stringify(`CHATGPT_LIBRARY_UPLOAD=${pngPath}\nCHATGPT_LIBRARY_UPLOAD=${pngPath2}\n`)}),150)`;
+  const batchedStarted = await client.callTool({
+    name: "start_process",
+    arguments: { executable: process.execPath, args: ["-e", batchedMarkers], wait_ms: 0 },
+  });
+  const batchedProcessId = batchedStarted.structuredContent?.process_id;
+  assert.ok(batchedProcessId);
+  let batchedRead;
+  for (let i = 0; i < 20; i += 1) {
+    batchedRead = await client.callTool({ name: "read_output", arguments: { process_id: batchedProcessId, wait_ms: 250 } });
+    if (batchedRead.content.filter((entry) => entry.type === "resource_link").length === 2) break;
+  }
+  const batchedLinks = batchedRead?.content.filter((entry) => entry.type === "resource_link") || [];
+  assert.equal(batchedLinks.length, 2, "one read_output result must preserve all queued proof markers instead of dropping all but the last image");
+  for (const batchedLink of batchedLinks) {
+    const batchedResource = await client.readResource({ uri: batchedLink.uri });
+    assert.equal(Buffer.from(batchedResource.contents[0].blob, "base64").compare(png), 0);
+  }
 } finally {
   await client.close();
   await server.close();
 }
 
-console.log("PASS process_native_handoff cached_action=true widget=false schema_unchanged=true exact_resource=true start_same_turn=true read_async=true");
+console.log("PASS process_native_handoff cached_action=true widget=false schema_unchanged=true exact_resource=true start_same_turn=true read_async=true batched_read=true");
