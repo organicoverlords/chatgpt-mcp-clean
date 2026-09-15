@@ -14,6 +14,8 @@ param(
     [string]$CurrentTopologyPath = 'C:\Users\Lauri\Desktop\vault\04 Operating Contracts\mcp-current-topology.json',
     [switch]$CurrentPortFromTargetHost,
     [switch]$CreateTargetHost,
+    [switch]$RoutineScopedAdvance,
+    [string]$AuthorizationEvidence = '',
     [switch]$Plan
 )
 $ErrorActionPreference='Stop'
@@ -211,7 +213,15 @@ $candidate=Health $CandidatePort
 $rollback=Health $IndependentRollbackPort
 if($candidate.status -ne 'ok' -or [int]$candidate.port -ne $CandidatePort -or [string]$candidate.backend_generation -ne $CandidateGeneration){ throw 'candidate health/generation proof failed' }
 if($rollback.status -ne 'ok' -or [int]$rollback.port -ne $IndependentRollbackPort){ throw 'independent rollback health proof failed' }
-$gateText = & python $StackAtlasPath production-change-gate mcp --actor $Actor --busy-scope $BusyScope --explicit-user-authorization --independent-rollback-verified --offpath-proof-verified
+$gateArgs=@($StackAtlasPath,'production-change-gate','mcp_minimal_clone','--actor',$Actor,'--busy-scope',$BusyScope,'--independent-rollback-verified','--offpath-proof-verified')
+if($RoutineScopedAdvance){
+    $gateArgs += '--routine-scoped-advance'
+}elseif(-not [string]::IsNullOrWhiteSpace($AuthorizationEvidence)){
+    $gateArgs += @('--explicit-user-authorization','--authorization-evidence',$AuthorizationEvidence)
+}else{
+    throw 'production authorization mode required: use RoutineScopedAdvance for an established reversible scope or supply AuthorizationEvidence for a specific live mutation'
+}
+$gateText = & python @gateArgs
 if($LASTEXITCODE -ne 0){ throw 'production change gate execution failed' }
 $gate=$gateText | ConvertFrom-Json
 if($gate.verdict -ne 'PASS'){ throw ("production change gate blocked: " + (($gate.reasons) -join ',')) }
