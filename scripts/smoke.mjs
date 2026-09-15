@@ -13,11 +13,9 @@ const redirectUri = "https://chatgpt.com/connector/oauth/smoke";
 const resource = `${publicOrigin}/mcp`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const toolProfile = (process.env.MCP_TOOL_PROFILE || "process").trim().toLowerCase();
-const expectedLocalFileTool = (process.env.MCP_EXPECTED_LOCAL_FILE_TOOL_NAME || "upload_local_file").trim();
-if (!["upload_local_file", "read_local_file"].includes(expectedLocalFileTool)) throw new Error(`invalid MCP_EXPECTED_LOCAL_FILE_TOOL_NAME=${expectedLocalFileTool}`);
 const expectedTools = (toolProfile === "process"
-  ? ["download_chatgpt_file", "kill_process", "read_output", "start_process", expectedLocalFileTool]
-  : ["busy_claim", "busy_list", "busy_release", "download_chatgpt_file", "kill_process", "read_output", "start_process", expectedLocalFileTool, "view_image"]).sort();
+  ? ["download_chatgpt_file", "kill_process", "read_output", "start_process"]
+  : ["busy_claim", "busy_list", "busy_release", "download_chatgpt_file", "kill_process", "read_output", "start_process"]).sort();
 
 async function jsonFetch(url, options = {}) {
   const response = await fetch(url, options);

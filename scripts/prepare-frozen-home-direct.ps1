@@ -9,8 +9,6 @@ param(
     [string]$PublicOrigin = 'https://91-159-12-133.sslip.io',
     [string]$OAuthStoreRelative = 'home-direct-test\\oauth.json',
     [string]$ReceiptStoreRelative = 'shared-process-receipts',
-    [ValidateSet('upload_local_file','read_local_file')][string]$LocalFileToolName = 'upload_local_file',
-    [switch]$LibrarySpoolBridge,
     [string]$CurrentTopologyPath = 'C:\Users\Lauri\Desktop\vault\04 Operating Contracts\mcp-current-topology.json',
     [switch]$ExplicitUserAuthorization,
     [switch]$Plan
@@ -35,9 +33,7 @@ function Assert-Candidate([string]$Root,[string]$Commit){
 }
 $commit=$ExpectedCommit.ToLowerInvariant()
 $short=$commit.Substring(0,7)
-$librarySpoolBridgeValue=if($LibrarySpoolBridge){'1'}else{'0'}
-$toolContract=@('start_process','read_output','kill_process',$LocalFileToolName,'download_chatgpt_file')
-if($LibrarySpoolBridge){ $toolContract += 'mount_visual_proof_bridge' }
+$toolContract=@('start_process','read_output','kill_process','download_chatgpt_file')
 if(-not $TaskName){ $TaskName="McpV4FrozenStable${Port}-${short}" }
 if(-not $DeploymentRoot){ $DeploymentRoot=Join-Path $env:LOCALAPPDATA ("ChatGPTMcpFrozen\\{0}" -f $short) }
 $DeploymentRoot=[IO.Path]::GetFullPath($DeploymentRoot)
@@ -54,7 +50,7 @@ if(Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue){ Fail "c
 if(Test-Path -LiteralPath $DeploymentRoot){ Fail "deployment root already exists: $DeploymentRoot" }
 $planResult=[ordered]@{
     status='PLAN'; commit=$commit; source_root=$root; deployment_root=$DeploymentRoot; runtime_root=(Join-Path $DeploymentRoot 'runtime');
-    task_name=$TaskName; port=$Port; instance_id=$InstanceId; public_origin=$PublicOrigin; oauth_store_relative=$OAuthStoreRelative; receipt_store_relative=$ReceiptStoreRelative; local_file_tool_name=$LocalFileToolName; library_spool_bridge=[bool]$LibrarySpoolBridge;
+    task_name=$TaskName; port=$Port; instance_id=$InstanceId; public_origin=$PublicOrigin; oauth_store_relative=$OAuthStoreRelative; receipt_store_relative=$ReceiptStoreRelative;
     current_serving_listen=[string]$topology.serving.backend.listen; current_frozen_root=$currentFrozen; route_mutation=$false
 }
 if($Plan){ $planResult | ConvertTo-Json -Depth 5 -Compress; exit 0 }
@@ -73,16 +69,11 @@ try {
     if($LASTEXITCODE -ne 0){ Fail 'npm ci failed for frozen runtime' }
     & npm.cmd --prefix $runtime run build --silent
     if($LASTEXITCODE -ne 0){ Fail 'build failed for frozen runtime' }
-    $previousLibrarySpoolBridge=$env:MCP_LIBRARY_SPOOL_BRIDGE
     Push-Location -LiteralPath $runtime
     try {
-        $env:MCP_LIBRARY_SPOOL_BRIDGE=$librarySpoolBridgeValue
-        & node.exe (Join-Path $runtime 'scripts\\verify-process-contract.mjs') | Out-Null
+        & node.exe (Join-Path $runtime 'scripts\verify-process-contract.mjs') | Out-Null
         if($LASTEXITCODE -ne 0){ Fail 'frozen runtime process contract verification failed' }
-    } finally {
-        $env:MCP_LIBRARY_SPOOL_BRIDGE=$previousLibrarySpoolBridge
-        Pop-Location
-    }
+    } finally { Pop-Location }
     $runtimeHead=(& git.exe -C $runtime rev-parse HEAD).Trim().ToLowerInvariant()
     $runtimeDirty=@(& git.exe -C $runtime status --porcelain=v1 --untracked-files=no)
     if($runtimeHead -ne $commit -or $runtimeDirty.Count -gt 0){ Fail 'frozen runtime identity is not exact/clean' }
@@ -97,7 +88,7 @@ try {
         schema='mcp-frozen-deployment.v1'; frozen_at=[DateTimeOffset]::UtcNow.ToString('o'); source_repo='organicoverlords/chatgpt-mcp-clean'; canonical_branch='master'; merge_commit=$commit;
         runtime_root=(Join-Path $DeploymentRoot 'runtime'); runtime_tracked_clean=$true; hashes=[ordered]@{dist_index_sha256=$hashes.dist_index_sha256;dist_server_sha256=$hashes.dist_server_sha256};
         routes=[ordered]@{stable=[ordered]@{public_origin=$PublicOrigin;port=$Port;instance=$InstanceId;oauth_store=(Join-Path $env:LOCALAPPDATA ("ChatGPTMcpClean\\minimal-connectors\\$OAuthStoreRelative"));rollback_port=([int](([string]$topology.recovery.stable_rollback.listen -split ':')[-1]));rollback_instance=[string]$topology.recovery.stable_rollback.instance}};
-        tool_contract=$toolContract; local_file_tool_name=$LocalFileToolName; library_spool_bridge=[bool]$LibrarySpoolBridge; self_contained_runtime=(Join-Path $DeploymentRoot 'runtime'); runtime_commit=$commit;
+        tool_contract=$toolContract; self_contained_runtime=(Join-Path $DeploymentRoot 'runtime'); runtime_commit=$commit;
         process_manager_sha256=$hashes.process_manager_sha256; package_lock_sha256=$hashes.package_lock_sha256
     }
     $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $staging 'deployment.json') -Encoding utf8
@@ -116,7 +107,7 @@ Assert-Hash 'dist\\server.js' ([string]`$m.hashes.dist_server_sha256)
 Assert-Hash 'dist\\lib\\process-manager.js' ([string]`$m.process_manager_sha256)
 Assert-Hash 'package-lock.json' ([string]`$m.package_lock_sha256)
 `$owner=(Get-Content -LiteralPath (Join-Path `$root 'owner-login.txt') -Raw).Trim();if([string]::IsNullOrWhiteSpace(`$owner)){throw 'protected owner-login identity empty'}
-`$env:TAILSCALE_OWNER_LOGIN=`$owner;`$env:MCP_OWNER_AUTH_ORIGIN='';`$env:MCP_OWNER_AUTH_MODE='local-edge';`$env:MCP_LOCAL_FILE_TOOL_NAME='$LocalFileToolName';`$env:MCP_LIBRARY_SPOOL_BRIDGE='$librarySpoolBridgeValue'
+`$env:TAILSCALE_OWNER_LOGIN=`$owner;`$env:MCP_OWNER_AUTH_ORIGIN='';`$env:MCP_OWNER_AUTH_MODE='local-edge'
 `$stateRoot=Join-Path `$env:LOCALAPPDATA 'ChatGPTMcpClean\\minimal-connectors';`$oauth=Join-Path `$stateRoot '$OAuthStoreRelative';`$receipts=Join-Path `$stateRoot '$ReceiptStoreRelative'
 & (Join-Path `$runtime 'scripts\\start-minimal-clone.ps1') -InstanceId '$InstanceId' -Port $Port -PublicOrigin '$PublicOrigin' -StateRoot `$stateRoot -OAuthStorePath `$oauth -RequireExistingOAuthState -SharedReceiptDirectory `$receipts -SkipBuild -RestartOnUnexpectedExit -RestartBackoffSeconds 2 -RestartLimit 0
 exit `$LASTEXITCODE

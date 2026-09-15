@@ -15,7 +15,7 @@ import { observeSocket, sessionFingerprint, setTelemetrySink, withTelemetryConte
 import { startStallWatchdog } from "./lib/stall-watchdog.js";
 import { createResponseByteCounter } from "./lib/response-bytes.js";
 import { createServer, processRuntimeStatus } from "./server.js";
-import { serveLibrarySpoolBridgeAck, serveLibrarySpoolBridgeNext, serveLocalFileTransfer } from "./lib/file-transfer.js";
+import { serveLocalFileTransfer } from "./lib/file-transfer.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "127.0.0.1";
@@ -303,16 +303,6 @@ app.get(fileTransferPath, (req, res) => { void serveLocalFileTransfer(req, res).
   console.error("file transfer failed:", error instanceof Error ? error.message : String(error));
   if (!res.headersSent) res.status(500).send("File transfer failed");
   else res.destroy();
-}); });
-const librarySpoolNextPath = `${publicBasePath}/visual-proof/library-bridge/next` || "/visual-proof/library-bridge/next";
-const librarySpoolAckPath = `${publicBasePath}/visual-proof/library-bridge/ack` || "/visual-proof/library-bridge/ack";
-app.get(librarySpoolNextPath, (req, res) => { void serveLibrarySpoolBridgeNext(req, res).catch((error) => {
-  console.error("library spool bridge next failed:", error instanceof Error ? error.message : String(error));
-  if (!res.headersSent) res.status(500).send("Library spool bridge failed"); else res.destroy();
-}); });
-app.post(librarySpoolAckPath, (req, res) => { void serveLibrarySpoolBridgeAck(req, res).catch((error) => {
-  console.error("library spool bridge ack failed:", error instanceof Error ? error.message : String(error));
-  if (!res.headersSent) res.status(500).send("Library spool bridge failed"); else res.destroy();
 }); });
 app.post("/mcp", bearer, handleMcp);
 app.get("/mcp", bearer, (_req, res) => res.status(405).set("Allow", "POST").send("Method not allowed."));

@@ -1,13 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { resolve } from "node:path";
 import { isBootstrapSnapshot, readBootstrapSnapshot } from "./lib/bootstrap-snapshot.js";
-import { acknowledgeVisualProofSpoolBatch, isVisualProofSnapshot, readVisualProofSpoolBatch } from "./lib/visual-proof-spool.js";
 import { z } from "zod";
 import { BusyStore } from "./lib/busy-store.js";
-import { viewImage } from "./lib/image-viewer.js";
 import { ProcessManager } from "./lib/process-manager.js";
-import { FILE_TRANSFER_WIDGET_URI, createLibrarySpoolBridgeSession, librarySpoolBridgeEnabled, localFileTransferHandoff, prepareMarkedLocalFileTransfers, registerFileTransferTools } from "./lib/file-transfer.js";
-import { registerTemplateCompatibilityResources } from "./lib/template-compat.js";
+import { prepareMarkedArtifactHandoffs, registerFileTransferTools } from "./lib/file-transfer.js";
 
 // The deployed ChatGPT connector surface is the process profile. Keep the broader
 // full profile explicit-only for internal/local tests so repo inspection without a
@@ -215,8 +212,7 @@ function textResult(value: unknown, id: string) {
 
 async function structuredTextResult(value: unknown, id: string, servingIdentity: Record<string, unknown>) {
   const data = resultData(value, id, servingIdentity);
-  const transfers = await prepareMarkedLocalFileTransfers(value);
-  const handoffs = await Promise.all(transfers.map((transfer) => localFileTransferHandoff(transfer)));
+  const handoffs = await prepareMarkedArtifactHandoffs(value);
   return {
     content: [{ type: "text" as const, text: JSON.stringify(data) }, ...handoffs.flatMap((handoff) => handoff.content || [])],
     // Keep the frozen process output contract unchanged. Native file references are MCP
@@ -242,22 +238,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
   };
   const server = new McpServer({ name: "shell-mcp", version: "0.1.0" });
   registerFileTransferTools(server, callerId);
-  registerTemplateCompatibilityResources(server);
 
-  if (fullToolProfile) {
-  server.registerTool(
-      "view_image",
-    {
-      description: "Inspect one local PNG, JPEG, GIF, or WebP file for model-only visual analysis. This tool does not attach or display the file in the user's chat. Call at most once per artifact and never retry it as a delivery mechanism.",
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-      inputSchema: z.object({ path: z.string().min(1) }),
-    },
-    async ({ path }) => {
-      const result = await viewImage(path);
-      return { content: [{ type: "text" as const, text: JSON.stringify({ caller_id: callerId }) }, ...result.content] };
-    },
-  );
-  }
 
   server.registerTool(
     "start_process",
@@ -302,56 +283,12 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
     },
     async ({ process_id, max_chars, wait_ms }) => {
       const boundedMaxChars = Math.max(1, Math.min(max_chars ?? 32_000, 32_000));
-      if (isVisualProofSnapshot(process_id)) {
-        if (librarySpoolBridgeEnabled()) {
-          const bridge = createLibrarySpoolBridgeSession();
-          const bridgeLine = `VISUAL_PROOF_BRIDGE=${JSON.stringify(bridge)}\n`;
-          return {
-            ...(await structuredTextResult({
-              mcp_status: "OK", process_state: "SNAPSHOT", elapsed_ms: 0, next_action: "STOP_READING",
-              process_id: "visual-proof", running: true, stdout: bridgeLine, stderr: "", snapshot_alias: true,
-            }, callerId, servingIdentity)),
-            // Keep the bridge coordinates model-visible for stale hosts that cannot mount the
-            // dedicated action. The same session remains in _meta for hosts that can mount it.
-            _meta: { library_spool_bridge: bridge },
-          };
-        }
-        const batch = await readVisualProofSpoolBatch(boundedMaxChars);
-        const result = await structuredTextResult(batch.value, callerId, servingIdentity);
-        await acknowledgeVisualProofSpoolBatch(batch.pending);
-        return result;
-      }
       return structuredTextResult(isBootstrapSnapshot(process_id)
         ? await readBootstrapSnapshot(boundedMaxChars, process_id)
         : await processManager.readOutput(process_id, boundedMaxChars, wait_ms), callerId, servingIdentity);
     },
   );
 
-  if (librarySpoolBridgeEnabled()) {
-    server.registerTool(
-      "mount_visual_proof_bridge",
-      {
-        title: "Open visual proof bridge",
-        description: "Mount the one persistent visual-proof bridge. Call once; ordinary command reads remain widget-free.",
-        annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-        _meta: {
-          ui: { resourceUri: FILE_TRANSFER_WIDGET_URI, visibility: ["model", "app"] },
-          "openai/outputTemplate": FILE_TRANSFER_WIDGET_URI,
-          "openai/toolInvocation/invoking": "Opening visual proof bridge.",
-          "openai/toolInvocation/invoked": "Visual proof bridge ready",
-        },
-        inputSchema: z.object({}),
-        outputSchema: processOutputSchema,
-      },
-      async () => ({
-        ...(await structuredTextResult({
-          mcp_status: "OK", process_state: "SNAPSHOT", elapsed_ms: 0, next_action: "STOP_READING",
-          process_id: "visual-proof", running: true, stdout: "", stderr: "", no_change: true, snapshot_alias: true,
-        }, callerId, servingIdentity)),
-        _meta: { library_spool_bridge: createLibrarySpoolBridgeSession() },
-      }),
-    );
-  }
 
   server.registerTool(
     "kill_process",

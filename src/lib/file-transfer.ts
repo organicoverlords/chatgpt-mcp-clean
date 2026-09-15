@@ -10,12 +10,10 @@ import { constants as zlibConstants, createZstdCompress } from "node:zlib";
 import type { Request, Response as ExpressResponse } from "express";
 import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { acknowledgeVisualProofSpoolBatch, claimVisualProofSpoolItem, readVisualProofSpoolBatch, waitForVisualProofSpoolItem, type PendingVisualProof } from "./visual-proof-spool.js";
 
-export const FILE_TRANSFER_WIDGET_URI = "ui://process/file-transfer-v8.html";
-export const FILE_TRANSFER_MARKER_PREFIX = "CHATGPT_LIBRARY_UPLOAD=";
+export const ARTIFACT_MARKER_PREFIX = "CHATGPT_ARTIFACT=";
+export const FILE_TRANSFER_MARKER_PREFIX = "CHATGPT_LIBRARY_UPLOAD="; // legacy producer compatibility
 const MCP_APP_MIME_TYPE = "text/html;profile=mcp-app";
-const LEGACY_FILE_TRANSFER_WIDGET_URIS = ["ui://process/file-transfer-v1.html", "ui://process/file-transfer-v4.html", "ui://process/file-transfer-v5.html", "ui://process/file-transfer-v7.html"] as const;
 const LOCAL_TRANSFER_TTL_MS = 5 * 60 * 1000;
 const LOCAL_RESOURCE_TTL_MS = 8 * 60 * 60 * 1000;
 const DEFAULT_MAX_FILE_BYTES = 512 * 1024 * 1024;
@@ -178,10 +176,10 @@ function localTransferUrl(token: string): string {
 
 export async function prepareLocalFileTransfer(path: string): Promise<LocalFileTransfer> {
   cleanupExpiredResources();
-  if (!isAbsolute(path)) throw new Error("upload_local_file path must be absolute");
+  if (!isAbsolute(path)) throw new Error("artifact path must be absolute");
   const info = await stat(path);
   const maxBytes = maxFileBytes();
-  if (!info.isFile() || info.size <= 0 || info.size > maxBytes) throw new Error(`upload_local_file must name a 1..${maxBytes} byte file`);
+  if (!info.isFile() || info.size <= 0 || info.size > maxBytes) throw new Error(`artifact must name a 1..${maxBytes} byte file`);
   const item: LocalFileTransfer = {
     token: randomUUID(),
     path,
@@ -203,18 +201,55 @@ export async function prepareLocalFileTransfer(path: string): Promise<LocalFileT
   return item;
 }
 
-export async function prepareMarkedLocalFileTransfers(value: unknown): Promise<LocalFileTransfer[]> {
+function markedArtifactPaths(value: unknown): string[] {
   if (!value || typeof value !== "object" || Array.isArray(value)) return [];
   const stdout = (value as Record<string, unknown>).stdout;
   if (typeof stdout !== "string") return [];
-  const paths = stdout
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith(FILE_TRANSFER_MARKER_PREFIX))
-    .map((line) => line.slice(FILE_TRANSFER_MARKER_PREFIX.length).trim())
-    .filter((path) => path.length > 0);
-  const uniquePaths = [...new Set(paths)];
-  return Promise.all(uniquePaths.map((path) => prepareLocalFileTransfer(path)));
+  const prefixes = [ARTIFACT_MARKER_PREFIX, FILE_TRANSFER_MARKER_PREFIX] as const;
+  const paths: string[] = [];
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const prefix = prefixes.find((candidate) => line.startsWith(candidate));
+    if (!prefix) continue;
+    const path = line.slice(prefix.length).trim();
+    if (path) paths.push(path);
+  }
+  const trimmed = stdout.trim();
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      const declared = parsed.chatgpt_artifacts;
+      if (Array.isArray(declared)) {
+        for (const candidate of declared) if (typeof candidate === "string" && candidate.trim()) paths.push(candidate.trim());
+      }
+    } catch { /* stdout is not a single JSON result; line markers remain authoritative */ }
+  }
+  return paths;
+}
+
+type ArtifactDeliveryState = { marker_count: number; dropped_from_start: number; touched_at: number };
+const artifactDeliveryState = new Map<string, ArtifactDeliveryState>();
+
+function newlyMarkedArtifactPaths(value: unknown): string[] {
+  const paths = markedArtifactPaths(value);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return paths;
+  const record = value as Record<string, unknown>;
+  const processId = typeof record.process_id === "string" ? record.process_id : "";
+  if (!processId) return paths;
+  const dropped = typeof record.stdout_dropped_from_start === "number" ? record.stdout_dropped_from_start : 0;
+  const prior = artifactDeliveryState.get(processId);
+  const reset = !prior || prior.dropped_from_start !== dropped || paths.length < prior.marker_count;
+  const start = reset ? 0 : prior.marker_count;
+  artifactDeliveryState.set(processId, { marker_count: paths.length, dropped_from_start: dropped, touched_at: Date.now() });
+  if (artifactDeliveryState.size > 512) {
+    const oldest = [...artifactDeliveryState.entries()].sort((a, b) => a[1].touched_at - b[1].touched_at).slice(0, artifactDeliveryState.size - 512);
+    for (const [key] of oldest) artifactDeliveryState.delete(key);
+  }
+  return paths.slice(start);
+}
+
+export async function prepareMarkedLocalFileTransfers(value: unknown): Promise<LocalFileTransfer[]> {
+  return Promise.all(markedArtifactPaths(value).map((path) => prepareLocalFileTransfer(path)));
 }
 
 export async function prepareMarkedLocalFileTransfer(value: unknown): Promise<LocalFileTransfer | null> {
@@ -222,6 +257,77 @@ export async function prepareMarkedLocalFileTransfer(value: unknown): Promise<Lo
   return transfers.at(-1) || null;
 }
 
+
+type ImageResolution = { width: number; height: number };
+
+function readUInt24LE(data: Buffer, offset: number): number {
+  return data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16);
+}
+
+function imageResolution(data: Buffer, mimeType: string): ImageResolution {
+  if (mimeType === "image/png") {
+    if (data.length < 24 || data.toString("ascii", 1, 4) !== "PNG") throw new Error("invalid PNG image");
+    return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) };
+  }
+  if (mimeType === "image/gif") {
+    if (data.length < 10 || !/^GIF8[79]a$/.test(data.toString("ascii", 0, 6))) throw new Error("invalid GIF image");
+    return { width: data.readUInt16LE(6), height: data.readUInt16LE(8) };
+  }
+  if (mimeType === "image/jpeg") {
+    if (data.length < 4 || data[0] !== 0xff || data[1] !== 0xd8) throw new Error("invalid JPEG image");
+    const sof = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf]);
+    let offset = 2;
+    while (offset + 4 <= data.length) {
+      if (data[offset] !== 0xff) { offset += 1; continue; }
+      while (offset < data.length && data[offset] === 0xff) offset += 1;
+      if (offset >= data.length) break;
+      const marker = data[offset++];
+      if (marker === 0xd9 || marker === 0xda) break;
+      if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+      if (offset + 2 > data.length) break;
+      const segmentLength = data.readUInt16BE(offset);
+      if (segmentLength < 2 || offset + segmentLength > data.length) break;
+      if (sof.has(marker) && segmentLength >= 7) {
+        return { width: data.readUInt16BE(offset + 5), height: data.readUInt16BE(offset + 3) };
+      }
+      offset += segmentLength;
+    }
+    throw new Error("JPEG dimensions not found");
+  }
+  if (mimeType === "image/webp") {
+    if (data.length < 30 || data.toString("ascii", 0, 4) !== "RIFF" || data.toString("ascii", 8, 12) !== "WEBP") throw new Error("invalid WebP image");
+    const chunk = data.toString("ascii", 12, 16);
+    if (chunk === "VP8X") return { width: readUInt24LE(data, 24) + 1, height: readUInt24LE(data, 27) + 1 };
+    if (chunk === "VP8L") {
+      if (data[20] !== 0x2f) throw new Error("invalid lossless WebP image");
+      const b1 = data[21], b2 = data[22], b3 = data[23], b4 = data[24];
+      return { width: 1 + ((b1 | (b2 << 8)) & 0x3fff), height: 1 + (((b2 >> 6) | (b3 << 2) | (b4 << 10)) & 0x3fff) };
+    }
+    if (chunk === "VP8 ") {
+      if (data[23] !== 0x9d || data[24] !== 0x01 || data[25] !== 0x2a) throw new Error("invalid lossy WebP image");
+      return { width: data.readUInt16LE(26) & 0x3fff, height: data.readUInt16LE(28) & 0x3fff };
+    }
+    throw new Error("unsupported WebP image layout");
+  }
+  throw new Error(`unsupported inline image type: ${mimeType}`);
+}
+
+function inlineImageContent(data: Buffer, mimeType: string): any[] {
+  const { width, height } = imageResolution(data, mimeType);
+  return [
+    { type: "image" as const, data: data.toString("base64"), mimeType },
+    { type: "text" as const, text: `resolution: ${width}x${height}` },
+  ];
+}
+
+async function directImageHandoff(path: string, mimeType: string): Promise<{ content: any[] }> {
+  if (!isAbsolute(path)) throw new Error("artifact path must be absolute");
+  const info = await stat(path);
+  const maxBytes = maxFileBytes();
+  if (!info.isFile() || info.size <= 0 || info.size > maxBytes) throw new Error(`artifact must name a 1..${maxBytes} byte file`);
+  const data = await readFile(path);
+  return { content: inlineImageContent(data, mimeType) };
+}
 
 export function localTransferSummary(item: LocalFileTransfer) {
   return {
@@ -236,18 +342,6 @@ export function localTransferSummary(item: LocalFileTransfer) {
   };
 }
 
-function localTransferMeta(item: LocalFileTransfer) {
-  return {
-    direction: "local_to_chatgpt" as const,
-    phase: "ready" as const,
-    transfer_url: localTransferUrl(item.token),
-    resource_uri: `mcp-upload://file-transfer/${item.token}`,
-    file_name: item.file_name,
-    mime_type: item.mime_type,
-    bytes: item.bytes,
-    sha256: item.sha256,
-  };
-}
 export function localFileResourceLink(item: LocalFileTransfer) {
   return {
     type: "resource_link" as const,
@@ -455,6 +549,28 @@ async function visualReviewZipResources(item: LocalFileTransfer): Promise<LocalI
   return resources;
 }
 
+async function localImageResourceBytes(image: LocalImageResource): Promise<Buffer> {
+  const current = await stat(image.source_path).catch(() => null);
+  if (!current?.isFile() || current.size !== image.source_bytes || current.mtimeMs !== image.source_mtime_ms) {
+    localImageResources.delete(image.token);
+    throw new Error("source file container changed after transfer preparation");
+  }
+  let data: Buffer;
+  if (image.data_offset === undefined) {
+    data = await readFile(image.source_path);
+  } else {
+    const handle = await open(image.source_path, "r");
+    try { data = await readExactly(handle, image.bytes, image.data_offset); }
+    finally { await handle.close(); }
+  }
+  if (data.length !== image.bytes) throw new Error("source file size changed while reading");
+  if (image.sha256) {
+    const digest = createHash("sha256").update(data).digest("hex");
+    if (digest !== image.sha256) throw new Error("source file hash changed while reading");
+  }
+  return data;
+}
+
 async function localFileResourceContents(uri: string) {
   cleanupExpiredResources();
   const parsed = new URL(uri);
@@ -462,22 +578,7 @@ async function localFileResourceContents(uri: string) {
   const token = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
   const image = localImageResources.get(token);
   if (image) {
-    const current = await stat(image.source_path).catch(() => null);
-    if (!current?.isFile() || current.size !== image.source_bytes || current.mtimeMs !== image.source_mtime_ms) {
-      localImageResources.delete(token);
-      throw new Error("source file container changed after transfer preparation");
-    }
-    let data: Buffer;
-    if (image.data_offset === undefined) {
-      data = await readFile(image.source_path);
-    } else {
-      const handle = await open(image.source_path, "r");
-      try { data = await readExactly(handle, image.bytes, image.data_offset); }
-      finally { await handle.close(); }
-    }
-    if (data.length !== image.bytes) throw new Error("source file size changed while reading");
-    const digest = createHash("sha256").update(data).digest("hex");
-    if (digest !== image.sha256) throw new Error("source file hash changed while reading");
+    const data = await localImageResourceBytes(image);
     return { uri, mimeType: image.mime_type, blob: data.toString("base64") };
   }
   const item = localExports.get(token);
@@ -641,158 +742,26 @@ export async function downloadChatgptFile(
   }
 }
 
-const LIBRARY_SPOOL_BRIDGE_TTL_MS = 8 * 60 * 60 * 1000;
-type LibrarySpoolBridgeSession = {
-  expires_at: number;
-  in_flight?: { id: string; pending: PendingVisualProof; item: LocalFileTransfer };
-  last_ack?: { id: string; file_id: string };
-};
-const librarySpoolBridgeSessions = new Map<string, LibrarySpoolBridgeSession>();
-
-function cleanupLibrarySpoolBridgeSessions(now = Date.now()): void {
-  for (const [token, session] of librarySpoolBridgeSessions) if (session.expires_at <= now) librarySpoolBridgeSessions.delete(token);
-}
-
-function librarySpoolBridgeUrl(kind: "next" | "ack", token: string): string {
-  const url = new URL(`visual-proof/library-bridge/${kind}`, publicOrigin());
-  url.searchParams.set("token", token);
-  return url.href;
-}
-
-export function createLibrarySpoolBridgeSession() {
-  cleanupLibrarySpoolBridgeSessions();
-  const token = randomUUID();
-  const expires_at = Date.now() + LIBRARY_SPOOL_BRIDGE_TTL_MS;
-  librarySpoolBridgeSessions.set(token, { expires_at });
-  return {
-    next_url: librarySpoolBridgeUrl("next", token),
-    ack_url: librarySpoolBridgeUrl("ack", token),
-    expires_at,
-    transport: "long_poll",
-  };
-}
-
-function bridgeSession(req: Request): LibrarySpoolBridgeSession | undefined {
-  cleanupLibrarySpoolBridgeSessions();
-  const token = typeof req.query.token === "string" ? req.query.token : "";
-  const session = token ? librarySpoolBridgeSessions.get(token) : undefined;
-  if (session) session.expires_at = Date.now() + LIBRARY_SPOOL_BRIDGE_TTL_MS;
-  return session;
-}
-
-export async function serveLibrarySpoolBridgeNext(req: Request, res: ExpressResponse): Promise<void> {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Cache-Control", "private, no-store, max-age=0");
-  const session = bridgeSession(req);
-  if (!session) { res.status(404).send("Library spool bridge token is invalid or expired"); return; }
-  if (!session.in_flight) {
-    let pending = await claimVisualProofSpoolItem();
-    if (!pending) {
-      // Hold one mounted bridge request open until the spool changes instead of making
-      // thousands of empty HTTP polls per hour. Abort the local watcher when the host
-      // closes the request so an abandoned widget cannot leak a waiter.
-      const abort = new AbortController();
-      const onAbort = () => abort.abort();
-      req.once("aborted", onAbort);
-      res.once("close", onAbort);
-      try {
-        const ready = await waitForVisualProofSpoolItem(abort.signal);
-        if (!ready) return;
-        pending = await claimVisualProofSpoolItem();
-        if (!pending) { res.status(204).end(); return; }
-      } finally {
-        req.off("aborted", onAbort);
-        res.off("close", onAbort);
-      }
-    }
-    const item = await prepareLocalFileTransfer(pending.filePath);
-    session.in_flight = { id: pending.id, pending, item };
-  }
-  const current = session.in_flight;
-  res.json({ status: "ready", id: current.id, file_transfer: localTransferMeta(current.item) });
-}
-
-export async function serveLibrarySpoolBridgeAck(req: Request, res: ExpressResponse): Promise<void> {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Cache-Control", "private, no-store, max-age=0");
-  const session = bridgeSession(req);
-  if (!session) { res.status(404).send("Library spool bridge token is invalid or expired"); return; }
-  const id = typeof req.query.id === "string" ? req.query.id : "";
-  const fileId = typeof req.query.file_id === "string" ? req.query.file_id.trim() : "";
-  if (!fileId || !/^file[_-][A-Za-z0-9_-]+$/.test(fileId)) { res.status(400).send("Library spool bridge acknowledgement requires uploaded file id"); return; }
-  if (session.last_ack?.id === id && session.last_ack.file_id === fileId) {
-    res.json({ status: "ok", id, file_id: fileId, replayed: true });
-    return;
-  }
-  if (!session.in_flight || !id || id !== session.in_flight.id) { res.status(409).send("Library spool bridge acknowledgement does not match current proof"); return; }
-  await acknowledgeVisualProofSpoolBatch([session.in_flight.pending]);
-  session.in_flight = undefined;
-  session.last_ack = { id, file_id: fileId };
-  res.json({ status: "ok", id, file_id: fileId });
-}
-
-function widgetResourceMeta() {
-  let origin = "";
-  try { origin = publicOrigin().origin; } catch { origin = ""; }
-  const connectDomains = origin ? [origin] : [];
-  return {
-    ui: { prefersBorder: false, csp: { connectDomains, resourceDomains: connectDomains } },
-    "openai/widgetDescription": "Inert compatibility surface for native exact-byte file resources.",
-    "openai/widgetPrefersBorder": false,
-    "openai/widgetCSP": { connect_domains: connectDomains, resource_domains: connectDomains },
-  };
-}
-
-const LOCAL_FILE_TOOL_NAMES = ["upload_local_file", "read_local_file"] as const;
-type LocalFileToolName = typeof LOCAL_FILE_TOOL_NAMES[number];
-
-function localFileToolName(): LocalFileToolName {
-  const raw = (process.env.MCP_LOCAL_FILE_TOOL_NAME || "upload_local_file").trim();
-  if ((LOCAL_FILE_TOOL_NAMES as readonly string[]).includes(raw)) return raw as LocalFileToolName;
-  throw new Error(`MCP_LOCAL_FILE_TOOL_NAME must be one of ${LOCAL_FILE_TOOL_NAMES.join(",")}`);
-}
-
-function localFileToolPresentation(name: LocalFileToolName) {
-  if (name === "read_local_file") {
-    return {
-      title: "Read local file",
-      description: "Read one exact local file and return its unchanged bytes as a native MCP file resource for ChatGPT. This read-only tool does not modify local state, mount an app/widget, or invoke the Library upload API. Transfers preserve exact bytes and SHA-256; images remain compact lazy resources and ZIP review members remain exact resource links.",
-      invoking: "Reading file…",
-    };
-  }
-  return {
-    title: "Share local file",
-    description: "Return one exact local file as a native MCP file resource for ChatGPT to materialize as a native conversation file. This tool never mounts an app/widget or invokes the Library upload API. Transfers preserve exact bytes and SHA-256; images remain compact lazy resources and ZIP review members remain exact resource links.",
-    invoking: "Preparing file…",
-  };
-}
-
-export function librarySpoolBridgeEnabled(): boolean { return process.env.MCP_LIBRARY_SPOOL_BRIDGE === '1' || (process.env.MCP_RUNTIME_INSTANCE_ID || '').startsWith('issue333-persistent-widget-'); }
-
-function uploadToolMeta(name: LocalFileToolName) {
-  const presentation = localFileToolPresentation(name);
-  return {
-    "openai/toolInvocation/invoking": presentation.invoking,
-    "openai/toolInvocation/invoked": "File ready",
-    ...(name === "upload_local_file" && librarySpoolBridgeEnabled() ? {
-      ui: { resourceUri: FILE_TRANSFER_WIDGET_URI, visibility: ["model", "app"] },
-      "openai/outputTemplate": FILE_TRANSFER_WIDGET_URI,
-    } : {}),
-  };
-}
-
 export async function localFileTransferHandoff(item: LocalFileTransfer) {
-  const directImage = item.mime_type.startsWith("image/") ? localImageResources.get(item.token) : undefined;
-  const reviewImages = directImage ? [] : await visualReviewZipResources(item);
+  const reviewImages = item.mime_type === "application/zip" ? await visualReviewZipResources(item) : [];
   const content: any[] = [localFileResourceLink(item)];
-  // Keep large image bytes out of CallToolResult. ResourceLink is the MCP-native
-  // lazy-fetch boundary: Chat/Work can fetch the exact resource on demand without
-  // inflating the conversation transcript with base64 image payloads.
-  // Preserve the MCP-readable exact image resource used by native vision and the
-  // manifest-declared review resources. The first resource_link above is always the
-  // original file itself and remains useful in Work/other hosts that do not mount UI.
-  content.push(...reviewImages.map(localImageResourceLink));
+  for (const image of reviewImages) {
+    content.push(...inlineImageContent(await localImageResourceBytes(image), image.mime_type));
+  }
   return { item, content, summary: localTransferSummary(item) };
+}
+
+export async function prepareMarkedArtifactHandoffs(value: unknown): Promise<Array<{ content: any[] }>> {
+  const handoffs: Array<{ content: any[] }> = [];
+  for (const path of newlyMarkedArtifactPaths(value)) {
+    const mimeType = mimeTypeFor(path);
+    if (mimeType.startsWith("image/")) {
+      handoffs.push(await directImageHandoff(path, mimeType));
+      continue;
+    }
+    handoffs.push(await localFileTransferHandoff(await prepareLocalFileTransfer(path)));
+  }
+  return handoffs;
 }
 
 export function registerFileTransferTools(server: McpServer, callerId: string): void {
@@ -802,47 +771,6 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
     { title: "Exact transferred file", description: "Exact original local file or manifest-declared review member returned by a tool" },
     async (uri) => ({ contents: [await localFileResourceContents(uri.href)] }),
   );
-  server.registerResource("process-file-transfer-widget", FILE_TRANSFER_WIDGET_URI, { mimeType: MCP_APP_MIME_TYPE }, async () => ({
-    contents: [{
-      uri: FILE_TRANSFER_WIDGET_URI,
-      mimeType: MCP_APP_MIME_TYPE,
-      text: fileTransferWidgetHtml(),
-      _meta: widgetResourceMeta(),
-    }],
-  }));
-  for (const [index, uri] of LEGACY_FILE_TRANSFER_WIDGET_URIS.entries()) {
-    server.registerResource(`process-file-transfer-widget-legacy-${index + 1}`, uri, { mimeType: MCP_APP_MIME_TYPE }, async () => ({
-      contents: [{ uri, mimeType: MCP_APP_MIME_TYPE, text: fileTransferWidgetHtml(), _meta: widgetResourceMeta() }],
-    }));
-  }
-
-  const localFileName = localFileToolName();
-  const localFilePresentation = localFileToolPresentation(localFileName);
-  server.registerTool(
-    localFileName,
-    {
-      title: localFilePresentation.title,
-      description: localFilePresentation.description,
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-      _meta: uploadToolMeta(localFileName),
-      inputSchema: z.object({ path: z.string().min(1) }),
-      outputSchema: UploadLocalFileOutputSchema,
-    },
-    async ({ path }) => {
-      const handoff = await localFileTransferHandoff(await prepareLocalFileTransfer(path));
-      return {
-        content: [
-          { type: "text" as const, text: JSON.stringify({ caller_id: callerId, ...handoff.summary }) },
-          ...handoff.content,
-        ],
-        structuredContent: handoff.summary,
-        ...(localFileName === "upload_local_file" && librarySpoolBridgeEnabled()
-          ? { _meta: { library_spool_bridge: createLibrarySpoolBridgeSession() } }
-          : {}),
-      };
-    },
-  );
-
   server.registerTool(
     "download_chatgpt_file",
     {
@@ -869,57 +797,4 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
       };
     },
   );
-}
-
-export function fileTransferWidgetHtml(): string {
-  if (!librarySpoolBridgeEnabled()) return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color-scheme:light dark}html,body{margin:0;padding:0;background:transparent;overflow:hidden}.status{box-sizing:border-box;height:28px;line-height:28px;padding:0 8px;font:12px/28px ui-monospace,SFMono-Regular,Consolas,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}</style></head><body><div class="status">FILE_TRANSFER_NATIVE_RESOURCE</div></body></html>`;
-  return `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color-scheme:light dark}html,body{margin:0;padding:0;background:transparent;overflow:hidden}.image{display:none;max-width:100%;height:auto;border-radius:8px}.image.on{display:block}.status{display:none;padding:6px 8px;font:12px ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-word}</style>
-<body><img id="image" class="image" alt="Uploaded image"><div id="status" class="status"></div>
-<script>
-const statusEl=document.getElementById('status');const imageEl=document.getElementById('image');let started='';let bridgeStarted='';let rpcSeq=0;const rpcPending=new Map();
-function setStatus(v){statusEl.textContent=v;statusEl.style.display=v&&v.includes('ERROR')?'block':'none';window.openai?.notifyIntrinsicHeight?.();}
-function hex(bytes){return [...new Uint8Array(bytes)].map(b=>b.toString(16).padStart(2,'0')).join('');}
-function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
-function rpcRequest(method,params){return new Promise((resolve,reject)=>{const id='visual-proof-rpc-'+(++rpcSeq);const timer=setTimeout(()=>{rpcPending.delete(id);reject(new Error('RPC_TIMEOUT_'+method));},10000);rpcPending.set(id,{resolve,reject,timer});window.parent.postMessage({jsonrpc:'2.0',id,method,params},'*');});}
-async function sendProofMessage(p,label,fileId){if(!fileId)throw new Error('LIBRARY_FILE_ID_MISSING');setStatus('VISUAL_PROOF_MESSAGE '+(label||p.file_name));const result=await rpcRequest('ui/message',{role:'user',content:[{type:'text',text:'Visual proof uploaded to ChatGPT Library with exact verified source bytes. Inspect the image pixels through Files/Library and continue the current task. File: '+p.file_name+'; bytes: '+p.bytes+'; sha256: '+p.sha256+'; fileId: '+fileId}]});if(result?.isError)throw new Error('UI_MESSAGE_REJECTED');setStatus('VISUAL_PROOF_MESSAGE_OK '+p.file_name);}
-async function uploadTransfer(p,label){
- if(!p||p.direction!=='local_to_chatgpt'||!p.transfer_url)return null;
- if(typeof window.openai?.uploadFile!=='function')throw new Error('UPLOAD_FILE_UNAVAILABLE');
- setStatus('VISUAL_PROOF_UPLOAD '+(label||p.file_name));
- const r=await fetch(p.transfer_url,{cache:'no-store'});if(!r.ok)throw new Error('TRANSFER_HTTP_'+r.status);
- const data=await r.arrayBuffer();if(data.byteLength!==p.bytes)throw new Error('BYTE_COUNT_MISMATCH');
- const digest=hex(await crypto.subtle.digest('SHA-256',data));if(digest!==p.sha256)throw new Error('SHA256_MISMATCH');
- const blob=new Blob([data],{type:p.mime_type});
- if(p.mime_type.startsWith('image/')){imageEl.src=URL.createObjectURL(blob);imageEl.classList.add('on');window.openai?.notifyIntrinsicHeight?.();}
- const file=new File([blob],p.file_name,{type:p.mime_type});const out=await window.openai.uploadFile(file,{library:true});
- const fileId=out?.fileId||'';if(!fileId)throw new Error('UPLOAD_FILE_ID_MISSING');
- window.openai?.setWidgetState?.({modelContent:{visual_proof_bridge:{status:'ok',fileId,fileName:p.file_name,bytes:p.bytes,sha256:p.sha256}},privateContent:{visual_proof_bridge:{status:'ok',fileId,fileName:p.file_name,bytes:p.bytes,sha256:p.sha256}}});
- setStatus('VISUAL_PROOF_OK '+p.file_name+' '+p.bytes+' bytes'); return fileId;
-}
-async function oneShot(p){const key=p?.sha256+':'+p?.transfer_url;if(!p||started===key)return;started=key;try{await uploadTransfer(p,p.file_name);}catch(e){setStatus('VISUAL_PROOF_ERROR '+String(e?.message||e));}}
-async function bridgeLoop(b){
- const key=b?.next_url+':'+b?.ack_url;if(!b||!b.next_url||!b.ack_url||bridgeStarted===key)return;bridgeStarted=key;
- for(;;){
-  try{
-   const r=await fetch(b.next_url,{cache:'no-store'});
-   if(r.status===204){continue;}
-   if(!r.ok)throw new Error('BRIDGE_NEXT_HTTP_'+r.status);
-   const next=await r.json();if(next?.status!=='ready'||!next?.file_transfer)throw new Error('BRIDGE_NEXT_INVALID');
-   const fileId=await uploadTransfer(next.file_transfer,next.id||next.file_transfer.file_name);
-   await sendProofMessage(next.file_transfer,next.id||next.file_transfer.file_name,fileId);
-   const ack=new URL(b.ack_url);ack.searchParams.set('id',next.id);ack.searchParams.set('file_id',fileId);
-   for(;;){
-    try{const a=await fetch(ack.href,{method:'POST',cache:'no-store'});if(!a.ok)throw new Error('BRIDGE_ACK_HTTP_'+a.status);break;}
-    catch(e){setStatus('VISUAL_PROOF_BRIDGE_ACK_ERROR '+String(e?.message||e));await sleep(1000);}
-   }
-  }catch(e){setStatus('VISUAL_PROOF_BRIDGE_ERROR '+String(e?.message||e));await sleep(1000);}
- }
-}
-function render(result){const p=result?._meta?.file_transfer||null;const b=result?._meta?.library_spool_bridge||null;if(p)oneShot(p);if(b)bridgeLoop(b);}
-window.addEventListener('message',event=>{if(event.source!==window.parent)return;const m=event.data;if(m?.jsonrpc!=='2.0')return;if(m.id==='file-transfer-init'&&('result'in m||'error'in m)){if(!m.error)window.parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*');return;}const pending=rpcPending.get(m.id);if(pending&&('result'in m||'error'in m)){clearTimeout(pending.timer);rpcPending.delete(m.id);if(m.error)pending.reject(new Error('RPC_ERROR_'+String(m.error?.message||m.id)));else pending.resolve(m.result||{});return;}if(m.method==='ui/notifications/tool-result')render(m.params||{});});
-const envelope=window.openai?.toolResponseMetadata?.mcp_tool_result;if(envelope)render(envelope);
-window.parent.postMessage({jsonrpc:'2.0',id:'file-transfer-init',method:'ui/initialize',params:{protocolVersion:'2026-01-26',appInfo:{name:'persistent-visual-proof-bridge',version:'1.0.0'},appCapabilities:{availableDisplayModes:['inline']}}},'*');
-</script></body></html>`;
 }
