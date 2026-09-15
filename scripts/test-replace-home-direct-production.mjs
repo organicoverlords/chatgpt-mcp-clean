@@ -73,6 +73,9 @@ try {
   assert.match(wrapperSource, /Wait-CandidatePublicRoute/);
   assert.match(wrapperSource, /for\(\$i=0;\$i -lt 40;\$i\+\+\)/, "new-host readiness must retry with a finite bound");
   assert.match(wrapperSource, /remote_ip private_ranges/, "new isolated host must preserve the owner authorization boundary");
+  assert.match(wrapperSource, /production-change-gate','mcp_minimal_clone'/, "production mutation must target the canonical MCP owner");
+  assert.match(wrapperSource, /--routine-scoped-advance/, "established reversible production work must use the current routine-scoped gate path");
+  assert.match(wrapperSource, /--authorization-evidence/, "specific explicit live mutations must carry exact authorization evidence");
   assert.match(wrapperSource, /curl\.exe -fsS --max-time 5 .*--data-binary/, "Caddy admin load must use curl exact-body POST instead of Windows PowerShell Invoke-WebRequest");
   assert.match(wrapperSource, /Text\.UTF8Encoding\(\$false\)/, "adapted Caddy JSON must be written explicitly as UTF-8 without BOM for Windows PowerShell compatibility");
   assert.doesNotMatch(wrapperSource, /adapt --config \$Config --adapter caddyfile --pretty > \$json/, "Windows PowerShell redirection must not serialize adapted JSON as UTF-16");
