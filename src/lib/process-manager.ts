@@ -31,6 +31,11 @@ const CONTROL_HANDOFF_OVERHEAD_MS = 1_500;
 const CONTROL_KILL_TIMEOUT_MS = TASKKILL_TIMEOUT_MS + KILL_SETTLE_MS + CONTROL_HANDOFF_OVERHEAD_MS;
 const CONTROL_RETENTION_MS = COMPLETED_RETENTION_MS;
 const CONTROL_PRUNE_INTERVAL_MS = 60_000;
+const RETRIEVAL_STOP_DIRECTORY = ".retrieval-stop";
+const RETRIEVAL_STOP_TTL_MS = 5 * 60 * 1000;
+const RETRIEVAL_STOP_PRUNE_INTERVAL_MS = 60_000;
+const RETRIEVAL_SUFFICIENT_ACTION = "memory_recent";
+const RETRIEVAL_NAVIGATION_PREFIXES = ["stack_", "memory_", "timeline_", "report_"] as const;
 
 type ProcessManagerOptions = {
   maxLivePerCaller?: number;
@@ -172,6 +177,22 @@ type ProcessControlResponse = {
   result?: Record<string, unknown>;
   error?: string;
 };
+type RetrievalStopMarker = {
+  version: 1;
+  caller_id: string;
+  activity_target: ActivityTarget;
+  armed_by_process_id: string;
+  armed_by_action_class: typeof RETRIEVAL_SUFFICIENT_ACTION;
+  armed_at: string;
+  expires_at: string;
+};
+
+function isRetrievalNavigationAction(actionClass?: string): boolean {
+  if (!actionClass) return false;
+  const normalized = actionClass.toLowerCase();
+  return RETRIEVAL_NAVIGATION_PREFIXES.some((prefix) => normalized.startsWith(prefix));
+}
+
 
 const PROCESS_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -1569,6 +1590,7 @@ export class ProcessManager {
   private readonly hostAdmissionDirectory?: string;
   private readonly hostAdmissionSlots = new Map<string, string>();
   private readonly receiptArchiveDirectory?: string;
+  private readonly retrievalStopDirectory?: string;
   private readonly controlRequestDirectory?: string;
   private readonly controlResponseDirectory?: string;
   private readonly controlRequestsInFlight = new Set<string>();
@@ -1577,6 +1599,7 @@ export class ProcessManager {
   private readonly launcherWorker: Worker;
   private lastReceiptPruneAt = 0;
   private lastReceiptArchivePruneAt = 0;
+  private lastRetrievalStopPruneAt = 0;
   private lastControlPruneAt = 0;
 
   constructor(options: ProcessManagerOptions = {}) {
@@ -1596,11 +1619,14 @@ export class ProcessManager {
       }
       this.receiptArchiveDirectory = join(this.receiptDirectory, "archive");
       mkdirSync(this.receiptArchiveDirectory, { recursive: true });
+      this.retrievalStopDirectory = join(this.receiptDirectory, RETRIEVAL_STOP_DIRECTORY);
+      mkdirSync(this.retrievalStopDirectory, { recursive: true });
       this.controlRequestDirectory = join(this.receiptDirectory, ".control", "requests");
       this.controlResponseDirectory = join(this.receiptDirectory, ".control", "responses");
       mkdirSync(this.controlRequestDirectory, { recursive: true });
       mkdirSync(this.controlResponseDirectory, { recursive: true });
       this.pruneReceipts();
+      this.pruneRetrievalStops(true);
       this.pruneControlFiles();
       this.armControlRequestWatcher();
       const controlReconcileTimer = setInterval(() => { this.scheduleControlRequestSweep(); }, CONTROL_RECONCILE_MS);
@@ -1753,6 +1779,89 @@ export class ProcessManager {
     }
   }
 
+  private retrievalStopPath(callerId: string, activityTarget: ActivityTarget): string | undefined {
+    if (!this.retrievalStopDirectory) return undefined;
+    const identity = JSON.stringify([callerId, activityTarget.type, activityTarget.id, activityTarget.project ?? ""]);
+    const key = createHash("sha256").update(identity, "utf8").digest("hex");
+    return join(this.retrievalStopDirectory, `${key}.json`);
+  }
+
+  private pruneRetrievalStops(force = false): void {
+    if (!this.retrievalStopDirectory) return;
+    const now = Date.now();
+    if (!force && now - this.lastRetrievalStopPruneAt < RETRIEVAL_STOP_PRUNE_INTERVAL_MS) return;
+    this.lastRetrievalStopPruneAt = now;
+    let entries;
+    try { entries = readdirSync(this.retrievalStopDirectory, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const path = join(this.retrievalStopDirectory, entry.name);
+      try {
+        const marker = JSON.parse(readFileSync(path, "utf8")) as Partial<RetrievalStopMarker>;
+        const expiresAt = Date.parse(String(marker.expires_at ?? ""));
+        if (!Number.isFinite(expiresAt) || expiresAt <= now) unlinkSync(path);
+      } catch {
+        try { unlinkSync(path); } catch { /* another clone may already have removed it */ }
+      }
+    }
+  }
+
+  private armRetrievalStop(state: ProcessState): void {
+    if (state.actionClass?.toLowerCase() !== RETRIEVAL_SUFFICIENT_ACTION || !state.activityTarget || state.exitCode !== 0) return;
+    const path = this.retrievalStopPath(state.callerId, state.activityTarget);
+    if (!path) return;
+    const armedAt = state.finishedAt ?? new Date().toISOString();
+    const marker: RetrievalStopMarker = {
+      version: 1,
+      caller_id: state.callerId,
+      activity_target: state.activityTarget,
+      armed_by_process_id: state.id,
+      armed_by_action_class: RETRIEVAL_SUFFICIENT_ACTION,
+      armed_at: armedAt,
+      expires_at: new Date(Date.parse(armedAt) + RETRIEVAL_STOP_TTL_MS).toISOString(),
+    };
+    try {
+      writeFileSync(path, JSON.stringify(marker), "utf8");
+      this.pruneRetrievalStops();
+      emitTelemetry({
+        event: "process_retrieval_stop_armed",
+        process_id: state.id,
+        owner_caller_id: state.callerId,
+        activity_target: state.activityTarget,
+        action_class: state.actionClass,
+        expires_at: marker.expires_at,
+      }, state.ownerContext);
+    } catch (error) {
+      emitTelemetry({
+        event: "process_retrieval_stop_error",
+        process_id: state.id,
+        owner_caller_id: state.callerId,
+        error_message: error instanceof Error ? error.message : String(error),
+      }, state.ownerContext);
+    }
+  }
+
+  private activeRetrievalStop(callerId: string, activityTarget: ActivityTarget | undefined, actionClass: string | undefined): RetrievalStopMarker | undefined {
+    if (!activityTarget || !isRetrievalNavigationAction(actionClass)) return undefined;
+    const path = this.retrievalStopPath(callerId, activityTarget);
+    if (!path) return undefined;
+    this.pruneRetrievalStops();
+    try {
+      const marker = JSON.parse(readFileSync(path, "utf8")) as RetrievalStopMarker;
+      if (
+        marker.version !== 1 || marker.caller_id !== callerId || !sameActivityTarget(marker.activity_target, activityTarget)
+        || marker.armed_by_action_class !== RETRIEVAL_SUFFICIENT_ACTION
+      ) return undefined;
+      if (Date.parse(marker.expires_at) <= Date.now()) {
+        try { unlinkSync(path); } catch { /* another clone may already have removed it */ }
+        return undefined;
+      }
+      return marker;
+    } catch {
+      return undefined;
+    }
+  }
+
   private observeTerminal(state: ProcessState, code: number | null, signal: NodeJS.Signals | null): void {
     if (state.terminalObserved) return;
     state.terminalObserved = true;
@@ -1767,6 +1876,7 @@ export class ProcessManager {
     this.releaseHostAdmissionSlot(state.id);
     this.markProcessChanged(state);
     emitTelemetry({ event: "process_exit_observed", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, exit_code: state.exitCode, signal: state.signal ?? null, started_at: state.startedAt, finished_at: state.finishedAt }, state.ownerContext);
+    this.armRetrievalStop(state);
     sharedLauncherHandlers.delete(state.id);
     state.resolveDone();
     void this.persistReceiptAsync(state, exitCode, signal, finishedAt);
@@ -2433,6 +2543,18 @@ export class ProcessManager {
       void this.persistPreflightRejectionAsync(rejectionId, submittedCommand ?? effectiveCommand, workingDirectory, callerId, preflightError);
       emitTelemetry({ event: "process_preflight_rejected", reason: preflightError, rejection_id: rejectionId });
       throw new Error(`start_process_preflight_failed: ${preflightError}`);
+    }
+    const retrievalStop = this.activeRetrievalStop(callerId, activityTarget, actionClass);
+    if (retrievalStop) {
+      emitTelemetry({
+        event: "process_retrieval_stop_rejected",
+        owner_caller_id: callerId,
+        activity_target: activityTarget,
+        action_class: actionClass,
+        armed_by_process_id: retrievalStop.armed_by_process_id,
+        expires_at: retrievalStop.expires_at,
+      });
+      throw new Error(`start_process_retrieval_stop: successful ${RETRIEVAL_SUFFICIENT_ACTION} already satisfied this activity_target; synthesize the answer now. If one concrete unresolved fact remains, use a new specific activity_target.id before further stack_/memory_/timeline_/report_ retrieval. armed_by_process_id=${retrievalStop.armed_by_process_id}`);
     }
     const cwd = normalizedCwd(workingDirectory);
     const duplicate = [...this.processes.values()].find((state) => state.exitCode === null && state.callerId === callerId && state.cwd === cwd && state.dedupeIdentity === dedupeIdentity && sameActivityTarget(state.activityTarget, activityTarget) && state.actionClass === actionClass);
