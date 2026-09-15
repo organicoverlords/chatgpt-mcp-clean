@@ -77,6 +77,44 @@ try {
   for (const processId of processIds) await metadataDuplicateManager.kill(processId).catch(() => undefined);
 }
 
+const retrievalStopDirectory = mkdtempSync(join(tmpdir(), "mcp-retrieval-stop-"));
+const retrievalTarget = { type: "project", id: "vault-latest-context", project: "vault" };
+const retrievalDrilldownTarget = { type: "project", id: "vault-latest-context-specific-fact", project: "vault" };
+const retrievalProcesses = [];
+try {
+  const ownerManager = new ProcessManager({ receiptDirectory: retrievalStopDirectory });
+  const peerManager = new ProcessManager({ receiptDirectory: retrievalStopDirectory });
+  const sufficient = ownerManager.start("Write-Output 'MEMORY_RECENT_OK'", undefined, "caller_retrieval_stop", retrievalTarget, "Memory_Recent");
+  retrievalProcesses.push({ manager: ownerManager, process: sufficient });
+  const sufficientExit = await waitForExit(ownerManager, sufficient.process_id);
+  assert.equal(sufficientExit.exit_code, 0);
+  assert.throws(
+    () => peerManager.start("Write-Output 'BROADENING_SHOULD_BE_BLOCKED'", undefined, "caller_retrieval_stop", retrievalTarget, "STACK_lookup_reports"),
+    /start_process_retrieval_stop: successful memory_recent already satisfied this activity_target/,
+    "successful recent-memory orientation must stop cross-clone navigation on the same target",
+  );
+  const drilldown = peerManager.start("Write-Output 'SPECIFIC_DRILLDOWN_OK'", undefined, "caller_retrieval_stop", retrievalDrilldownTarget, "stack_find_context");
+  retrievalProcesses.push({ manager: peerManager, process: drilldown });
+  assert.equal((await waitForExit(peerManager, drilldown.process_id)).exit_code, 0, "a new specific target must remain available for genuine drill-down");
+  const nonRetrieval = peerManager.start("Write-Output 'NON_RETRIEVAL_OK'", undefined, "caller_retrieval_stop", retrievalTarget, "repo_mutation");
+  retrievalProcesses.push({ manager: peerManager, process: nonRetrieval });
+  assert.equal((await waitForExit(peerManager, nonRetrieval.process_id)).exit_code, 0, "same-target non-navigation work must not be blocked");
+  const otherCaller = peerManager.start("Write-Output 'OTHER_CALLER_OK'", undefined, "caller_retrieval_stop_other", retrievalTarget, "stack_lookup_reports");
+  retrievalProcesses.push({ manager: peerManager, process: otherCaller });
+  assert.equal((await waitForExit(peerManager, otherCaller.process_id)).exit_code, 0, "one caller's stop marker must not affect another caller");
+
+  const failedTarget = { type: "project", id: "vault-latest-context-failed", project: "vault" };
+  const failed = ownerManager.start("exit 9", undefined, "caller_retrieval_stop_failed", failedTarget, "memory_recent");
+  retrievalProcesses.push({ manager: ownerManager, process: failed });
+  assert.equal((await waitForExit(ownerManager, failed.process_id)).exit_code, 9);
+  const afterFailure = peerManager.start("Write-Output 'RETRIEVAL_AFTER_FAILURE_OK'", undefined, "caller_retrieval_stop_failed", failedTarget, "stack_find_context");
+  retrievalProcesses.push({ manager: peerManager, process: afterFailure });
+  assert.equal((await waitForExit(peerManager, afterFailure.process_id)).exit_code, 0, "failed memory_recent must not arm the retrieval stop");
+} finally {
+  for (const item of retrievalProcesses) await item.manager.kill(item.process.process_id).catch(() => undefined);
+  rmSync(retrievalStopDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}
+
 const concurrencyManager = new ProcessManager();
 const liveProcesses = [];
 let concurrencyRejection;
