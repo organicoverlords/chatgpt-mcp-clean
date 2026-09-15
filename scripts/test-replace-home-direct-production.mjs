@@ -68,6 +68,14 @@ try {
   assert.match(wrapperSource, /Replace-CaddyTargetUpstream/);
   assert.match(wrapperSource, /Add-CaddyTargetHost/);
   assert.match(wrapperSource, /CreateTargetHost/);
+  assert.match(wrapperSource, /TargetLoadedRoute/, "replacement owner must expose loaded-route targeting");
+  assert.match(wrapperSource, /function Get-LoadedCaddyTargetRoute/, "loaded route must be discovered from Caddy admin state");
+  assert.match(wrapperSource, /function Set-CaddyAdminDial/, "targeted cutover must own an exact admin-dial mutation helper");
+  assert.match(wrapperSource, /-X PATCH/, "targeted cutover must patch only exact loaded dial values");
+  assert.match(wrapperSource, /--routine-scoped-advance/, "ordinary one-binding replacement must use guarded routine rollout gate");
+  assert.match(wrapperSource, /--authorization-evidence/, "scope-widening host creation must retain explicit authorization evidence");
+  assert.match(wrapperSource, /operation='REPLACE_LOADED_ROUTE'/, "targeted mode must report a distinct operation");
+  assert.match(wrapperSource, /foreach\(\$dialPath in @\(\$patched\)\)\{ Set-CaddyAdminDial \$dialPath \(\[int\]\$currentPort\) \}/, "targeted mode must roll back the same patched dials");
   assert.match(wrapperSource, /if\(\$Plan\)/);
   assert.match(wrapperSource, /Wait-CandidateLocalRoute/);
   assert.match(wrapperSource, /Wait-CandidatePublicRoute/);
