@@ -895,7 +895,7 @@ async function uploadTransfer(p,label){
  if(p.mime_type.startsWith('image/')){imageEl.src=URL.createObjectURL(blob);imageEl.classList.add('on');window.openai?.notifyIntrinsicHeight?.();}
  const file=new File([blob],p.file_name,{type:p.mime_type});const out=await window.openai.uploadFile(file,{library:true});
  const fileId=out?.fileId||'';if(!fileId)throw new Error('UPLOAD_FILE_ID_MISSING');
- window.openai?.setWidgetState?.({modelContent:{visual_proof_bridge:{status:'ok',fileId,fileName:p.file_name,bytes:p.bytes,sha256:p.sha256}},privateContent:{visual_proof_bridge:{status:'ok',fileId,fileName:p.file_name,bytes:p.bytes,sha256:p.sha256}},imageIds:p.mime_type.startsWith('image/')?[fileId]:[]});
+ window.openai?.setWidgetState?.({modelContent:{visual_proof_bridge:{status:'ok',fileId,fileName:p.file_name,bytes:p.bytes,sha256:p.sha256}},privateContent:{visual_proof_bridge:{status:'ok',fileId,fileName:p.file_name,bytes:p.bytes,sha256:p.sha256}}});
  setStatus('VISUAL_PROOF_OK '+p.file_name+' '+p.bytes+' bytes'); return fileId;
 }
 async function oneShot(p){const key=p?.sha256+':'+p?.transfer_url;if(!p||started===key)return;started=key;try{await uploadTransfer(p,p.file_name);}catch(e){setStatus('VISUAL_PROOF_ERROR '+String(e?.message||e));}}
