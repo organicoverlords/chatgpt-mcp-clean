@@ -114,7 +114,7 @@ export class LocalOAuthProvider implements OAuthServerProvider {
           ...(tokenEndpointAuthMethod === "client_secret_post" ? { client_secret: freshToken() } : {}),
         };
         this.prune();
-        if (!this.makeClientRoom()) throw new InvalidClientMetadataError(`OAuth client registration limit reached (${MAX_CLIENTS})`);
+        this.makeClientRoom();
         this.clients.set(full.client_id, full);
         this.persist();
         return full;
@@ -261,7 +261,6 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     this.prune();
     if (this.clients.has(clientId)) return false;
     if (!UUID_CLIENT_ID.test(clientId) || !isChatGptRedirect(redirectUri)) return false;
-    if (!this.makeClientRoom()) return false;
     this.clients.set(clientId, { client_id: clientId, client_id_issued_at: Math.floor(Date.now() / 1000), redirect_uris: [redirectUri], token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], client_name: "recovered-chatgpt-client" });
     this.persist();
     return true;
@@ -295,21 +294,19 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     return false;
   }
 
-  private makeClientRoom(): boolean {
+  private makeClientRoom(): void {
     // A dynamically registered client_id is durable client state. ChatGPT can
     // reuse it after its last token has expired or been revoked, so lack of a
     // token reference is not permission to evict a real connector registration.
     // Compact only registrations created by this repository's disposable test
-    // clients. If the durable store is otherwise full, reject new registration
-    // instead of letting unauthenticated DCR grow the whole-file store forever.
+    // clients; otherwise exceed the soft target rather than break an account.
     while (this.clients.size >= MAX_CLIENTS) {
       const unusedClientId = [...this.clients.entries()].find(([clientId, client]) =>
         !this.isClientReferenced(clientId) && DISPOSABLE_CLIENT_NAMES.has(client.client_name ?? ""),
       )?.[0];
-      if (!unusedClientId) return false;
+      if (!unusedClientId) return;
       this.clients.delete(unusedClientId);
     }
-    return true;
   }
 
   private revokeRefreshFamily(startKey: string): void {

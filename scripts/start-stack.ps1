@@ -25,16 +25,11 @@ $env:HOST = '127.0.0.1'
 $env:MCP_BACKEND_MODE = '1'
 $env:MCP_WIREGUARD_CANDIDATE = '0'
 $env:MCP_TOOL_PROFILE = 'process'
-$env:MCP_LOCAL_FILE_TOOL_NAME = 'upload_local_file'
-$env:MCP_LIBRARY_SPOOL_BRIDGE = '0'
 $env:MCP_PUBLIC_ORIGIN = [string]$config.public_origin
 $env:MCP_OWNER_AUTH_ORIGIN = ''
 $env:MCP_OWNER_AUTH_MODE = 'local-edge'
 $env:TAILSCALE_OWNER_LOGIN = [string]$config.owner_login
 $env:MCP_OAUTH_STORE_PATH = Join-Path $instanceState 'oauth.json'
-$oauthAclHelper = Join-Path $mcpRoot 'scripts\protect-oauth-state.ps1'
-& $oauthAclHelper -OAuthStorePath $env:MCP_OAUTH_STORE_PATH
-if ($LASTEXITCODE -ne 0) { throw 'OAuth/owner state ACL protection failed' }
 $env:MCP_TRANSPORT_LOG_PATH = Join-Path $instanceState 'transport.jsonl'
 $env:MCP_PROCESS_RECEIPT_DIR = $receipts
 $env:MCP_RUNTIME_INSTANCE_ID = [string]$config.instance_id
