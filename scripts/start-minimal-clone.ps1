@@ -5,6 +5,7 @@ param(
     [string]$StateRoot = (Join-Path $env:LOCALAPPDATA 'ChatGPTMcpClean\minimal-connectors'),
     [string]$SharedReceiptDirectory = (Join-Path $env:LOCALAPPDATA 'ChatGPTMcpClean\minimal-connectors\shared-process-receipts'),
     [string]$OAuthStorePath = '',
+    [switch]$RequireExistingOAuthState,
     [switch]$WireGuardCandidate,
     [switch]$ValidateOnly,
     [switch]$SkipBuild,
@@ -61,6 +62,11 @@ if ($publicSlug -match '^clone-[A-Za-z0-9._-]+$') {
     if (-not $resolvedOAuthStore.Equals($resolvedExpectedStore,[StringComparison]::OrdinalIgnoreCase)) { throw "replacement OAuth store must be the stable '$publicSlug' store" }
     if (-not (Test-Path -LiteralPath $resolvedExpectedStore -PathType Leaf)) { throw "stable OAuth store does not exist for '$publicSlug'" }
 }
+if ($RequireExistingOAuthState) {
+    if (-not $OAuthStorePath) { throw 'RequireExistingOAuthState requires an explicit OAuthStorePath' }
+    $OAuthStorePath = [IO.Path]::GetFullPath($OAuthStorePath)
+    & (Join-Path $Root 'scripts\protect-oauth-state.ps1') -OAuthStorePath $OAuthStorePath -VerifyOnly -RequireExistingState
+}
 if ($ValidateOnly) { Write-Output 'IDENTITY_PREFLIGHT_OK'; exit 0 }
 
 if (Test-Path '.env') {
@@ -78,9 +84,14 @@ $instanceState = Join-Path $StateRoot $InstanceId
 New-Item -ItemType Directory -Force -Path $instanceState,$SharedReceiptDirectory | Out-Null
 if (-not $OAuthStorePath) { $OAuthStorePath = Join-Path $instanceState 'oauth.json' }
 $oauthDirectory = Split-Path -Parent $OAuthStorePath
-if ($oauthDirectory) { New-Item -ItemType Directory -Force -Path $oauthDirectory | Out-Null }
-& (Join-Path $Root 'scripts\protect-oauth-state.ps1') -OAuthStorePath $OAuthStorePath
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+if ($RequireExistingOAuthState) {
+    # Recheck immediately before binding without changing store bytes or ACLs. A reboot-time
+    # production launcher must never turn a transient/missing durable store into a fresh one.
+    & (Join-Path $Root 'scripts\protect-oauth-state.ps1') -OAuthStorePath $OAuthStorePath -VerifyOnly -RequireExistingState
+} else {
+    if ($oauthDirectory) { New-Item -ItemType Directory -Force -Path $oauthDirectory | Out-Null }
+    & (Join-Path $Root 'scripts\protect-oauth-state.ps1') -OAuthStorePath $OAuthStorePath
+}
 $env:PORT = [string]$Port
 $env:HOST = if ($WireGuardCandidate) { '10.203.0.2' } else { '127.0.0.1' }
 $env:MCP_WIREGUARD_CANDIDATE = if ($WireGuardCandidate) { '1' } else { '0' }

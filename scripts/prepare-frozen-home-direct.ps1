@@ -118,7 +118,7 @@ Assert-Hash 'package-lock.json' ([string]`$m.package_lock_sha256)
 `$owner=(Get-Content -LiteralPath (Join-Path `$root 'owner-login.txt') -Raw).Trim();if([string]::IsNullOrWhiteSpace(`$owner)){throw 'protected owner-login identity empty'}
 `$env:TAILSCALE_OWNER_LOGIN=`$owner;`$env:MCP_OWNER_AUTH_ORIGIN='';`$env:MCP_OWNER_AUTH_MODE='local-edge';`$env:MCP_LOCAL_FILE_TOOL_NAME='$LocalFileToolName';`$env:MCP_LIBRARY_SPOOL_BRIDGE='$librarySpoolBridgeValue'
 `$stateRoot=Join-Path `$env:LOCALAPPDATA 'ChatGPTMcpClean\\minimal-connectors';`$oauth=Join-Path `$stateRoot '$OAuthStoreRelative';`$receipts=Join-Path `$stateRoot '$ReceiptStoreRelative'
-& (Join-Path `$runtime 'scripts\\start-minimal-clone.ps1') -InstanceId '$InstanceId' -Port $Port -PublicOrigin '$PublicOrigin' -StateRoot `$stateRoot -OAuthStorePath `$oauth -SharedReceiptDirectory `$receipts -SkipBuild -RestartOnUnexpectedExit -RestartBackoffSeconds 2 -RestartLimit 0
+& (Join-Path `$runtime 'scripts\\start-minimal-clone.ps1') -InstanceId '$InstanceId' -Port $Port -PublicOrigin '$PublicOrigin' -StateRoot `$stateRoot -OAuthStorePath `$oauth -RequireExistingOAuthState -SharedReceiptDirectory `$receipts -SkipBuild -RestartOnUnexpectedExit -RestartBackoffSeconds 2 -RestartLimit 0
 exit `$LASTEXITCODE
 "@
     [IO.File]::WriteAllText((Join-Path $staging 'start-stable.ps1'),$launcher.Replace("`r`n","`n"),(New-Object Text.UTF8Encoding($false)))
