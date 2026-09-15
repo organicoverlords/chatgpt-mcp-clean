@@ -4,7 +4,6 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { FILE_TRANSFER_WIDGET_URI } from "../dist/lib/file-transfer.js";
 
 const externalStateRoot = process.env.MCP_TEST_STATE_ROOT?.trim();
 if (externalStateRoot) mkdirSync(resolve(externalStateRoot), { recursive: true });
@@ -193,7 +192,7 @@ try {
     connect(cloneB, "clone-b-client-1"),
     connect(cloneB, "clone-b-client-2"),
   ]);
-  const expected = ["download_chatgpt_file", "kill_process", "read_output", "start_process", "upload_local_file"];
+  const expected = ["download_chatgpt_file", "kill_process", "read_output", "start_process"];
   for (const client of [a1, a2, b1, b2]) {
     const tools = await client.tools();
     const names = tools.map((tool) => tool.name).sort();
@@ -202,12 +201,10 @@ try {
     assert.deepEqual(byName.start_process.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: true });
     assert.deepEqual(byName.read_output.annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: false });
     assert.deepEqual(byName.kill_process.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: false });
-    assert.deepEqual(byName.upload_local_file.annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: false });
     const expectedInvocationUi = {
       start_process: { title: "Run command", invoking: "Running command…", invoked: "Command returned" },
       read_output: { title: "Check command", invoking: "Checking command…", invoked: "Command checked" },
       kill_process: { title: "Stop process", invoking: "Stopping process…", invoked: "Process stop checked" },
-      upload_local_file: { title: "Share local file", invoking: "Preparing file…", invoked: "File ready" },
       download_chatgpt_file: { title: "Save ChatGPT file", invoking: "Saving file…", invoked: "File saved" },
     };
     for (const [name, expectedUi] of Object.entries(expectedInvocationUi)) {
@@ -216,26 +213,15 @@ try {
       assert.equal(byName[name]._meta?.["openai/toolInvocation/invoked"], expectedUi.invoked, `${name} should expose concise invoked status`);
       assert.ok(expectedUi.invoking.length <= 64 && expectedUi.invoked.length <= 64, `${name} invocation statuses must stay within Apps SDK limits`);
     }
-    for (const name of ["start_process", "read_output", "upload_local_file"]) {
+    for (const name of ["start_process", "read_output"]) {
       assert.equal(byName[name]?._meta?.["openai/outputTemplate"], undefined, `${name} must not mount an app/widget template`);
       assert.equal(byName[name]?._meta?.["ui/resourceUri"], undefined, `${name} must not advertise an app resource URI`);
       assert.equal(byName[name]?._meta?.ui, undefined, `${name} must not advertise nested app UI metadata`);
     }
   }
 
-  const historicalTemplateUris = [
-    FILE_TRANSFER_WIDGET_URI,
-    "ui://process/file-transfer-v1.html",
-    "ui://process/library-upload-v1.html",
-    "ui://process/library-upload-v2.html",
-    "ui://visual-proof/inline-v1.html",
-  ];
-  for (const uri of historicalTemplateUris) {
-    const resource = await a1.readResource(uri);
-    assert.equal(resource.contents?.[0]?.uri, uri, `${uri} must resolve over real Streamable HTTP`);
-    assert.equal(resource.contents?.[0]?.mimeType, "text/html;profile=mcp-app");
-    assert.match(String(resource.contents?.[0]?.text || ""), /<!doctype html>/i);
-  }
+  // The production connector intentionally exposes no MCP app/widget templates.
+
 
   const bootstrapReads = await Promise.all(["bootstrap", "231b7e74-4cc8-43d0-9702-fd6dfa2215b3", "checkup"].map((process_id) =>
     a1.call("read_output", { process_id, max_chars: 32_000, wait_ms: 0 })));
