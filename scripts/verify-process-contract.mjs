@@ -66,7 +66,7 @@ async function assertStructuredProcessResult(name, args) {
     backend_generation: "backend-contract-test",
     source_commit: contractSourceCommit,
   }, `${name} must expose exact serving backend/source/contract identity`);
-  assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent, `${name} text and structured results must stay compatible`);
+  assert.deepEqual(result.content, [], `${name} must not duplicate structured process JSON into text content`);
   const parsed = await tool.outputSchema.safeParseAsync(result.structuredContent);
   assert.ok(parsed.success, `${name} structuredContent must validate against outputSchema: ${parsed.error || "unknown error"}`);
   return result.structuredContent;
