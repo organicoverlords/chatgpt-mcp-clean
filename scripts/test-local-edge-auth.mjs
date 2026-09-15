@@ -56,9 +56,15 @@ try {
   assert.equal(publicForwarded.status, 403, publicForwarded.text);
   assert.match(publicForwarded.text, /Owner authorization required/);
   const privateForwarded = await request(loopback, "/authorize", publicHost, { "x-forwarded-for": "192.168.1.50" });
-  assert.equal(privateForwarded.status, 400, privateForwarded.text);
-  assert.doesNotMatch(privateForwarded.text, /Owner authorization required/);
-  console.log("PASS local_edge_auth direct_public_host_blocked=true direct_loopback_allowed=true public_forwarded_blocked=true private_forwarded_allowed=true wrong_host_blocked=true");
+  assert.equal(privateForwarded.status, 403, privateForwarded.text);
+  assert.match(privateForwarded.text, /Owner authorization required/);
+  const edgeAuthorized = await request(loopback, "/authorize", publicHost, {
+    "x-forwarded-for": "192.168.1.50",
+    "x-mcp-owner-authorized": "1",
+  });
+  assert.equal(edgeAuthorized.status, 400, edgeAuthorized.text);
+  assert.doesNotMatch(edgeAuthorized.text, /Owner authorization required/);
+  console.log("PASS local_edge_auth direct_public_host_blocked=true direct_loopback_allowed=true public_forwarded_blocked=true private_forwarded_blocked=true edge_marker_allowed=true wrong_host_blocked=true");
 } finally {
   if (child.exitCode === null) child.kill();
   await new Promise(r => child.exitCode !== null ? r() : child.once("exit", r));
