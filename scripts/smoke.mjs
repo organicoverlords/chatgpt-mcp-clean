@@ -1,9 +1,6 @@
 import "dotenv/config";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
 
 const origin = (process.env.MCP_SMOKE_ORIGIN || process.env.MCP_PUBLIC_ORIGIN || "http://127.0.0.1:3000").replace(/\/$/, "");
 const publicOrigin = (process.env.MCP_SMOKE_PUBLIC_ORIGIN || origin).replace(/\/$/, "");
@@ -229,38 +226,8 @@ const missingReadOverHttp = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.n
 assertToolErrorWithoutAppMeta(missingReadOverHttp, "missing read_output over HTTP");
 const missingKillOverHttp = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: "kill_process", arguments: { process_id: "00000000-0000-4000-8000-000000000000" } } });
 assertToolErrorWithoutAppMeta(missingKillOverHttp, "missing kill_process over HTTP");
-const missingUploadOverHttp = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: expectedLocalFileTool, arguments: { path: "C:\\definitely-missing\\image.png" } } });
-assertToolErrorWithoutAppMeta(missingUploadOverHttp, `missing ${expectedLocalFileTool} over HTTP`);
-
-const localFileSmokePath = process.env.MCP_SMOKE_LOCAL_FILE_PATH || fileURLToPath(import.meta.url);
-const localFileSmokeBytes = await readFile(localFileSmokePath);
-const localFileSmokeSha256 = createHash("sha256").update(localFileSmokeBytes).digest("hex");
-const localFileCall = await mcpPost(sessionA, {
-  jsonrpc: "2.0",
-  id: Date.now(),
-  method: "tools/call",
-  params: { name: expectedLocalFileTool, arguments: { path: localFileSmokePath } },
-});
-const localFileToolResult = localFileCall.body?.result;
-assert.ok(localFileToolResult && localFileToolResult.isError !== true, localFileCall.text);
-assert.equal(localFileToolResult._meta, undefined, `${expectedLocalFileTool} success must remain widget-free`);
-assert.equal(localFileToolResult.structuredContent?.delivery_mode, "tool_file_reference", localFileCall.text);
-assert.equal(localFileToolResult.structuredContent?.bytes, localFileSmokeBytes.length, localFileCall.text);
-assert.equal(localFileToolResult.structuredContent?.sha256, localFileSmokeSha256, localFileCall.text);
-const localFileRef = (localFileToolResult.content || []).find((entry) => entry?.type === "resource_link" && entry?.uri === localFileToolResult.structuredContent?.resource_uri);
-assert.ok(localFileRef, `${expectedLocalFileTool} must return its exact native MCP resource link`);
-assert.equal((localFileToolResult.content || []).some((entry) => entry?.type === "image"), false, `${expectedLocalFileTool} must keep file bytes lazy`);
-const localFileResource = await mcpPost(sessionA, {
-  jsonrpc: "2.0",
-  id: Date.now(),
-  method: "resources/read",
-  params: { uri: localFileRef.uri },
-});
-const localFileBlob = localFileResource.body?.result?.contents?.[0]?.blob;
-assert.ok(localFileBlob, `${expectedLocalFileTool} resource must return exact bytes`);
-assert.equal(Buffer.from(localFileBlob, "base64").compare(localFileSmokeBytes), 0, `${expectedLocalFileTool} resource bytes changed in transit`);
-
-const markerCode = `process.stdout.write(${JSON.stringify(`CHATGPT_LIBRARY_UPLOAD=${localFileSmokePath}\n`)})`;
+const inlinePngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z7WQAAAAASUVORK5CYII=";
+const markerCode = `const fs=require("node:fs"),os=require("node:os"),path=require("node:path");const p=path.join(os.tmpdir(),"mcp-inline-smoke-"+process.pid+".png");fs.writeFileSync(p,Buffer.from("${inlinePngBase64}","base64"));process.stdout.write("CHATGPT_ARTIFACT="+p+String.fromCharCode(10));`;
 const markerProcessCall = await mcpPost(sessionA, {
   jsonrpc: "2.0",
   id: Date.now(),
@@ -272,21 +239,15 @@ const markerProcessCall = await mcpPost(sessionA, {
 });
 const markerToolResult = markerProcessCall.body?.result;
 assert.ok(markerToolResult && markerToolResult.isError !== true, markerProcessCall.text);
-assert.equal(markerToolResult._meta, undefined, "start_process marker handoff must remain widget-free");
-assert.equal(markerToolResult.structuredContent?.file_transfer, undefined, "start_process marker handoff must not change the structured process contract");
-const markerRef = (markerToolResult.content || []).find((entry) => entry?.type === "resource_link");
-assert.ok(markerRef, "start_process marker must append a native resource_link over authenticated HTTP");
-assert.equal(markerRef.mimeType, localFileToolResult.structuredContent?.mime_type, markerProcessCall.text);
-assert.equal(markerRef.size, localFileSmokeBytes.length, markerProcessCall.text);
-const markerResource = await mcpPost(sessionA, {
-  jsonrpc: "2.0",
-  id: Date.now(),
-  method: "resources/read",
-  params: { uri: markerRef.uri },
-});
-const markerBlob = markerResource.body?.result?.contents?.[0]?.blob;
-assert.ok(markerBlob, "start_process marker resource must return exact bytes over authenticated HTTP");
-assert.equal(Buffer.from(markerBlob, "base64").compare(localFileSmokeBytes), 0, "start_process marker resource bytes changed in transit");
+assert.equal(markerToolResult._meta, undefined, "start_process inline image handoff must remain widget-free");
+assert.equal(markerToolResult.structuredContent?.file_transfer, undefined, "inline image handoff must not change the structured process contract");
+const markerImage = (markerToolResult.content || []).find((entry) => entry?.type === "image");
+assert.ok(markerImage, `start_process artifact marker must append native image content over authenticated HTTP: ${JSON.stringify(markerToolResult)}`);
+assert.equal(markerImage.mimeType, "image/png");
+assert.equal(Buffer.from(markerImage.data, "base64").compare(Buffer.from(inlinePngBase64, "base64")), 0, "inline image bytes changed in transit");
+const markerResolutions = (markerToolResult.content || []).filter((entry) => entry?.type === "text" && /^resolution: \d+x\d+$/.test(entry.text)).map((entry) => entry.text);
+assert.deepEqual(markerResolutions, ["resolution: 1x1"]);
+assert.equal((markerToolResult.content || []).some((entry) => entry?.type === "resource_link" && entry?.mimeType?.startsWith?.("image/")), false, "image artifacts must be inline rather than lazy resource links");
 
 const structuredTransport = await callTool(sessionA, "start_process", {
   executable: process.execPath,
