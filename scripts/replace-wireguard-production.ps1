@@ -31,7 +31,7 @@ $edgeOwner = Join-Path $env:LOCALAPPDATA 'McpVpsEdge\provision_edge_extras.py'
 $state = Join-Path $repo '.state\production-replacement'
 $requestPath = Join-Path $state 'request.json'
 $receiptPath = Join-Path $state 'receipt.json'
-$recoveryStatePath = 'C:\Users\Lauri\Desktop\vault\04 Operating Contracts\mcp-recovery-state.json'
+$recoveryStatePath = Join-Path $env:USERPROFILE 'Desktop\vault\04 Operating Contracts\mcp-recovery-state.json'
 $guardianTask = 'McpV3ProductionReplacementGuardian'
 $candidateTask = 'McpV3ProductionReplacementCandidate'
 foreach ($taskName in @($guardianTask,$candidateTask)) {

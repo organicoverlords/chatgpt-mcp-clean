@@ -486,7 +486,7 @@ function nestedPowerShellCommandExpansionError(command: string, code: string): s
     if (command[payloadStart] !== '"') continue;
     const payload = command.slice(payloadStart + 1, segmentEnd);
     if (hasUnsafeNestedPowerShellExpansion(payload)) {
-      return "nested powershell/pwsh -Command double-quoted payload contains parent-expandable $ syntax; use C:\\Users\\Lauri\\.agents\\Invoke-LiteralScript.ps1 to transport the child script literally";
+      return "nested powershell/pwsh -Command double-quoted payload contains parent-expandable $ syntax; use the local .agents\\Invoke-LiteralScript.ps1 helper to transport the child script literally";
     }
   }
   return undefined;
