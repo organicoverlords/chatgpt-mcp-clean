@@ -96,7 +96,7 @@ try {
     /Invalid or expired authorization code/,
   );
 
-  for (let index = 0; index < 96; index += 1) {
+  for (let index = 0; index < 40; index += 1) {
     const redirect = `https://chatgpt.com/connector/oauth/churn-${index}`;
     await provider.clientsStore.registerClient(metadata(`churn-${index}`, redirect));
   }
@@ -193,7 +193,20 @@ try {
   const recoveredAgain = new LocalOAuthProvider(resourceUrl, "owner@example.com", storePath);
   assert.deepEqual((await recoveredAgain.clientsStore.getClient(staleClientId))?.redirect_uris, [redirectUri]);
 
-  console.log("PASS oauth_client_retention restart_mid_authorization=true churn=96 public_refresh_rotation=true retry_grace_bounded=true replay_revokes_family=true expiry_enforced=true scope_resource_client_bound=true confidential_refresh_compatible=true orphan_refresh_recovered=true stale_chatgpt_authorize_recovered=true secrets=not_printed");
+  const capacityStorePath = path.join(tempDir, "oauth-capacity.json");
+  const capacityProvider = new LocalOAuthProvider(resourceUrl, "owner@example.com", capacityStorePath);
+  for (let index = 0; index < 64; index += 1) {
+    await capacityProvider.clientsStore.registerClient(metadata(`capacity-${index}`, `https://chatgpt.com/connector/oauth/capacity-${index}`));
+  }
+  await assert.rejects(
+    capacityProvider.clientsStore.registerClient(metadata("capacity-overflow", "https://chatgpt.com/connector/oauth/capacity-overflow")),
+    /OAuth client registration limit reached \(64\)/,
+  );
+  const boundedState = JSON.parse(await readFile(capacityStorePath, "utf8"));
+  assert.equal(Object.keys(boundedState.clients).length, 64, "durable client state must remain hard-bounded");
+  assert.equal(capacityProvider.recoverLegacyChatGptClient("123e4567-e89b-42d3-a456-426614174001", redirectUri), false, "legacy recovery must not bypass the durable client bound");
+
+  console.log("PASS oauth_client_retention restart_mid_authorization=true churn=40 client_cap=64 public_refresh_rotation=true retry_grace_bounded=true replay_revokes_family=true expiry_enforced=true scope_resource_client_bound=true confidential_refresh_compatible=true orphan_refresh_recovered=true stale_chatgpt_authorize_recovered=true secrets=not_printed");
 } finally {
   await rm(tempDir, { recursive: true, force: true });
 }

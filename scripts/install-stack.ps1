@@ -79,7 +79,7 @@ function Test-Administrator {
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
-function Write-LocalCaddyfile([string]$Path,[string]$HostName,[int]$HttpsPort,[int]$BackendPort) {
+function Write-LocalCaddyfile([string]$Path,[string]$HostName,[int]$HttpsPort,[int]$BackendPort,[string]$OwnerUsername,[string]$OwnerPasswordHash) {
     $text = @"
 {
     https_port $HttpsPort
@@ -87,21 +87,48 @@ function Write-LocalCaddyfile([string]$Path,[string]$HostName,[int]$HttpsPort,[i
 }
 
 $HostName {
-    @local_authorize {
-        path /authorize
-        remote_ip private_ranges
-    }
-    handle @local_authorize {
-        reverse_proxy 127.0.0.1:$BackendPort
-    }
     @authorize path /authorize
-    respond @authorize "Owner authorization required" 403
+    handle @authorize {
+        basic_auth {
+            $OwnerUsername $OwnerPasswordHash
+        }
+        reverse_proxy 127.0.0.1:$BackendPort {
+            header_up -Authorization
+            header_up X-MCP-Owner-Authorized 1
+        }
+    }
     handle {
-        reverse_proxy 127.0.0.1:$BackendPort
+        reverse_proxy 127.0.0.1:$BackendPort {
+            header_up -X-MCP-Owner-Authorized
+        }
     }
 }
 "@
     [IO.File]::WriteAllText($Path, $text.Replace("`r`n","`n"), (New-Object Text.UTF8Encoding($false)))
+}
+function New-OwnerPassword {
+    $bytes = [Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
+    return [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+}
+function Read-OrCreateOwnerCredentials([string]$Path) {
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        try { $existing = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw "owner authorization credential file is invalid JSON: $Path" }
+        if ([int]$existing.schema_version -ne 1 -or [string]$existing.username -ne 'owner' -or [string]$existing.password -notmatch '^[A-Za-z0-9_-]{40,}$') {
+            throw "owner authorization credential file has an unsupported shape: $Path"
+        }
+        return [pscustomobject]@{ username=[string]$existing.username; password=[string]$existing.password }
+    }
+    $password = New-OwnerPassword
+    $record = [ordered]@{ schema_version=1; username='owner'; password=$password; created_at=[DateTimeOffset]::UtcNow.ToString('o') }
+    $temporary = "$Path.$([Guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [IO.File]::WriteAllText($temporary, ($record | ConvertTo-Json -Depth 3), (New-Object Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $temporary -Destination $Path
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+    return [pscustomobject]@{ username='owner'; password=$password }
 }
 
 $origin = $null
@@ -141,7 +168,7 @@ if ([string]$caddySpec.sha256 -notmatch '^[0-9a-f]{64}$') { throw 'invalid pinne
 $actions = @(
     "install MCP runtime on loopback 127.0.0.1:$Port with exactly five connector tools",
     "install local Caddy $($caddySpec.version) on TCP $CaddyHttpsPort for $($origin.Host)",
-    'use local-edge owner authorization; no VPS, WireGuard, or Tailscale owner-auth path',
+    'use password-protected local-edge owner authorization; LAN/private source IP alone is never owner proof',
     "install standalone BusyCoordinator into $BusyRoot",
     "install/update public agent rules checkout at $RulesRoot ($RulesRef)",
     "install PlanOnly profile into $InstallRoot\profiles\plan-only.json",
@@ -169,8 +196,17 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'npm ci failed' }
         & npm.cmd run build --silent
         if ($LASTEXITCODE -ne 0) { throw 'MCP build failed' }
-        & node.exe scripts/verify-process-contract.mjs
-        if ($LASTEXITCODE -ne 0) { throw 'five-tool MCP connector contract verification failed' }
+        $priorLocalFileToolName = $env:MCP_LOCAL_FILE_TOOL_NAME
+        $priorLibrarySpoolBridge = $env:MCP_LIBRARY_SPOOL_BRIDGE
+        try {
+            $env:MCP_LOCAL_FILE_TOOL_NAME = 'upload_local_file'
+            $env:MCP_LIBRARY_SPOOL_BRIDGE = '0'
+            & node.exe scripts/verify-process-contract.mjs
+            if ($LASTEXITCODE -ne 0) { throw 'five-tool MCP connector contract verification failed' }
+        } finally {
+            if ($null -eq $priorLocalFileToolName) { Remove-Item Env:MCP_LOCAL_FILE_TOOL_NAME -ErrorAction SilentlyContinue } else { $env:MCP_LOCAL_FILE_TOOL_NAME = $priorLocalFileToolName }
+            if ($null -eq $priorLibrarySpoolBridge) { Remove-Item Env:MCP_LIBRARY_SPOOL_BRIDGE -ErrorAction SilentlyContinue } else { $env:MCP_LIBRARY_SPOOL_BRIDGE = $priorLibrarySpoolBridge }
+        }
         & npm.cmd prune --omit=dev --silent
         if ($LASTEXITCODE -ne 0) { throw 'npm production prune failed' }
     } finally { Pop-Location }
@@ -204,6 +240,15 @@ try {
 }
 Swap-Directory $preparedBusy $BusyRoot
 
+$stateRoot = Join-Path $InstallRoot 'state'
+$instanceState = Join-Path $stateRoot $InstanceId
+$oauthStorePath = Join-Path $instanceState 'oauth.json'
+$ownerCredentialsPath = Join-Path $instanceState 'owner-auth.json'
+$oauthAclHelper = Join-Path $InstallRoot 'mcp\scripts\protect-oauth-state.ps1'
+& $oauthAclHelper -OAuthStorePath $oauthStorePath
+if ($LASTEXITCODE -ne 0) { throw 'OAuth/owner state ACL protection failed' }
+$ownerCredentials = Read-OrCreateOwnerCredentials $ownerCredentialsPath
+
 $profilesRoot = Join-Path $InstallRoot 'profiles'
 New-Item -ItemType Directory -Force -Path $profilesRoot | Out-Null
 $planProfile = Join-Path $profilesRoot 'plan-only.json'
@@ -225,7 +270,9 @@ try {
     Expand-Archive -LiteralPath $tempZip -DestinationPath $preparedCaddy -Force
     $caddyExePrepared = Join-Path $preparedCaddy 'caddy.exe'
     if (-not (Test-Path -LiteralPath $caddyExePrepared -PathType Leaf)) { throw 'Caddy archive did not contain caddy.exe' }
-    Write-LocalCaddyfile (Join-Path $preparedCaddy 'Caddyfile') $origin.Host $CaddyHttpsPort $Port
+    $ownerPasswordHash = ((& $caddyExePrepared hash-password --plaintext $ownerCredentials.password) | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($ownerPasswordHash)) { throw 'Caddy owner-password hashing failed' }
+    Write-LocalCaddyfile (Join-Path $preparedCaddy 'Caddyfile') $origin.Host $CaddyHttpsPort $Port $ownerCredentials.username $ownerPasswordHash
     & $caddyExePrepared validate --config (Join-Path $preparedCaddy 'Caddyfile') --adapter caddyfile | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'generated local Caddy configuration is invalid' }
     Swap-Directory $preparedCaddy $caddyRoot
@@ -240,8 +287,6 @@ if (-not $SkipFirewall) {
     New-NetFirewallRule -DisplayName $FirewallRuleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort $CaddyHttpsPort -Profile Any -Program $caddyExe | Out-Null
 }
 
-$stateRoot = Join-Path $InstallRoot 'state'
-New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $env:LOCALAPPDATA 'ChatGPTMcpClean\.state') | Out-Null
 $configPath = Join-Path $InstallRoot 'stack-config.json'
 $config = [ordered]@{
@@ -258,8 +303,10 @@ $config = [ordered]@{
     instance_id = $InstanceId
     port = $Port
     public_origin = $PublicOrigin.TrimEnd('/')
-    owner_auth_mode = 'local-edge'
+    owner_auth_mode = 'local-edge-basic'
     owner_login = $OwnerLogin
+    owner_auth_username = $ownerCredentials.username
+    owner_auth_credentials_path = $ownerCredentialsPath
     tool_profile = 'process'
     tool_count = 5
     library_delivery = 'explicit file tools'
@@ -305,6 +352,7 @@ if ($LASTEXITCODE -ne 0) { throw 'stack doctor reported an installation failure'
     ok=$true; topology='local-home-direct'; tool_count=5; tools=@('start_process','read_output','kill_process','upload_local_file','download_chatgpt_file')
     library_delivery='explicit file tools'; source_commit=$sourceCommit; install_root=$InstallRoot
     config_path=$configPath; mcp_url=$mcpUrl; local_health=("http://127.0.0.1:{0}/health" -f $Port); local_https_port=$CaddyHttpsPort
+    owner_auth_username=$ownerCredentials.username; owner_auth_credentials_path=$ownerCredentialsPath
     busy_command=(Join-Path $BusyRoot 'busy-python.cmd'); rules_root=$RulesRoot; plan_only_profile=$planProfile
     agent_entrypoints=[bool]$WithAgentEntrypoints; autostart=(-not $NoAutostart)
     router_requirement="forward public TCP 443 to this Windows machine TCP $CaddyHttpsPort; no VPS is used"

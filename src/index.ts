@@ -241,11 +241,11 @@ app.use("/authorize", (req, res, next) => {
     }
   } else {
     const directLocalAuthorizationHosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, frontDoorHost]);
-    const directLocal = directLocalAuthorizationHosts.has(host) && isPrivateOrLocalClientAddress(req.ip);
-    const forwardedPrivate = Boolean(req.header("x-forwarded-for"))
-      && authorizationHost === host
-      && isPrivateOrLocalClientAddress(req.ip);
-    if (!directLocal && !forwardedPrivate) {
+    const directLocal = directLocalAuthorizationHosts.has(host) && isPrivateOrLocalClientAddress(req.socket.remoteAddress);
+    const edgeAuthorized = authorizationHost === host
+      && req.header("x-mcp-owner-authorized") === "1"
+      && isPrivateOrLocalClientAddress(req.socket.remoteAddress);
+    if (!directLocal && !edgeAuthorized) {
       res.status(403).send("Owner authorization required");
       return;
     }

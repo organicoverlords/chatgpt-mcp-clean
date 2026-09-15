@@ -767,7 +767,11 @@ function localFileToolPresentation(name: LocalFileToolName) {
   };
 }
 
-export function librarySpoolBridgeEnabled(): boolean { return process.env.MCP_LIBRARY_SPOOL_BRIDGE === '1' || (process.env.MCP_RUNTIME_INSTANCE_ID || '').startsWith('issue333-persistent-widget-'); }
+export function librarySpoolBridgeEnabled(): boolean {
+  const configured = (process.env.MCP_LIBRARY_SPOOL_BRIDGE || "").trim();
+  if (configured === "0") return false;
+  return configured === "1" || (process.env.MCP_RUNTIME_INSTANCE_ID || "").startsWith("issue333-persistent-widget-");
+}
 
 function uploadToolMeta(name: LocalFileToolName) {
   const presentation = localFileToolPresentation(name);
