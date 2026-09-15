@@ -9,7 +9,7 @@ param(
     [string]$PublicOrigin = 'https://91-159-12-133.sslip.io',
     [string]$OAuthStoreRelative = 'home-direct-test\\oauth.json',
     [string]$ReceiptStoreRelative = 'shared-process-receipts',
-    [string]$CurrentTopologyPath = 'C:\Users\Lauri\Desktop\vault\04 Operating Contracts\mcp-current-topology.json',
+    [string]$CurrentTopologyPath = (Join-Path $env:USERPROFILE 'Desktop\vault\04 Operating Contracts\mcp-current-topology.json'),
     [switch]$ExplicitUserAuthorization,
     [switch]$Plan
 )

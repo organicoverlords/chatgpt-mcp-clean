@@ -10,8 +10,8 @@ param(
     [string]$PublicOrigin = 'https://91-159-12-133.sslip.io',
     [string]$CaddyConfigPath = (Join-Path $env:LOCALAPPDATA 'Caddy\mcp-home-test\Caddyfile'),
     [string]$CaddyExe = (Join-Path $env:LOCALAPPDATA 'Caddy\mcp-home-test\caddy.exe'),
-    [string]$StackAtlasPath = 'C:\Users\Lauri\Desktop\vault\tools\stack_atlas.py',
-    [string]$CurrentTopologyPath = 'C:\Users\Lauri\Desktop\vault\04 Operating Contracts\mcp-current-topology.json',
+    [string]$StackAtlasPath = (Join-Path $env:USERPROFILE 'Desktop\vault\tools\stack_atlas.py'),
+    [string]$CurrentTopologyPath = (Join-Path $env:USERPROFILE 'Desktop\vault\04 Operating Contracts\mcp-current-topology.json'),
     [switch]$CurrentPortFromTargetHost,
     [switch]$CreateTargetHost,
     [switch]$Plan
