@@ -19,7 +19,7 @@ for (const forbidden of ["view_image", "upload_local_file", "read_local_file", "
   assert.equal(server._registeredTools[forbidden], undefined, `${forbidden} must not be exposed`);
 }
 
-function mediaEntries(result) { return result.content.slice(1); }
+function mediaEntries(result) { return result.content; }
 function imageEntries(result) { return mediaEntries(result).filter((entry) => entry.type === "image"); }
 function resolutionEntries(result) { return mediaEntries(result).filter((entry) => entry.type === "text" && /^resolution: \d+x\d+$/.test(entry.text)); }
 

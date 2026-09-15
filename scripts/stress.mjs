@@ -169,11 +169,9 @@ console.log(`\nphase 3 - ${PROCS} concurrent start_process/read_output/kill_proc
       jsonrpc: "2.0", id: 100 + i, method: "tools/call",
       params: { name: "start_process", arguments: { language: "powershell", script: `Write-Output 'STRESS_${i}'; Start-Sleep -Seconds 20` } },
     });
-    const text = r.body?.result?.content?.[0]?.text || "";
-    let data = null;
-    try { data = JSON.parse(text); } catch {}
+    const data = r.body?.result?.structuredContent || null;
     if (r.status === 200 && data?.process_id) jobs[i] = data;
-    return { ok: r.status === 200 && !!data?.process_id, ms: r.ms, detail: `status=${r.status} ${text.slice(0, 120)}` };
+    return { ok: r.status === 200 && !!data?.process_id, ms: r.ms, detail: `status=${r.status} process_id=${data?.process_id || "missing"}` };
   });
   report("start_process", lats, errors);
   if (errors) fail(`start_process had ${errors} errors`);
@@ -186,7 +184,7 @@ console.log(`\nphase 3 - ${PROCS} concurrent start_process/read_output/kill_proc
   const outputErrors = outputs.filter((r, i) => {
     const expected = `STRESS_${activeJobs[i].index}`;
     const startText = String(activeJobs[i].job.stdout || "");
-    const readText = String(r.body?.result?.content?.[0]?.text || "");
+    const readText = String(r.body?.result?.structuredContent?.stdout || "");
     return r.status !== 200 || (!startText.includes(expected) && !readText.includes(expected));
   }).length;
   if (outputErrors) fail(`read_output had ${outputErrors} errors`); else ok("read_output clean, all outputs matched");
@@ -195,7 +193,7 @@ console.log(`\nphase 3 - ${PROCS} concurrent start_process/read_output/kill_proc
     jsonrpc: "2.0", id: 300 + job.pid, method: "tools/call",
     params: { name: "kill_process", arguments: { process_id: job.process_id } },
   })));
-  const killErrors = kills.filter((r) => r.status !== 200 || !r.body?.result?.content?.[0]?.text?.includes("killed")).length;
+  const killErrors = kills.filter((r) => r.status !== 200 || r.body?.result?.structuredContent?.killed !== true).length;
   if (killErrors) fail(`kill_process had ${killErrors} errors`); else ok("kill_process clean, all process trees stopped");
 }
 

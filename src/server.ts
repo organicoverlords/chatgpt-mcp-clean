@@ -214,9 +214,11 @@ async function structuredTextResult(value: unknown, id: string, servingIdentity:
   const data = resultData(value, id, servingIdentity);
   const handoffs = await prepareMarkedArtifactHandoffs(value);
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(data) }, ...handoffs.flatMap((handoff) => handoff.content || [])],
-    // Keep the frozen process output contract unchanged. Native file references are MCP
-    // CallToolResult content, not new structured fields or app/widget metadata.
+    // structuredContent is the canonical model-visible process result. Do not mirror the
+    // same JSON into text content: ChatGPT may treat that duplicate channel as a second
+    // result/resource path, which adds avoidable tool-card churn. Native artifact blocks
+    // still ride CallToolResult content because they are not representable in the schema.
+    content: handoffs.flatMap((handoff) => handoff.content || []),
     structuredContent: data,
   };
 }
