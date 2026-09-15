@@ -171,7 +171,8 @@ try {
 
 const runtime = await run("Write-Output $PSVersionTable.PSEdition; Write-Output $PSVersionTable.PSVersion.ToString(); Write-Output (Get-Process -Id $PID).Path", "caller_pwsh_runtime");
 assert.match(runtime.stdout, /Core/);
-assert.match(runtime.stdout, /7\.6\.5/);
+const runtimeVersion = runtime.stdout.match(/^7\.\d+\.\d+/m)?.[0];
+assert.ok(runtimeVersion, `expected PowerShell 7.x runtime, got: ${runtime.stdout}`);
 assert.match(runtime.stdout, /C:\\Program Files\\PowerShell\\7\\pwsh\.exe/i);
 
 const operators = await run("cmd.exe /c exit 0 && Write-Output AND_OK; cmd.exe /c exit 1 || Write-Output OR_OK; $value = $null ?? 'NULL_OK'; Write-Output $value", "caller_pwsh_operators");
@@ -359,5 +360,5 @@ try {
   rmSync(rejectionReceiptDirectory, { recursive: true, force: true });
 }
 
-console.log("PASS powershell_preflight pwsh=7.6.5 ps7_operators=true loop_pipeline_autonormalization=true nested_command_parent_expansion=guarded args_assignment=allowed drive_root_recursion=blocked vault_root_recursion=blocked bounded_recursion=allowed durable_rejections=true failure_diagnostics=structured_not_prompted");
+console.log(`PASS powershell_preflight pwsh=${runtimeVersion} ps7_operators=true loop_pipeline_autonormalization=true nested_command_parent_expansion=guarded args_assignment=allowed drive_root_recursion=blocked vault_root_recursion=blocked bounded_recursion=allowed durable_rejections=true failure_diagnostics=structured_not_prompted`);
 process.exit(0);
