@@ -200,7 +200,7 @@
   },
   {
     "name": "read_output",
-    "description": "Read process stdout/stderr or a fixed read-only snapshot alias. Aliases: bootstrap, timeline, checkup, rules, agents, contracts, pre-repo, shared-policy. pre-repo/shared-policy return the machine-wide RULES.md + AGENTS.md together. Aliases never accept client-supplied paths. Returns structured data only; it never mounts an app/widget template. When wait_ms is omitted, quiet reads adapt from 2s up to 60s; explicit wait_ms may wait up to 120000 ms. Reads wake immediately on new output or process exit. Each stream is bounded to 32000 characters.",
+    "description": "Read process stdout/stderr or a named bootstrap snapshot. Returns structured data only; it never mounts an app/widget template. When wait_ms is omitted, quiet reads adapt from 2s up to 60s; explicit wait_ms may wait up to 120000 ms. Reads wake immediately on new output or process exit. Each stream is bounded to 32000 characters.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -732,25 +732,6 @@
         "bootstrap_alias": {
           "type": "boolean",
           "const": true
-        },
-        "shared_policy_alias": {
-          "type": "boolean",
-          "const": true
-        },
-        "read_mode": {
-          "type": "string",
-          "const": "FIXED_SHARED_POLICY_FILES"
-        },
-        "sources": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": [
-              "RULES.md",
-              "AGENTS.md",
-              "CONTRACTS.json"
-            ]
-          }
         }
       },
       "required": [
@@ -1380,25 +1361,6 @@
         "bootstrap_alias": {
           "type": "boolean",
           "const": true
-        },
-        "shared_policy_alias": {
-          "type": "boolean",
-          "const": true
-        },
-        "read_mode": {
-          "type": "string",
-          "const": "FIXED_SHARED_POLICY_FILES"
-        },
-        "sources": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": [
-              "RULES.md",
-              "AGENTS.md",
-              "CONTRACTS.json"
-            ]
-          }
         }
       },
       "required": [
