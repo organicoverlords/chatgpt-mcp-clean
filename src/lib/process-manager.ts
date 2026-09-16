@@ -11,7 +11,16 @@ const MAX_CAPTURE_CHARS = 100_000;
 // character read_output response. Keep the logical read/page contract at 32k; do not
 // reintroduce the stale August 6k transport assumption.
 const MAX_READ_CHARS = 32_000;
-const ADAPTIVE_READ_WAIT_MS = [2_000, 5_000, 10_000] as const;
+export const MAX_READ_WAIT_MS = 120_000;
+export const ADAPTIVE_READ_WAIT_MS = [2_000, 5_000, 10_000, 30_000, 60_000] as const;
+
+export function boundReadWaitMs(waitMs: number): number {
+  return Math.max(0, Math.min(waitMs, MAX_READ_WAIT_MS));
+}
+
+export function adaptiveReadWaitMs(quietStreak: number): number {
+  return ADAPTIVE_READ_WAIT_MS[Math.min(Math.max(0, quietStreak), ADAPTIVE_READ_WAIT_MS.length - 1)]!;
+}
 const MAX_COMMAND_REPORT_CHARS = 4_000;
 const COMPLETED_RETENTION_MS = 30 * 60 * 1000;
 const RECEIPT_ARCHIVE_RETENTION_DAYS = 7;
@@ -2241,7 +2250,7 @@ export class ProcessManager {
       throw new Error(`Unknown process_id: ${processId}`);
     }
     const requestId = randomUUID();
-    const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
+    const boundedWaitMs = action === "read" ? boundReadWaitMs(waitMs) : 0;
     const timeoutMs = action === "read"
       ? boundedWaitMs + CONTROL_HANDOFF_OVERHEAD_MS
       : CONTROL_KILL_TIMEOUT_MS;
@@ -2803,7 +2812,7 @@ export class ProcessManager {
       return await this.readWithWait(processId, maxChars, waitMs);
     }
     const quietStreak = this.adaptiveReadQuietStreaks.get(adaptiveKey) ?? 0;
-    const adaptiveWaitMs = ADAPTIVE_READ_WAIT_MS[Math.min(quietStreak, ADAPTIVE_READ_WAIT_MS.length - 1)]!;
+    const adaptiveWaitMs = adaptiveReadWaitMs(quietStreak);
     try {
       const result = await this.readWithWait(processId, maxChars, adaptiveWaitMs);
       if (result.running === true && result.no_change === true) {
@@ -2819,7 +2828,7 @@ export class ProcessManager {
   }
 
   async readWithWait(processId: string, maxChars = MAX_READ_CHARS, waitMs = 0): Promise<Record<string, unknown>> {
-    const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
+    const boundedWaitMs = boundReadWaitMs(waitMs);
     emitTelemetry({
       event: "process_wait_requested",
       action: "read",

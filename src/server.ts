@@ -272,12 +272,12 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
     "read_output",
     {
       title: "Check command",
-      description: "Read process stdout/stderr or a fixed read-only snapshot alias. Aliases: bootstrap, timeline, checkup, rules, agents, contracts, pre-repo, shared-policy. pre-repo/shared-policy return the machine-wide RULES.md + AGENTS.md together. Aliases never accept client-supplied paths. Returns structured data only; it never mounts an app/widget template. wait_ms may wait up to 10000 ms for process output or exit, and each stream is bounded to 32000 characters.",
+      description: "Read process stdout/stderr or a fixed read-only snapshot alias. Aliases: bootstrap, timeline, checkup, rules, agents, contracts, pre-repo, shared-policy. pre-repo/shared-policy return the machine-wide RULES.md + AGENTS.md together. Aliases never accept client-supplied paths. Returns structured data only; it never mounts an app/widget template. When wait_ms is omitted, quiet reads adapt from 2s up to 60s; explicit wait_ms may wait up to 120000 ms. Reads wake immediately on new output or process exit. Each stream is bounded to 32000 characters.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: z.object({
         process_id: z.string().min(1),
         max_chars: z.number().int().optional(),
-        wait_ms: z.number().int().min(0).max(10_000).optional(),
+        wait_ms: z.number().int().min(0).max(120_000).optional(),
       }),
       outputSchema: processOutputSchema,
     },
