@@ -23,6 +23,12 @@ const root = mkdtempSync(join(tmpdir(), "mcp-bootstrap-snapshot-"));
 process.env.MCP_BOOTSTRAP_SNAPSHOT_PATH = join(root, "bootstrap.json");
 process.env.MCP_TIMELINE_SNAPSHOT_PATH = join(root, "timeline.json");
 process.env.MCP_PROCESS_RECEIPT_DIR = join(root, "receipts");
+process.env.MCP_SHARED_RULES_PATH = join(root, "RULES.md");
+process.env.MCP_SHARED_AGENTS_PATH = join(root, "AGENTS.md");
+process.env.MCP_SHARED_CONTRACTS_PATH = join(root, "CONTRACTS.json");
+writeFileSync(process.env.MCP_SHARED_RULES_PATH, "# Rules\nshared-rule\n");
+writeFileSync(process.env.MCP_SHARED_AGENTS_PATH, "# Agents\nrepo-work-contract\n");
+writeFileSync(process.env.MCP_SHARED_CONTRACTS_PATH, '{"contracts":["owner"]}\n');
 const realSpawn = childProcess.spawn;
 const realExecFile = childProcess.execFile;
 childProcess.spawn = childProcess.execFile = () => { throw new Error("Snapshot read must not spawn a process"); };
@@ -34,8 +40,20 @@ function writeBootstrap(overrides = {}) {
   }));
 }
 try {
-  for (const id of ["bootstrap", "231b7e74-4cc8-43d0-9702-fd6dfa2215b3", "timeline", "checkup"]) assert.equal(isBootstrapSnapshot(id), true);
+  for (const id of ["bootstrap", "231b7e74-4cc8-43d0-9702-fd6dfa2215b3", "timeline", "checkup", "rules", "agents", "contracts", "pre-repo", "shared-policy"]) assert.equal(isBootstrapSnapshot(id), true);
   assert.equal(isBootstrapSnapshot(randomUUID()), false);
+  assert.equal(isBootstrapSnapshot(process.env.MCP_SHARED_RULES_PATH), false);
+  assert.equal((await readBootstrapSnapshot(32000, "rules")).stdout, "# Rules\nshared-rule\n");
+  assert.equal((await readBootstrapSnapshot(32000, "agents")).stdout, "# Agents\nrepo-work-contract\n");
+  assert.equal((await readBootstrapSnapshot(32000, "contracts")).stdout, '{"contracts":["owner"]}\n');
+  for (const id of ["pre-repo", "shared-policy"]) {
+    const policy = await readBootstrapSnapshot(32000, id);
+    assert.equal(policy.shared_policy_alias, true);
+    assert.deepEqual(policy.sources, ["RULES.md", "AGENTS.md"]);
+    assert.match(policy.stdout, /^===== RULES\.md =====\n# Rules/m);
+    assert.match(policy.stdout, /===== AGENTS\.md =====\n# Agents/);
+  }
+  await assert.rejects(readBootstrapSnapshot(5, "rules"), /no partial policy returned/);
   await assert.rejects(readBootstrapSnapshot(), { code: "ENOENT" });
   writeBootstrap();
   const concurrent = await Promise.allSettled([readBootstrapSnapshot(1), ...Array.from({ length: 8 }, () => readBootstrapSnapshot())]);
@@ -108,11 +126,13 @@ try {
   await server.connect(serverTransport);
   await client.connect(clientTransport);
   try {
-    for (const id of ["231b7e74-4cc8-43d0-9702-fd6dfa2215b3", "bootstrap", "timeline", "checkup"]) {
+    for (const id of ["231b7e74-4cc8-43d0-9702-fd6dfa2215b3", "bootstrap", "timeline", "checkup", "rules", "agents", "contracts", "pre-repo", "shared-policy"]) {
       const started = performance.now();
       const reply = await client.callTool({ name: "read_output", arguments: { process_id: id, max_chars: 32000, wait_ms: 0 } });
       assert.equal(reply.isError, undefined, JSON.stringify(reply));
-      assert.equal(JSON.parse(reply.content[0].text).snapshot_alias, true);
+      const envelope = reply.structuredContent;
+      assert.equal(envelope.snapshot_alias, true);
+      if (["rules", "agents", "contracts", "pre-repo", "shared-policy"].includes(id)) assert.equal(envelope.shared_policy_alias, true);
       console.log(`PASS local MCP read_output ${id}: ${Math.round(performance.now() - started)} ms, no subprocess`);
     }
   } finally { await client.close(); await server.close(); }

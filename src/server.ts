@@ -175,6 +175,9 @@ const processOutputSchema = z.object({
   freshness: snapshotFreshnessSchema.optional(),
   snapshot_alias: z.literal(true).optional(),
   bootstrap_alias: z.literal(true).optional(),
+  shared_policy_alias: z.literal(true).optional(),
+  read_mode: z.literal("FIXED_SHARED_POLICY_FILES").optional(),
+  sources: z.array(z.enum(["RULES.md", "AGENTS.md", "CONTRACTS.json"])).optional(),
 }).strict();
 
 const killProcessOutputSchema = z.object({
@@ -269,7 +272,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
     "read_output",
     {
       title: "Check command",
-      description: "Read process stdout/stderr or a named bootstrap snapshot. Returns structured data only; it never mounts an app/widget template. wait_ms may wait up to 10000 ms for output or exit, and each stream is bounded to 32000 characters.",
+      description: "Read process stdout/stderr or a fixed read-only snapshot alias. Aliases: bootstrap, timeline, checkup, rules, agents, contracts, pre-repo, shared-policy. pre-repo/shared-policy return the machine-wide RULES.md + AGENTS.md together. Aliases never accept client-supplied paths. Returns structured data only; it never mounts an app/widget template. wait_ms may wait up to 10000 ms for process output or exit, and each stream is bounded to 32000 characters.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: z.object({
         process_id: z.string().min(1),
