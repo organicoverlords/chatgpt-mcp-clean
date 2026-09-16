@@ -16,19 +16,14 @@ const actualTools = Object.entries(server._registeredTools)
   .sort(([a], [b]) => a.localeCompare(b))
   .map(([name, tool]) => ({ name, description: tool.description || "", inputSchema: z.toJSONSchema(tool.inputSchema), ...(tool.outputSchema ? { outputSchema: z.toJSONSchema(tool.outputSchema) } : {}) }));
 
-const expectedToolTitles = {
-  start_process: "Run command",
-  read_output: "Check command",
-  kill_process: "Stop process",
-  download_chatgpt_file: "Save ChatGPT file",
-};
-for (const [name, expectedTitle] of Object.entries(expectedToolTitles)) {
+const toolsWithoutClientUiTitles = ["start_process", "read_output", "kill_process", "download_chatgpt_file"];
+for (const name of toolsWithoutClientUiTitles) {
   const tool = server._registeredTools[name];
-  assert.equal(tool?.title, expectedTitle, `${name} must expose its concise user-facing title`);
-  assert.equal(tool?._meta?.["openai/toolInvocation/invoking"], undefined, `${name} must not publish invocation status metadata that can remount the ChatGPT tool card`);
-  assert.equal(tool?._meta?.["openai/toolInvocation/invoked"], undefined, `${name} must not publish completion status metadata that can remount the ChatGPT tool card`);
+  assert.equal(tool?.title, undefined, `${name} must not advertise client UI title metadata`);
+  assert.equal(tool?._meta?.["openai/toolInvocation/invoking"], undefined, `${name} must not advertise invoking status metadata`);
+  assert.equal(tool?._meta?.["openai/toolInvocation/invoked"], undefined, `${name} must not advertise invoked status metadata`);
 }
-assert.deepEqual(server._registeredTools.download_chatgpt_file?._meta?.["openai/fileParams"], ["file"], "download_chatgpt_file must preserve ChatGPT file parameter metadata");
+assert.deepEqual(server._registeredTools.download_chatgpt_file?._meta?.["openai/fileParams"], ["file"], "download_chatgpt_file must preserve openai/fileParams");
 
 const structuredProcessToolNames = ["start_process", "read_output", "kill_process"];
 for (const name of structuredProcessToolNames) {
