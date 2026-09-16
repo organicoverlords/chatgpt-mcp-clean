@@ -48,12 +48,6 @@ const startInputSchema = server._registeredTools.start_process?.inputSchema;
 assert.ok(startInputSchema, "start_process input schema missing");
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output LEGACY" })).success, true, "legacy command input must remain valid");
 assert.equal((await startInputSchema.safeParseAsync({ executable: "node", args: ["--version"], stdin: "" })).success, true, "structured executable+args+stdin input must be valid");
-assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output WORKER", worker_identity: { population: "manual", id: "manual-20260916-test" } })).success, true, "explicit manual worker identity must be valid");
-assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output ENV_WORKER", env: { CHATGPT_WORKER_POPULATION: "recurring", CHATGPT_WORKER_ID: "6aa80831a83481918a038dc0033b4f15" } })).success, true, "cached-schema worker identity env compatibility carrier must be valid for legacy command mode");
-assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output PARTIAL", env: { CHATGPT_WORKER_POPULATION: "manual" } })).success, false, "worker identity env compatibility carrier must require both reserved keys");
-assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output CONFLICT", worker_identity: { population: "manual", id: "manual-one" }, env: { CHATGPT_WORKER_POPULATION: "manual", CHATGPT_WORKER_ID: "manual-two" } })).success, false, "dedicated and env worker identities must not conflict");
-assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output BAD_ENV", env: { ORDINARY_CHILD_ENV: "no" } })).success, false, "legacy command mode must still reject ordinary child env overrides");
-assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output BAD", worker_identity: { population: "unknown", id: "bad worker" } })).success, false, "worker identity must be bounded to supported populations and safe ids");
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output BAD", executable: "node" })).success, false, "command and executable modes must be mutually exclusive");
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output BAD", stdin: "x" })).success, false, "legacy command mode must reject structured stdin");
 
@@ -68,7 +62,7 @@ async function assertStructuredProcessResult(name, args) {
   const result = await tool.handler(args, {});
   assert.ok(result.structuredContent, `${name} must return structuredContent`);
   assert.deepEqual(result.structuredContent.serving_identity, {
-    tool_contract_version: "process-tools.v4",
+    tool_contract_version: "process-tools.v3",
     backend_generation: "backend-contract-test",
     source_commit: contractSourceCommit,
   }, `${name} must expose exact serving backend/source/contract identity`);
@@ -78,25 +72,8 @@ async function assertStructuredProcessResult(name, args) {
   return result.structuredContent;
 }
 
-const contractWorkerIdentity = { population: "manual", id: "manual-process-contract" };
-const startStructured = await assertStructuredProcessResult("start_process", { command: "Write-Output process-contract-structured", wait_ms: 10_000, worker_identity: contractWorkerIdentity });
+const startStructured = await assertStructuredProcessResult("start_process", { command: "Write-Output process-contract-structured", wait_ms: 10_000 });
 assert.match(startStructured.stdout || "", /process-contract-structured/, "start_process structured output should preserve stdout");
-assert.deepEqual(startStructured.worker_identity, contractWorkerIdentity, "start_process must expose its explicit process-bound worker identity");
-const envCompatibilityWorkerIdentity = { population: "recurring", id: "6aa80831a83481918a038dc0033b4f15" };
-const envCompatibilityLegacy = await assertStructuredProcessResult("start_process", {
-  command: "Write-Output worker-env-compatibility",
-  wait_ms: 10_000,
-  env: { CHATGPT_WORKER_POPULATION: envCompatibilityWorkerIdentity.population, CHATGPT_WORKER_ID: envCompatibilityWorkerIdentity.id },
-});
-assert.deepEqual(envCompatibilityLegacy.worker_identity, envCompatibilityWorkerIdentity, "reserved env compatibility carrier must become process-bound worker identity");
-const envCompatibilityStructured = await assertStructuredProcessResult("start_process", {
-  executable: process.execPath,
-  args: ["-e", "console.log(JSON.stringify({population:process.env.CHATGPT_WORKER_POPULATION??null,id:process.env.CHATGPT_WORKER_ID??null,ordinary:process.env.ORDINARY_CHILD_ENV??null}))"],
-  env: { CHATGPT_WORKER_POPULATION: envCompatibilityWorkerIdentity.population, CHATGPT_WORKER_ID: envCompatibilityWorkerIdentity.id, ORDINARY_CHILD_ENV: "preserved" },
-  wait_ms: 10_000,
-});
-assert.deepEqual(envCompatibilityStructured.worker_identity, envCompatibilityWorkerIdentity, "structured env compatibility carrier must become process-bound worker identity");
-assert.deepEqual(JSON.parse(String(envCompatibilityStructured.stdout || "").trim()), { population: null, id: null, ordinary: "preserved" }, "reserved worker identity env keys must be stripped before child launch while ordinary env remains");
 const trickyArg = String.raw`space ; $dollar \"quote\" ` + "`tick";
 const argvStructured = await assertStructuredProcessResult("start_process", {
   executable: process.execPath,
@@ -115,7 +92,6 @@ const stdinStructured = await assertStructuredProcessResult("start_process", {
 assert.equal(String(stdinStructured.stdout || ""), "contract-stdin\n", "structured stdin must reach the child without shell transport");
 const readStructured = await assertStructuredProcessResult("read_output", { process_id: startStructured.process_id, max_chars: 32_000, wait_ms: 0 });
 assert.equal(readStructured.process_id, startStructured.process_id, "read_output structured result must preserve process identity");
-assert.deepEqual(readStructured.worker_identity, contractWorkerIdentity, "read_output must preserve process-bound worker identity");
 const tinyReadStructured = await assertStructuredProcessResult("read_output", { process_id: startStructured.process_id, max_chars: 0, wait_ms: 0 });
 assert.ok(String(tinyReadStructured.stdout || "").length <= 1, "max_chars=0 must clamp to one retained character");
 assert.equal(tinyReadStructured.output_page?.page_limit, 1, "max_chars=0 must expose the effective clamped page limit");
@@ -129,7 +105,7 @@ const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "c3ea7fe3bedf60bd9db860f37e6b6979d9ddab9b9c14875e3db91d0a2223d0ff";
+const acceptedContractSha256 = "776f674565742ac15d101159a7d58a70bed6bdc1635bc9a41bb7708c667b3247";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 const expectedTools = [...baseExpectedTools].sort((a, b) => a.name.localeCompare(b.name));

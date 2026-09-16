@@ -25,10 +25,6 @@ const activityTargetSchema = z.object({
   project: z.string().min(1).max(80).regex(activityToken).optional(),
 }).strict();
 const actionClassSchema = z.string().min(1).max(64).regex(activityToken);
-const workerIdentitySchema = z.object({
-  population: z.enum(["recurring", "manual"]),
-  id: z.string().min(1).max(200).regex(activityToken),
-}).strict();
 
 const processEnvironmentSchema = z.record(
   z.string().min(1).max(128).regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
@@ -36,34 +32,11 @@ const processEnvironmentSchema = z.record(
 ).refine((value) => Object.keys(value).length <= 128, "env may contain at most 128 entries")
   .refine((value) => Object.entries(value).reduce((sum, [key, item]) => sum + key.length + item.length, 0) <= 1_000_000, "env payload exceeds 1000000 characters");
 
-const workerIdentityPopulationEnv = "CHATGPT_WORKER_POPULATION";
-const workerIdentityIdEnv = "CHATGPT_WORKER_ID";
-const workerIdentityEnvKeys = new Set([workerIdentityPopulationEnv, workerIdentityIdEnv]);
-
-type ProcessEnvironment = Record<string, string>;
-type WorkerIdentity = z.infer<typeof workerIdentitySchema>;
-
-function workerIdentityFromEnvironment(env: ProcessEnvironment | undefined): WorkerIdentity | undefined {
-  if (!env) return undefined;
-  const population = env[workerIdentityPopulationEnv];
-  const id = env[workerIdentityIdEnv];
-  if (population === undefined && id === undefined) return undefined;
-  const parsed = workerIdentitySchema.safeParse({ population, id });
-  return parsed.success ? parsed.data : undefined;
-}
-
-function childEnvironmentWithoutWorkerIdentity(env: ProcessEnvironment | undefined): ProcessEnvironment | undefined {
-  if (!env) return undefined;
-  const childEnvironment = Object.fromEntries(Object.entries(env).filter(([key]) => !workerIdentityEnvKeys.has(key)));
-  return Object.keys(childEnvironment).length > 0 ? childEnvironment : undefined;
-}
-
 const startProcessCommonShape = {
   working_directory: z.string().optional(),
   wait_ms: z.number().int().min(0).max(10_000).optional(),
   activity_target: activityTargetSchema.optional(),
   action_class: actionClassSchema.optional(),
-  worker_identity: workerIdentitySchema.describe("Explicit process-bound worker/run identity supplied by the caller; never inferred from caller/session identity.").optional(),
 };
 const legacyStartProcessCommandVisible = (process.env.MCP_START_PROCESS_LEGACY_COMMAND_VISIBLE || "1").trim() !== "0";
 const startProcessInputSchema = z.object({
@@ -85,15 +58,7 @@ const startProcessInputSchema = z.object({
   if (Number(legacy) + Number(structured) + Number(scripted) !== 1) ctx.addIssue({ code: "custom", message: legacyStartProcessCommandVisible ? "provide exactly one of command, executable, or script" : "provide exactly one of executable or script" });
   if (!structured && input.args !== undefined) ctx.addIssue({ code: "custom", path: ["args"], message: "args is only valid with executable" });
   if (!structured && input.stdin !== undefined) ctx.addIssue({ code: "custom", path: ["stdin"], message: "stdin is only valid with executable" });
-  const envIdentityPopulation = input.env?.[workerIdentityPopulationEnv];
-  const envIdentityId = input.env?.[workerIdentityIdEnv];
-  const hasAnyEnvIdentity = envIdentityPopulation !== undefined || envIdentityId !== undefined;
-  const hasCompleteEnvIdentity = envIdentityPopulation !== undefined && envIdentityId !== undefined;
-  if (hasAnyEnvIdentity && !hasCompleteEnvIdentity) ctx.addIssue({ code: "custom", path: ["env"], message: "worker identity env compatibility carrier requires both CHATGPT_WORKER_POPULATION and CHATGPT_WORKER_ID" });
-  const envWorkerIdentity = workerIdentityFromEnvironment(input.env);
-  if (hasCompleteEnvIdentity && envWorkerIdentity === undefined) ctx.addIssue({ code: "custom", path: ["env"], message: "worker identity env compatibility carrier must use a supported population and safe id" });
-  if (input.worker_identity && envWorkerIdentity && (input.worker_identity.population !== envWorkerIdentity.population || input.worker_identity.id !== envWorkerIdentity.id)) ctx.addIssue({ code: "custom", path: ["env"], message: "worker_identity conflicts with env compatibility identity" });
-  if (legacy && input.env !== undefined && Object.keys(input.env).some((key) => !workerIdentityEnvKeys.has(key))) ctx.addIssue({ code: "custom", path: ["env"], message: "legacy command env may contain only the reserved worker identity compatibility keys" });
+  if (legacy && input.env !== undefined) ctx.addIssue({ code: "custom", path: ["env"], message: "env is only valid with executable or script" });
   if (scripted !== (input.language !== undefined)) ctx.addIssue({ code: "custom", path: ["language"], message: "language is required exactly when script is provided" });
 });
 
@@ -141,7 +106,7 @@ const snapshotFreshnessSchema = z.object({
   read_mode: z.literal("MATERIALIZED_ONLY"),
 }).strict();
 
-export const PROCESS_TOOL_CONTRACT_VERSION = "process-tools.v4" as const;
+export const PROCESS_TOOL_CONTRACT_VERSION = "process-tools.v3" as const;
 
 export type ProcessServingIdentity = {
   backend_generation?: string;
@@ -170,7 +135,6 @@ const processOutputSchema = z.object({
   cwd: z.string().optional(),
   running: z.boolean(),
   launching: z.literal(true).optional(),
-  worker_identity: workerIdentitySchema.optional(),
   activity_target: activityTargetSchema.optional(),
   action_class: actionClassSchema.optional(),
   execution_mode: z.enum(["powershell", "native", "explicit_shell", "native_sequence", "native_pipeline"]).optional(),
@@ -296,14 +260,11 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
     async (input) => {
       const typedInput = input as typeof input & { command?: string };
       const { working_directory, wait_ms, activity_target, action_class } = typedInput;
-      const compatibilityWorkerIdentity = workerIdentityFromEnvironment(typedInput.env);
-      const workerIdentity = typedInput.worker_identity ?? compatibilityWorkerIdentity;
-      const childEnvironment = childEnvironmentWithoutWorkerIdentity(typedInput.env);
       const value = typedInput.command !== undefined
-        ? await processManager.startWithWait(typedInput.command, working_directory, callerId, wait_ms ?? 750, activity_target, action_class, workerIdentity)
+        ? await processManager.startWithWait(typedInput.command, working_directory, callerId, wait_ms ?? 750, activity_target, action_class)
         : typedInput.executable !== undefined
-          ? await processManager.startStructuredWithWait(typedInput.executable, typedInput.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, typedInput.stdin, childEnvironment, workerIdentity)
-          : await processManager.startScriptWithWait(typedInput.language!, typedInput.script!, working_directory, callerId, wait_ms ?? 750, activity_target, action_class, childEnvironment, workerIdentity);
+          ? await processManager.startStructuredWithWait(typedInput.executable, typedInput.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, typedInput.stdin, typedInput.env)
+          : await processManager.startScriptWithWait(typedInput.language!, typedInput.script!, working_directory, callerId, wait_ms ?? 750, activity_target, action_class, typedInput.env);
       return structuredTextResult(value, callerId, servingIdentity);
     },
   );
