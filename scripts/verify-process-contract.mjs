@@ -85,13 +85,13 @@ const stdinStructured = await assertStructuredProcessResult("start_process", {
   wait_ms: 10_000,
 });
 assert.equal(String(stdinStructured.stdout || ""), "contract-stdin\n", "structured stdin must reach the child without shell transport");
-const readStructured = await assertStructuredProcessResult("read_output", { process_id: startStructured.process_id, max_chars: 32_000, wait_ms: 0 });
+const readStructured = await assertStructuredProcessResult("read_output", { process_id: startStructured.process_id, max_chars: 60_000, wait_ms: 0 });
 assert.equal(readStructured.process_id, startStructured.process_id, "read_output structured result must preserve process identity");
 const tinyReadStructured = await assertStructuredProcessResult("read_output", { process_id: startStructured.process_id, max_chars: 0, wait_ms: 0 });
 assert.ok(String(tinyReadStructured.stdout || "").length <= 1, "max_chars=0 must clamp to one retained character");
 assert.equal(tinyReadStructured.output_page?.page_limit, 1, "max_chars=0 must expose the effective clamped page limit");
 const oversizedReadStructured = await assertStructuredProcessResult("read_output", { process_id: startStructured.process_id, max_chars: 1_000_000, wait_ms: 0 });
-assert.ok(String(oversizedReadStructured.stdout || "").length <= 32_000, "oversized max_chars must clamp to the transport cap");
+assert.ok(String(oversizedReadStructured.stdout || "").length <= 60_000, "oversized max_chars must clamp to the transport cap");
 const killStructured = await assertStructuredProcessResult("kill_process", { process_id: startStructured.process_id });
 assert.equal(killStructured.already_exited, true, "kill_process structured regression probe should exercise already-exited variant");
 const contractPath = resolve("config/process-tool-contract.json");
@@ -100,7 +100,7 @@ const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "8d82712fc04a05973afc527c79e72e49b423664eae90a2cabe05a45e2bb2d7b3";
+const acceptedContractSha256 = "6f7e06d11017a1e061b659bd4dc9741e0bd9ea2e75cbc6ee01d5b0a71cdfa74d";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 const expectedTools = [...baseExpectedTools].sort((a, b) => a.name.localeCompare(b.name));

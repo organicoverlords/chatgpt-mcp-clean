@@ -77,7 +77,7 @@ function snapshotPath(timeline: boolean): string {
     : join(userProfile, "Desktop", "vault", ".state", "bootstrap", "latest.json");
 }
 
-export async function readBootstrapSnapshot(maxChars = 32_000, processId = BOOTSTRAP_PROCESS_ALIAS): Promise<Record<string, unknown>> {
+export async function readBootstrapSnapshot(maxChars = 60_000, processId = BOOTSTRAP_PROCESS_ALIAS): Promise<Record<string, unknown>> {
   const startedAt = performance.now();
   if (isSharedPolicyAlias(processId)) return readSharedPolicyAlias(processId, maxChars, startedAt);
   const timeline = processId === "timeline";

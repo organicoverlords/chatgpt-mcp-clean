@@ -7,10 +7,9 @@ import { currentTelemetryContext, emitTelemetry, withTelemetryContext, type Tele
 import { planCommandExecution, planStructuredExecution, planStructuredScript, type CommandExecutionMode, type CommandExecutionPlan, type StructuredScriptLanguage } from "./command-execution-plan.js";
 
 const MAX_CAPTURE_CHARS = 100_000;
-// Current live MCPv3 capability was revalidated on 2026-09-04 with a single 31,000+
-// character read_output response. Keep the logical read/page contract at 32k; do not
-// reintroduce the stale August 6k transport assumption.
-const MAX_READ_CHARS = 32_000;
+// The read_output contract allows up to 60,000 characters per stream/page.
+// Completed output still pages losslessly through the same process_id when retained output exceeds that limit.
+const MAX_READ_CHARS = 60_000;
 export const MAX_READ_WAIT_MS = 120_000;
 export const ADAPTIVE_READ_WAIT_MS = [2_000, 5_000, 10_000, 30_000, 60_000] as const;
 
