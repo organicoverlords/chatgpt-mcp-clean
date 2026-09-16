@@ -18,7 +18,7 @@ function snapshotPath(timeline: boolean): string {
     : join(userProfile, "Desktop", "vault", ".state", "bootstrap", "latest.json");
 }
 
-export async function readBootstrapSnapshot(maxChars = 32_000, processId = BOOTSTRAP_PROCESS_ALIAS): Promise<Record<string, unknown>> {
+export async function readBootstrapSnapshot(maxChars = 60_000, processId = BOOTSTRAP_PROCESS_ALIAS): Promise<Record<string, unknown>> {
   const startedAt = performance.now();
   const timeline = processId === "timeline";
   const alias = timeline ? "timeline" : processId === "checkup" ? "checkup" : BOOTSTRAP_PROCESS_ALIAS;

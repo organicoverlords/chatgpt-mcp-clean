@@ -267,7 +267,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
   server.registerTool(
     "read_output",
     {
-      description: "Read process stdout/stderr or a named bootstrap snapshot. Returns structured data only; it never mounts an app/widget template. When wait_ms is omitted, quiet reads adapt from 2s up to 60s; explicit wait_ms may wait up to 120000 ms. Reads wake immediately on new output or process exit. Each stream is bounded to 32000 characters.",
+      description: "Read process stdout/stderr or a named bootstrap snapshot. Returns structured data only; it never mounts an app/widget template. When wait_ms is omitted, quiet reads adapt from 2s up to 60s; explicit wait_ms may wait up to 120000 ms. Reads wake immediately on new output or process exit. Each stream is bounded to 60000 characters.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: z.object({
         process_id: z.string().min(1),
@@ -277,7 +277,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       outputSchema: processOutputSchema,
     },
     async ({ process_id, max_chars, wait_ms }) => {
-      const boundedMaxChars = Math.max(1, Math.min(max_chars ?? 32_000, 32_000));
+      const boundedMaxChars = Math.max(1, Math.min(max_chars ?? 60_000, 60_000));
       return structuredTextResult(isBootstrapSnapshot(process_id)
         ? await readBootstrapSnapshot(boundedMaxChars, process_id)
         : await processManager.readOutput(process_id, boundedMaxChars, wait_ms), callerId, servingIdentity);

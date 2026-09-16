@@ -200,7 +200,7 @@
   },
   {
     "name": "read_output",
-    "description": "Read process stdout/stderr or a named bootstrap snapshot. Returns structured data only; it never mounts an app/widget template. When wait_ms is omitted, quiet reads adapt from 2s up to 60s; explicit wait_ms may wait up to 120000 ms. Reads wake immediately on new output or process exit. Each stream is bounded to 32000 characters.",
+    "description": "Read process stdout/stderr or a named bootstrap snapshot. Returns structured data only; it never mounts an app/widget template. When wait_ms is omitted, quiet reads adapt from 2s up to 60s; explicit wait_ms may wait up to 120000 ms. Reads wake immediately on new output or process exit. Each stream is bounded to 60000 characters.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",

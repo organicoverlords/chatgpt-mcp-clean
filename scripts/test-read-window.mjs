@@ -30,7 +30,7 @@ try {
   const floodOutput = readAll(manager, floodJob);
   assert.equal(floodOutput.pages.at(-1).stdout_truncated, true);
   assert.ok(floodOutput.stdout.length <= 100_000);
-  assert.ok(floodOutput.stdout.length > 32_000);
+  assert.ok(floodOutput.stdout.length > 60_000);
   assert.match(floodOutput.stdout, /FLOOD_500_/);
   console.log(`PASS read_window whole=${windowOutput.stdout.length} retained=${floodOutput.stdout.length} pages=${floodOutput.pages.length}`);
 } finally {
