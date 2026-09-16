@@ -22,6 +22,27 @@ function Read-Topology([string]$Path){
     if([string]$topology.schema -ne 'mcp-current-topology.v1' -or [string]$topology.authority -ne 'current_serving_topology'){ Fail 'current topology contract is invalid' }
     return $topology
 }
+function Resolve-StableRollback($Topology){
+    $recoveryProperty=$Topology.PSObject.Properties['recovery']
+    if(-not $recoveryProperty -or $null -eq $recoveryProperty.Value){ Fail 'current topology has no recovery section' }
+    $recovery=$recoveryProperty.Value
+    $legacyProperty=$recovery.PSObject.Properties['stable_rollback']
+    $rollback=if($legacyProperty -and $null -ne $legacyProperty.Value){ $legacyProperty.Value }else{ $null }
+    if($null -eq $rollback){
+        $preservedProperty=$recovery.PSObject.Properties['preserved_previous_routes']
+        $routes=if($preservedProperty -and $null -ne $preservedProperty.Value){ @($preservedProperty.Value) }else{ @() }
+        $stable=@($routes | Where-Object { [string]$_.name -eq 'stable' -and $_.currently_listening -eq $true })
+        if($stable.Count -ne 1){ Fail "current topology must expose exactly one listening stable rollback route; found $($stable.Count)" }
+        $rollback=$stable[0]
+    }
+    $listen=[string]$rollback.listen
+    if($listen -notmatch '^127\.0\.0\.1:(?<port>[0-9]+)$'){ Fail "stable rollback listen is unsupported: $listen" }
+    $port=[int]$Matches.port
+    if($port -lt 1024 -or $port -gt 65535){ Fail "stable rollback port is invalid: $port" }
+    $instance=[string]$rollback.instance
+    if([string]::IsNullOrWhiteSpace($instance)){ Fail 'stable rollback instance is missing' }
+    return [pscustomobject]@{listen=$listen;port=$port;instance=$instance}
+}
 function Assert-Candidate([string]$Root,[string]$Commit){
     $resolved=[IO.Path]::GetFullPath($Root)
     if(-not (Test-Path -LiteralPath $resolved -PathType Container)){ Fail "candidate root missing: $resolved" }
@@ -39,6 +60,9 @@ if(-not $DeploymentRoot){ $DeploymentRoot=Join-Path $env:LOCALAPPDATA ("ChatGPTM
 $DeploymentRoot=[IO.Path]::GetFullPath($DeploymentRoot)
 $root=Assert-Candidate $CandidateRoot $commit
 $topology=Read-Topology $CurrentTopologyPath
+$stableRollback=Resolve-StableRollback $topology
+$rollbackPort=[int]$stableRollback.port
+$rollbackInstance=[string]$stableRollback.instance
 $currentFrozen=[Environment]::ExpandEnvironmentVariables([string]$topology.serving.backend.durable_runtime_root)
 $ownerLoginSource=Join-Path $currentFrozen 'owner-login.txt'
 if(-not (Test-Path -LiteralPath $ownerLoginSource -PathType Leaf)){ Fail "current frozen owner identity missing: $ownerLoginSource" }
@@ -51,7 +75,7 @@ if(Test-Path -LiteralPath $DeploymentRoot){ Fail "deployment root already exists
 $planResult=[ordered]@{
     status='PLAN'; commit=$commit; source_root=$root; deployment_root=$DeploymentRoot; runtime_root=(Join-Path $DeploymentRoot 'runtime');
     task_name=$TaskName; port=$Port; instance_id=$InstanceId; public_origin=$PublicOrigin; oauth_store_relative=$OAuthStoreRelative; receipt_store_relative=$ReceiptStoreRelative;
-    current_serving_listen=[string]$topology.serving.backend.listen; current_frozen_root=$currentFrozen; route_mutation=$false
+    current_serving_listen=[string]$topology.serving.backend.listen; current_frozen_root=$currentFrozen; rollback_port=$rollbackPort; rollback_instance=$rollbackInstance; route_mutation=$false
 }
 if($Plan){ $planResult | ConvertTo-Json -Depth 5 -Compress; exit 0 }
 if(-not $ExplicitUserAuthorization){ Fail 'preparing a persistent production candidate task requires explicit user authorization' }
@@ -87,7 +111,7 @@ try {
     $manifest=[ordered]@{
         schema='mcp-frozen-deployment.v1'; frozen_at=[DateTimeOffset]::UtcNow.ToString('o'); source_repo='organicoverlords/chatgpt-mcp-clean'; canonical_branch='master'; merge_commit=$commit;
         runtime_root=(Join-Path $DeploymentRoot 'runtime'); runtime_tracked_clean=$true; hashes=[ordered]@{dist_index_sha256=$hashes.dist_index_sha256;dist_server_sha256=$hashes.dist_server_sha256};
-        routes=[ordered]@{stable=[ordered]@{public_origin=$PublicOrigin;port=$Port;instance=$InstanceId;oauth_store=(Join-Path $env:LOCALAPPDATA ("ChatGPTMcpClean\\minimal-connectors\\$OAuthStoreRelative"));rollback_port=([int](([string]$topology.recovery.stable_rollback.listen -split ':')[-1]));rollback_instance=[string]$topology.recovery.stable_rollback.instance}};
+        routes=[ordered]@{stable=[ordered]@{public_origin=$PublicOrigin;port=$Port;instance=$InstanceId;oauth_store=(Join-Path $env:LOCALAPPDATA ("ChatGPTMcpClean\\minimal-connectors\\$OAuthStoreRelative"));rollback_port=$rollbackPort;rollback_instance=$rollbackInstance}};
         tool_contract=$toolContract; self_contained_runtime=(Join-Path $DeploymentRoot 'runtime'); runtime_commit=$commit;
         process_manager_sha256=$hashes.process_manager_sha256; package_lock_sha256=$hashes.package_lock_sha256
     }
