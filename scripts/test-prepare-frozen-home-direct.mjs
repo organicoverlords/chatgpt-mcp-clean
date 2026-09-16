@@ -15,6 +15,10 @@ for(const required of [
   "Register-ScheduledTask",
   "Start-ScheduledTask",
   "CurrentTopologyPath",
+  "preserved_previous_routes",
+  "currently_listening",
+  "rollback_port=$rollbackPort",
+  "rollback_instance=$rollbackInstance",
   "$toolContract=@('start_process','read_output','kill_process','download_chatgpt_file')",
 ]) assert.ok(script.includes(required),`missing invariant: ${required}`);
 for(const forbidden of [
