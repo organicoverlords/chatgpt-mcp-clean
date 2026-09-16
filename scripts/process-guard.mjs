@@ -72,15 +72,6 @@ try {
   const targetedRead = metadataDuplicateManager.read(targetedFirst.process_id);
   assert.deepEqual(targetedRead.activity_target, activityTarget);
   assert.equal(targetedRead.action_class, "test");
-  const workerA = { population: "recurring", id: "automation-a" };
-  const workerB = { population: "recurring", id: "automation-b" };
-  const workerFirst = metadataDuplicateManager.start("Start-Sleep -Seconds 5 # worker metadata", undefined, "caller_metadata_duplicate", activityTarget, "test", workerA);
-  const workerDuplicate = metadataDuplicateManager.start("Start-Sleep -Seconds 5 # worker metadata", undefined, "caller_metadata_duplicate_peer", activityTarget, "test", workerA);
-  const workerPeer = metadataDuplicateManager.start("Start-Sleep -Seconds 5 # worker metadata", undefined, "caller_metadata_duplicate", activityTarget, "test", workerB);
-  assert.equal(workerDuplicate.process_id, workerFirst.process_id, "same explicit worker identity should reuse an identical live process");
-  assert.notEqual(workerPeer.process_id, workerFirst.process_id, "different workers sharing one caller must never reuse each other's live process");
-  assert.deepEqual(metadataDuplicateManager.read(workerFirst.process_id).worker_identity, workerA);
-  for (const processId of new Set([workerFirst.process_id, workerDuplicate.process_id, workerPeer.process_id])) await metadataDuplicateManager.kill(processId).catch(() => undefined);
 } finally {
   const processIds = new Set([targetedFirst?.process_id, targetedDuplicate?.process_id, otherTarget?.process_id, noTarget?.process_id].filter(Boolean));
   for (const processId of processIds) await metadataDuplicateManager.kill(processId).catch(() => undefined);
@@ -93,24 +84,19 @@ const retrievalProcesses = [];
 try {
   const ownerManager = new ProcessManager({ receiptDirectory: retrievalStopDirectory });
   const peerManager = new ProcessManager({ receiptDirectory: retrievalStopDirectory });
-  const workerA = { population: "recurring", id: "automation-retrieval-a" };
-  const workerB = { population: "recurring", id: "automation-retrieval-b" };
-  const sufficient = ownerManager.start("Write-Output 'MEMORY_RECENT_OK'", undefined, "caller_retrieval_stop", retrievalTarget, "Memory_Recent", workerA);
+  const sufficient = ownerManager.start("Write-Output 'MEMORY_RECENT_OK'", undefined, "caller_retrieval_stop", retrievalTarget, "Memory_Recent");
   retrievalProcesses.push({ manager: ownerManager, process: sufficient });
   const sufficientExit = await waitForExit(ownerManager, sufficient.process_id);
   assert.equal(sufficientExit.exit_code, 0);
   assert.throws(
-    () => peerManager.start("Write-Output 'BROADENING_SHOULD_BE_BLOCKED'", undefined, "caller_retrieval_stop_peer", retrievalTarget, "STACK_lookup_reports", workerA),
+    () => peerManager.start("Write-Output 'BROADENING_SHOULD_BE_BLOCKED'", undefined, "caller_retrieval_stop", retrievalTarget, "STACK_lookup_reports"),
     /start_process_retrieval_stop: successful memory_recent already satisfied this activity_target/,
     "successful recent-memory orientation must stop cross-clone navigation on the same target",
   );
-  const peerWorker = peerManager.start("Write-Output 'PEER_WORKER_RETRIEVAL_OK'", undefined, "caller_retrieval_stop", retrievalTarget, "stack_lookup_reports", workerB);
-  retrievalProcesses.push({ manager: peerManager, process: peerWorker });
-  assert.equal((await waitForExit(peerManager, peerWorker.process_id)).exit_code, 0, "one worker's retrieval stop must not affect a different worker sharing the same caller");
-  const drilldown = peerManager.start("Write-Output 'SPECIFIC_DRILLDOWN_OK'", undefined, "caller_retrieval_stop", retrievalDrilldownTarget, "stack_find_context", workerA);
+  const drilldown = peerManager.start("Write-Output 'SPECIFIC_DRILLDOWN_OK'", undefined, "caller_retrieval_stop", retrievalDrilldownTarget, "stack_find_context");
   retrievalProcesses.push({ manager: peerManager, process: drilldown });
   assert.equal((await waitForExit(peerManager, drilldown.process_id)).exit_code, 0, "a new specific target must remain available for genuine drill-down");
-  const nonRetrieval = peerManager.start("Write-Output 'NON_RETRIEVAL_OK'", undefined, "caller_retrieval_stop", retrievalTarget, "repo_mutation", workerA);
+  const nonRetrieval = peerManager.start("Write-Output 'NON_RETRIEVAL_OK'", undefined, "caller_retrieval_stop", retrievalTarget, "repo_mutation");
   retrievalProcesses.push({ manager: peerManager, process: nonRetrieval });
   assert.equal((await waitForExit(peerManager, nonRetrieval.process_id)).exit_code, 0, "same-target non-navigation work must not be blocked");
   const otherCaller = peerManager.start("Write-Output 'OTHER_CALLER_OK'", undefined, "caller_retrieval_stop_other", retrievalTarget, "stack_lookup_reports");
@@ -149,25 +135,6 @@ try {
 } finally {
   if (otherCallerProcess) liveProcesses.push(otherCallerProcess);
   for (const process of liveProcesses) await concurrencyManager.kill(process.process_id).catch(() => undefined);
-}
-
-const workerConcurrencyManager = new ProcessManager({ maxLivePerCaller: 1 });
-const sharedCallerProcesses = [];
-try {
-  const workerA = { population: "recurring", id: "automation-concurrency-a" };
-  const workerB = { population: "manual", id: "manual-concurrency-b" };
-  const firstWorker = workerConcurrencyManager.start("Start-Sleep -Seconds 5 # worker A", undefined, "caller_shared_worker_concurrency", undefined, undefined, workerA);
-  sharedCallerProcesses.push(firstWorker);
-  assert.throws(
-    () => workerConcurrencyManager.start("Start-Sleep -Seconds 5 # worker A second", undefined, "caller_shared_worker_concurrency_peer", undefined, undefined, workerA),
-    /start_process_concurrency_limited/,
-    "one worker must retain its own per-worker concurrency cap",
-  );
-  const secondWorker = workerConcurrencyManager.start("Start-Sleep -Seconds 5 # worker B", undefined, "caller_shared_worker_concurrency", undefined, undefined, workerB);
-  sharedCallerProcesses.push(secondWorker);
-  assert.equal(secondWorker.running, true, "different workers sharing one caller must not consume each other's per-worker concurrency allowance");
-} finally {
-  for (const process of sharedCallerProcesses) await workerConcurrencyManager.kill(process.process_id).catch(() => undefined);
 }
 
 assert.throws(() => new ProcessManager({ maxLiveTotal: 0 }), /maxLiveTotal must be an integer between 1 and 80/);
@@ -256,8 +223,7 @@ try {
 const receiptDirectory = mkdtempSync(join(tmpdir(), "shell-mcp-process-receipts-"));
 try {
   const beforeRestart = new ProcessManager({ receiptDirectory });
-  const receiptWorker = { population: "manual", id: "manual-restart-receipt" };
-  const started = beforeRestart.start("Write-Output 'RESTART_RECEIPT_OK'", undefined, "caller_restart_receipt_test", { type: "node", id: "p3-stack", project: "p3" }, "verify", receiptWorker);
+  const started = beforeRestart.start("Write-Output 'RESTART_RECEIPT_OK'", undefined, "caller_restart_receipt_test", { type: "node", id: "p3-stack", project: "p3" }, "verify");
   const completed = await waitForExit(beforeRestart, started.process_id);
   assert.equal(completed.exit_code, 0);
 
@@ -275,7 +241,6 @@ try {
   assert.ok(Number.isInteger(recovered.elapsed_ms) && recovered.elapsed_ms >= 0);
   assert.equal(recovered.running, false);
   assert.equal(recovered.exit_code, 0);
-  assert.deepEqual(recovered.worker_identity, receiptWorker, "worker identity must survive durable receipt restart reads");
   assert.deepEqual(recovered.activity_target, { type: "node", id: "p3-stack", project: "p3" });
   assert.equal(recovered.action_class, "verify");
   assert.match(recovered.stdout, /RESTART_RECEIPT_OK/);

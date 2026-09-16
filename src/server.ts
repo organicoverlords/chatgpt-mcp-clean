@@ -25,10 +25,6 @@ const activityTargetSchema = z.object({
   project: z.string().min(1).max(80).regex(activityToken).optional(),
 }).strict();
 const actionClassSchema = z.string().min(1).max(64).regex(activityToken);
-const workerIdentitySchema = z.object({
-  population: z.enum(["recurring", "manual"]),
-  id: z.string().min(1).max(200).regex(activityToken),
-}).strict();
 
 const processEnvironmentSchema = z.record(
   z.string().min(1).max(128).regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
@@ -41,7 +37,6 @@ const startProcessCommonShape = {
   wait_ms: z.number().int().min(0).max(10_000).optional(),
   activity_target: activityTargetSchema.optional(),
   action_class: actionClassSchema.optional(),
-  worker_identity: workerIdentitySchema.describe("Explicit process-bound worker/run identity supplied by the caller; never inferred from caller/session identity.").optional(),
 };
 const legacyStartProcessCommandVisible = (process.env.MCP_START_PROCESS_LEGACY_COMMAND_VISIBLE || "1").trim() !== "0";
 const startProcessInputSchema = z.object({
@@ -111,7 +106,7 @@ const snapshotFreshnessSchema = z.object({
   read_mode: z.literal("MATERIALIZED_ONLY"),
 }).strict();
 
-export const PROCESS_TOOL_CONTRACT_VERSION = "process-tools.v4" as const;
+export const PROCESS_TOOL_CONTRACT_VERSION = "process-tools.v3" as const;
 
 export type ProcessServingIdentity = {
   backend_generation?: string;
@@ -140,7 +135,6 @@ const processOutputSchema = z.object({
   cwd: z.string().optional(),
   running: z.boolean(),
   launching: z.literal(true).optional(),
-  worker_identity: workerIdentitySchema.optional(),
   activity_target: activityTargetSchema.optional(),
   action_class: actionClassSchema.optional(),
   execution_mode: z.enum(["powershell", "native", "explicit_shell", "native_sequence", "native_pipeline"]).optional(),
@@ -265,12 +259,12 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
     },
     async (input) => {
       const typedInput = input as typeof input & { command?: string };
-      const { working_directory, wait_ms, activity_target, action_class, worker_identity } = typedInput;
+      const { working_directory, wait_ms, activity_target, action_class } = typedInput;
       const value = typedInput.command !== undefined
-        ? await processManager.startWithWait(typedInput.command, working_directory, callerId, wait_ms ?? 750, activity_target, action_class, worker_identity)
+        ? await processManager.startWithWait(typedInput.command, working_directory, callerId, wait_ms ?? 750, activity_target, action_class)
         : typedInput.executable !== undefined
-          ? await processManager.startStructuredWithWait(typedInput.executable, typedInput.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, typedInput.stdin, typedInput.env, worker_identity)
-          : await processManager.startScriptWithWait(typedInput.language!, typedInput.script!, working_directory, callerId, wait_ms ?? 750, activity_target, action_class, typedInput.env, worker_identity);
+          ? await processManager.startStructuredWithWait(typedInput.executable, typedInput.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, typedInput.stdin, typedInput.env)
+          : await processManager.startScriptWithWait(typedInput.language!, typedInput.script!, working_directory, callerId, wait_ms ?? 750, activity_target, action_class, typedInput.env);
       return structuredTextResult(value, callerId, servingIdentity);
     },
   );
