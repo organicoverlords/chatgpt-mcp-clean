@@ -120,7 +120,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v3"
+              "const": "process-tools.v4"
             },
             "backend_generation": {
               "type": "string",
@@ -237,7 +237,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v3"
+              "const": "process-tools.v4"
             },
             "backend_generation": {
               "type": "string",
@@ -296,6 +296,29 @@
         "launching": {
           "type": "boolean",
           "const": true
+        },
+        "worker_identity": {
+          "type": "object",
+          "properties": {
+            "population": {
+              "type": "string",
+              "enum": [
+                "recurring",
+                "manual"
+              ]
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[A-Za-z0-9._/:_-]+$"
+            }
+          },
+          "required": [
+            "population",
+            "id"
+          ],
+          "additionalProperties": false
         },
         "activity_target": {
           "type": "object",
@@ -850,6 +873,30 @@
           "minLength": 1,
           "maxLength": 64,
           "pattern": "^[A-Za-z0-9._/:_-]+$"
+        },
+        "worker_identity": {
+          "type": "object",
+          "properties": {
+            "population": {
+              "type": "string",
+              "enum": [
+                "recurring",
+                "manual"
+              ]
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[A-Za-z0-9._/:_-]+$"
+            }
+          },
+          "required": [
+            "population",
+            "id"
+          ],
+          "additionalProperties": false,
+          "description": "Explicit process-bound worker/run identity supplied by the caller; never inferred from caller/session identity."
         }
       },
       "additionalProperties": false
@@ -866,7 +913,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v3"
+              "const": "process-tools.v4"
             },
             "backend_generation": {
               "type": "string",
@@ -925,6 +972,29 @@
         "launching": {
           "type": "boolean",
           "const": true
+        },
+        "worker_identity": {
+          "type": "object",
+          "properties": {
+            "population": {
+              "type": "string",
+              "enum": [
+                "recurring",
+                "manual"
+              ]
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[A-Za-z0-9._/:_-]+$"
+            }
+          },
+          "required": [
+            "population",
+            "id"
+          ],
+          "additionalProperties": false
         },
         "activity_target": {
           "type": "object",
