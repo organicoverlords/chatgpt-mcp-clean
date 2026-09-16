@@ -16,6 +16,14 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 function Fail([string]$Message){ throw $Message }
+function Get-Sha256Hex([string]$Path){
+    $stream=[IO.File]::OpenRead($Path)
+    try{
+        $sha=[Security.Cryptography.SHA256]::Create()
+        try{ return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','').ToLowerInvariant() }
+        finally{ $sha.Dispose() }
+    } finally { $stream.Dispose() }
+}
 function Read-Topology([string]$Path){
     if(-not (Test-Path -LiteralPath $Path -PathType Leaf)){ Fail "current topology missing: $Path" }
     $topology=Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
@@ -102,10 +110,10 @@ try {
     $runtimeDirty=@(& git.exe -C $runtime status --porcelain=v1 --untracked-files=no)
     if($runtimeHead -ne $commit -or $runtimeDirty.Count -gt 0){ Fail 'frozen runtime identity is not exact/clean' }
     $hashes=[ordered]@{
-        dist_index_sha256=(Get-FileHash -LiteralPath (Join-Path $runtime 'dist\\index.js') -Algorithm SHA256).Hash.ToLowerInvariant()
-        dist_server_sha256=(Get-FileHash -LiteralPath (Join-Path $runtime 'dist\\server.js') -Algorithm SHA256).Hash.ToLowerInvariant()
-        process_manager_sha256=(Get-FileHash -LiteralPath (Join-Path $runtime 'dist\\lib\\process-manager.js') -Algorithm SHA256).Hash.ToLowerInvariant()
-        package_lock_sha256=(Get-FileHash -LiteralPath (Join-Path $runtime 'package-lock.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+        dist_index_sha256=(Get-Sha256Hex (Join-Path $runtime 'dist\\index.js'))
+        dist_server_sha256=(Get-Sha256Hex (Join-Path $runtime 'dist\\server.js'))
+        process_manager_sha256=(Get-Sha256Hex (Join-Path $runtime 'dist\\lib\\process-manager.js'))
+        package_lock_sha256=(Get-Sha256Hex (Join-Path $runtime 'package-lock.json'))
     }
     Copy-Item -LiteralPath $ownerLoginSource -Destination (Join-Path $staging 'owner-login.txt')
     $manifest=[ordered]@{
@@ -123,7 +131,8 @@ param()
 `$root=`$PSScriptRoot
 `$runtime=Join-Path `$root 'runtime'
 `$m=Get-Content -LiteralPath (Join-Path `$root 'deployment.json') -Raw | ConvertFrom-Json
-function Assert-Hash([string]`$Relative,[string]`$Expected){`$actual=(Get-FileHash -LiteralPath (Join-Path `$runtime `$Relative) -Algorithm SHA256).Hash.ToLowerInvariant();if(`$actual -ne `$Expected){throw "frozen hash mismatch: `$Relative"}}
+function Get-Sha256Hex([string]`$Path){`$stream=[IO.File]::OpenRead(`$Path);try{`$sha=[Security.Cryptography.SHA256]::Create();try{return ([BitConverter]::ToString(`$sha.ComputeHash(`$stream))).Replace('-','').ToLowerInvariant()}finally{`$sha.Dispose()}}finally{`$stream.Dispose()}}
+function Assert-Hash([string]`$Relative,[string]`$Expected){`$actual=Get-Sha256Hex (Join-Path `$runtime `$Relative);if(`$actual -ne `$Expected){throw "frozen hash mismatch: `$Relative"}}
 if((git.exe -C `$runtime rev-parse HEAD).Trim().ToLowerInvariant() -ne '$commit'){throw 'frozen runtime commit mismatch'}
 if(@(git.exe -C `$runtime status --porcelain=v1 --untracked-files=no).Count -gt 0){throw 'frozen runtime tracked files are dirty'}
 Assert-Hash 'dist\\index.js' ([string]`$m.hashes.dist_index_sha256)

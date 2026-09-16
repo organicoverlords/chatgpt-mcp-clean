@@ -15,6 +15,8 @@ for(const required of [
   "Register-ScheduledTask",
   "Start-ScheduledTask",
   "CurrentTopologyPath",
+  "Get-Sha256Hex",
+  "Security.Cryptography.SHA256",
   "preserved_previous_routes",
   "currently_listening",
   "rollback_port=$rollbackPort",
@@ -22,6 +24,7 @@ for(const required of [
   "$toolContract=@('start_process','read_output','kill_process','download_chatgpt_file')",
 ]) assert.ok(script.includes(required),`missing invariant: ${required}`);
 for(const forbidden of [
+  "Get-FileHash",
   "LocalFileToolName",
   "MCP_LOCAL_FILE_TOOL_NAME",
   "LibrarySpoolBridge",
