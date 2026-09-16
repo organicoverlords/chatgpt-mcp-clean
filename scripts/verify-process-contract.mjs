@@ -49,6 +49,10 @@ assert.ok(startInputSchema, "start_process input schema missing");
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output LEGACY" })).success, true, "legacy command input must remain valid");
 assert.equal((await startInputSchema.safeParseAsync({ executable: "node", args: ["--version"], stdin: "" })).success, true, "structured executable+args+stdin input must be valid");
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output WORKER", worker_identity: { population: "manual", id: "manual-20260916-test" } })).success, true, "explicit manual worker identity must be valid");
+assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output ENV_WORKER", env: { CHATGPT_WORKER_POPULATION: "recurring", CHATGPT_WORKER_ID: "6aa80831a83481918a038dc0033b4f15" } })).success, true, "cached-schema worker identity env compatibility carrier must be valid for legacy command mode");
+assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output PARTIAL", env: { CHATGPT_WORKER_POPULATION: "manual" } })).success, false, "worker identity env compatibility carrier must require both reserved keys");
+assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output CONFLICT", worker_identity: { population: "manual", id: "manual-one" }, env: { CHATGPT_WORKER_POPULATION: "manual", CHATGPT_WORKER_ID: "manual-two" } })).success, false, "dedicated and env worker identities must not conflict");
+assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output BAD_ENV", env: { ORDINARY_CHILD_ENV: "no" } })).success, false, "legacy command mode must still reject ordinary child env overrides");
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output BAD", worker_identity: { population: "unknown", id: "bad worker" } })).success, false, "worker identity must be bounded to supported populations and safe ids");
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output BAD", executable: "node" })).success, false, "command and executable modes must be mutually exclusive");
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output BAD", stdin: "x" })).success, false, "legacy command mode must reject structured stdin");
@@ -78,6 +82,21 @@ const contractWorkerIdentity = { population: "manual", id: "manual-process-contr
 const startStructured = await assertStructuredProcessResult("start_process", { command: "Write-Output process-contract-structured", wait_ms: 10_000, worker_identity: contractWorkerIdentity });
 assert.match(startStructured.stdout || "", /process-contract-structured/, "start_process structured output should preserve stdout");
 assert.deepEqual(startStructured.worker_identity, contractWorkerIdentity, "start_process must expose its explicit process-bound worker identity");
+const envCompatibilityWorkerIdentity = { population: "recurring", id: "6aa80831a83481918a038dc0033b4f15" };
+const envCompatibilityLegacy = await assertStructuredProcessResult("start_process", {
+  command: "Write-Output worker-env-compatibility",
+  wait_ms: 10_000,
+  env: { CHATGPT_WORKER_POPULATION: envCompatibilityWorkerIdentity.population, CHATGPT_WORKER_ID: envCompatibilityWorkerIdentity.id },
+});
+assert.deepEqual(envCompatibilityLegacy.worker_identity, envCompatibilityWorkerIdentity, "reserved env compatibility carrier must become process-bound worker identity");
+const envCompatibilityStructured = await assertStructuredProcessResult("start_process", {
+  executable: process.execPath,
+  args: ["-e", "console.log(JSON.stringify({population:process.env.CHATGPT_WORKER_POPULATION??null,id:process.env.CHATGPT_WORKER_ID??null,ordinary:process.env.ORDINARY_CHILD_ENV??null}))"],
+  env: { CHATGPT_WORKER_POPULATION: envCompatibilityWorkerIdentity.population, CHATGPT_WORKER_ID: envCompatibilityWorkerIdentity.id, ORDINARY_CHILD_ENV: "preserved" },
+  wait_ms: 10_000,
+});
+assert.deepEqual(envCompatibilityStructured.worker_identity, envCompatibilityWorkerIdentity, "structured env compatibility carrier must become process-bound worker identity");
+assert.deepEqual(JSON.parse(String(envCompatibilityStructured.stdout || "").trim()), { population: null, id: null, ordinary: "preserved" }, "reserved worker identity env keys must be stripped before child launch while ordinary env remains");
 const trickyArg = String.raw`space ; $dollar \"quote\" ` + "`tick";
 const argvStructured = await assertStructuredProcessResult("start_process", {
   executable: process.execPath,
