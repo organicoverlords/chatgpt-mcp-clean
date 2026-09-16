@@ -48,6 +48,8 @@ const startInputSchema = server._registeredTools.start_process?.inputSchema;
 assert.ok(startInputSchema, "start_process input schema missing");
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output LEGACY" })).success, true, "legacy command input must remain valid");
 assert.equal((await startInputSchema.safeParseAsync({ executable: "node", args: ["--version"], stdin: "" })).success, true, "structured executable+args+stdin input must be valid");
+assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output WORKER", worker_identity: { population: "manual", id: "manual-20260916-test" } })).success, true, "explicit manual worker identity must be valid");
+assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output BAD", worker_identity: { population: "unknown", id: "bad worker" } })).success, false, "worker identity must be bounded to supported populations and safe ids");
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output BAD", executable: "node" })).success, false, "command and executable modes must be mutually exclusive");
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output BAD", stdin: "x" })).success, false, "legacy command mode must reject structured stdin");
 
@@ -62,7 +64,7 @@ async function assertStructuredProcessResult(name, args) {
   const result = await tool.handler(args, {});
   assert.ok(result.structuredContent, `${name} must return structuredContent`);
   assert.deepEqual(result.structuredContent.serving_identity, {
-    tool_contract_version: "process-tools.v3",
+    tool_contract_version: "process-tools.v4",
     backend_generation: "backend-contract-test",
     source_commit: contractSourceCommit,
   }, `${name} must expose exact serving backend/source/contract identity`);
@@ -72,8 +74,10 @@ async function assertStructuredProcessResult(name, args) {
   return result.structuredContent;
 }
 
-const startStructured = await assertStructuredProcessResult("start_process", { command: "Write-Output process-contract-structured", wait_ms: 10_000 });
+const contractWorkerIdentity = { population: "manual", id: "manual-process-contract" };
+const startStructured = await assertStructuredProcessResult("start_process", { command: "Write-Output process-contract-structured", wait_ms: 10_000, worker_identity: contractWorkerIdentity });
 assert.match(startStructured.stdout || "", /process-contract-structured/, "start_process structured output should preserve stdout");
+assert.deepEqual(startStructured.worker_identity, contractWorkerIdentity, "start_process must expose its explicit process-bound worker identity");
 const trickyArg = String.raw`space ; $dollar \"quote\" ` + "`tick";
 const argvStructured = await assertStructuredProcessResult("start_process", {
   executable: process.execPath,
@@ -92,6 +96,7 @@ const stdinStructured = await assertStructuredProcessResult("start_process", {
 assert.equal(String(stdinStructured.stdout || ""), "contract-stdin\n", "structured stdin must reach the child without shell transport");
 const readStructured = await assertStructuredProcessResult("read_output", { process_id: startStructured.process_id, max_chars: 32_000, wait_ms: 0 });
 assert.equal(readStructured.process_id, startStructured.process_id, "read_output structured result must preserve process identity");
+assert.deepEqual(readStructured.worker_identity, contractWorkerIdentity, "read_output must preserve process-bound worker identity");
 const tinyReadStructured = await assertStructuredProcessResult("read_output", { process_id: startStructured.process_id, max_chars: 0, wait_ms: 0 });
 assert.ok(String(tinyReadStructured.stdout || "").length <= 1, "max_chars=0 must clamp to one retained character");
 assert.equal(tinyReadStructured.output_page?.page_limit, 1, "max_chars=0 must expose the effective clamped page limit");
@@ -105,7 +110,7 @@ const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "776f674565742ac15d101159a7d58a70bed6bdc1635bc9a41bb7708c667b3247";
+const acceptedContractSha256 = "c3ea7fe3bedf60bd9db860f37e6b6979d9ddab9b9c14875e3db91d0a2223d0ff";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 const expectedTools = [...baseExpectedTools].sort((a, b) => a.name.localeCompare(b.name));
