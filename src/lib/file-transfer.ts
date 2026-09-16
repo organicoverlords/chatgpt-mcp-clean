@@ -779,8 +779,6 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
       _meta: {
         "openai/fileParams": ["file"],
-        "openai/toolInvocation/invoking": "Saving file…",
-        "openai/toolInvocation/invoked": "File saved",
       },
       inputSchema: z.object({
         file: ChatgptFileSchema,

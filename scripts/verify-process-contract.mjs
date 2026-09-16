@@ -16,19 +16,19 @@ const actualTools = Object.entries(server._registeredTools)
   .sort(([a], [b]) => a.localeCompare(b))
   .map(([name, tool]) => ({ name, description: tool.description || "", inputSchema: z.toJSONSchema(tool.inputSchema), ...(tool.outputSchema ? { outputSchema: z.toJSONSchema(tool.outputSchema) } : {}) }));
 
-const expectedInvocationUi = {
-  start_process: { title: "Run command", invoking: "Running command…", invoked: "Command returned" },
-  read_output: { title: "Check command", invoking: "Checking command…", invoked: "Command checked" },
-  kill_process: { title: "Stop process", invoking: "Stopping process…", invoked: "Process stop checked" },
-  download_chatgpt_file: { title: "Save ChatGPT file", invoking: "Saving file…", invoked: "File saved" },
+const expectedToolTitles = {
+  start_process: "Run command",
+  read_output: "Check command",
+  kill_process: "Stop process",
+  download_chatgpt_file: "Save ChatGPT file",
 };
-for (const [name, expected] of Object.entries(expectedInvocationUi)) {
+for (const [name, expectedTitle] of Object.entries(expectedToolTitles)) {
   const tool = server._registeredTools[name];
-  assert.equal(tool?.title, expected.title, `${name} must expose its concise user-facing title`);
-  assert.equal(tool?._meta?.["openai/toolInvocation/invoking"], expected.invoking, `${name} must expose concise invoking status`);
-  assert.equal(tool?._meta?.["openai/toolInvocation/invoked"], expected.invoked, `${name} must expose concise invoked status`);
-  assert.ok(expected.invoking.length <= 64 && expected.invoked.length <= 64, `${name} invocation statuses must stay within Apps SDK limits`);
+  assert.equal(tool?.title, expectedTitle, `${name} must expose its concise user-facing title`);
+  assert.equal(tool?._meta?.["openai/toolInvocation/invoking"], undefined, `${name} must not publish invocation status metadata that can remount the ChatGPT tool card`);
+  assert.equal(tool?._meta?.["openai/toolInvocation/invoked"], undefined, `${name} must not publish completion status metadata that can remount the ChatGPT tool card`);
 }
+assert.deepEqual(server._registeredTools.download_chatgpt_file?._meta?.["openai/fileParams"], ["file"], "download_chatgpt_file must preserve ChatGPT file parameter metadata");
 
 const structuredProcessToolNames = ["start_process", "read_output", "kill_process"];
 for (const name of structuredProcessToolNames) {

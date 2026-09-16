@@ -250,10 +250,6 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
         ? "Execute a local process. Input forms: executable+args with optional stdin/env, script+language with optional env for PowerShell/Python/Node/Bash source, or legacy command for shell composition. Structured source is transported through stdin. wait_ms defaults to 750 ms and is bounded to 0..10000 ms."
         : "Execute a local process. Input forms: executable+args with optional stdin/env, or script+language with optional env for PowerShell/Python/Node/Bash source. Structured source is transported through stdin. wait_ms defaults to 750 ms and is bounded to 0..10000 ms.",
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-      _meta: {
-        "openai/toolInvocation/invoking": "Running command…",
-        "openai/toolInvocation/invoked": "Command returned",
-      },
       inputSchema: startProcessInputSchema,
       outputSchema: processOutputSchema,
     },
@@ -275,7 +271,6 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       title: "Check command",
       description: "Read process stdout/stderr or a named bootstrap snapshot. Returns structured data only; it never mounts an app/widget template. wait_ms may wait up to 10000 ms for output or exit, and each stream is bounded to 32000 characters.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-      _meta: { "openai/toolInvocation/invoking": "Checking command\u2026", "openai/toolInvocation/invoked": "Command checked" },
       inputSchema: z.object({
         process_id: z.string().min(1),
         max_chars: z.number().int().optional(),
@@ -298,10 +293,6 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       title: "Stop process",
       description: "Terminate a background process and its entire Windows process tree.",
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
-      _meta: {
-        "openai/toolInvocation/invoking": "Stopping process…",
-        "openai/toolInvocation/invoked": "Process stop checked",
-      },
       inputSchema: z.object({ process_id: z.string().min(1) }),
       outputSchema: killProcessOutputSchema,
     },
