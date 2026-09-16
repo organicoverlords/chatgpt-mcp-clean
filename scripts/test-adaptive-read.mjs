@@ -1,5 +1,15 @@
 import assert from "node:assert/strict";
-import { ProcessManager } from "../dist/lib/process-manager.js";
+import { ADAPTIVE_READ_WAIT_MS, MAX_READ_WAIT_MS, ProcessManager, adaptiveReadWaitMs, boundReadWaitMs } from "../dist/lib/process-manager.js";
+
+
+assert.equal(MAX_READ_WAIT_MS, 120_000);
+assert.deepEqual(ADAPTIVE_READ_WAIT_MS, [2_000, 5_000, 10_000, 30_000, 60_000]);
+assert.equal(boundReadWaitMs(999_999), 120_000);
+assert.equal(boundReadWaitMs(-1), 0);
+assert.equal(adaptiveReadWaitMs(0), 2_000);
+assert.equal(adaptiveReadWaitMs(3), 30_000);
+assert.equal(adaptiveReadWaitMs(4), 60_000);
+assert.equal(adaptiveReadWaitMs(99), 60_000);
 
 const manager = new ProcessManager();
 let started;

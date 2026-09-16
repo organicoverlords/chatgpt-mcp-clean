@@ -182,7 +182,7 @@ const invalidActivityTarget = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date
 assertToolErrorWithoutAppMeta(invalidActivityTarget, "schema-invalid start_process");
 assert.match(invalidActivityTarget.body.result.content?.[0]?.text || "", /activity_target|invalid|validation/i);
 const readOutputTool = listed.body.result.tools.find((tool) => tool.name === "read_output");
-assert.equal(readOutputTool.inputSchema.properties.wait_ms.maximum, 10_000);
+assert.equal(readOutputTool.inputSchema.properties.wait_ms.maximum, 120_000);
 assert.equal(readOutputTool.inputSchema.properties.wait_ms.minimum, 0);
 for (const [name, tool] of [["start_process", startProcessTool], ["read_output", readOutputTool]]) {
   assert.equal(tool._meta?.["openai/outputTemplate"], undefined, `${name} must not mount a widget over MCP transport`);
