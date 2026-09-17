@@ -6,13 +6,16 @@ $errors = $null
 [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors) | Out-Null
 if ($errors.Count -gt 0) { throw ($errors | Out-String) }
 $source = Get-Content -LiteralPath $scriptPath -Raw
-foreach ($required in @('CanonicalConfigPath', 'MainPublicHost', 'AllowMainBackendChange', 'Assert-CaddyConfigContract', 'Get-MainBackendRoute', 'Assert-MainBackendMcpContract', 'SkipHttpErrorCheck', 'CADDY_SUPERVISOR_RETRY', 'Get-FileHash', 'Copy-Item', 'CaddyPath reload', 'while ($true)', '[switch]$Once')) {
+foreach ($required in @('CanonicalConfigPath', 'MainPublicHost', 'AllowMainBackendChange', 'Assert-CaddyConfigContract', 'Get-MainBackendRoute', 'Assert-MainBackendMcpContract', 'SkipHttpErrorCheck', 'CADDY_SUPERVISOR_RETRY', '$servingHealthy', 'Get-FileHash', 'Copy-Item', 'CaddyPath reload', 'while ($true)', '[switch]$Once')) {
     if ($source -notmatch [regex]::Escape($required)) { throw "missing supervisor contract: $required" }
 }
 $probeIndex = $source.IndexOf('Assert-MainBackendMcpContract $canonicalRoute')
 $copyIndex = $source.IndexOf('Copy-Item -LiteralPath $CanonicalConfigPath')
 if ($probeIndex -lt 0 -or $copyIndex -lt 0 -or $probeIndex -gt $copyIndex) { throw 'backend Host contract must be checked before config copy/reload' }
 if ($source -match '\[int\]\$MainBackendPort\s*=') { throw 'supervisor must not hard-code a main backend port' }
+if ($source -notmatch [regex]::Escape('$runtimeRoute.Endpoint -ne $canonicalRoute.Endpoint -and $servingHealthy -and -not $AllowMainBackendChange')) {
+    throw 'live retarget guard must require explicit authorization only while owned Caddy is healthy'
+}
 $config = Get-Content -LiteralPath $configPath -Raw
 if ($config -match '(?i)header_up|tailscale-user-login|tailscale-funnel-request') { throw 'canonical home-direct Caddy config must not inject trust headers' }
 
@@ -69,6 +72,31 @@ function Normalize-TestOutput($Items) {
     return ((@($Items) -join "`n") -replace "`e\[[0-9;]*m", '')
 }
 
+function Start-FakeOwnedCaddy([string]$RuntimeConfigPath, [int]$ListenPort, [string]$TempRoot) {
+    $fakeCaddyPath = Join-Path $TempRoot 'caddy.exe'
+    if (-not (Test-Path -LiteralPath $fakeCaddyPath -PathType Leaf)) {
+        Copy-Item -LiteralPath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -Destination $fakeCaddyPath
+    }
+    $listenerScript = Join-Path $TempRoot "fake-caddy-listener-$ListenPort.ps1"
+    $listenerSource = @(
+        'param([string]$Marker, [int]$Port)',
+        '$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)',
+        '$listener.Start()',
+        'try { Start-Sleep -Seconds 4 } finally { $listener.Stop() }'
+    ) -join "`n"
+    Set-Content -LiteralPath $listenerScript -Value $listenerSource -Encoding utf8
+    $process = Start-Process -FilePath $fakeCaddyPath -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$listenerScript,$RuntimeConfigPath,$ListenPort) -PassThru
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        Start-Sleep -Milliseconds 100
+        $listener = @(Get-NetTCPConnection -LocalPort $ListenPort -State Listen -ErrorAction SilentlyContinue | Where-Object { [int]$_.OwningProcess -eq [int]$process.Id })
+        if ($listener.Count -gt 0) { return [pscustomobject]@{ Process = $process; Path = $fakeCaddyPath } }
+        if ($process.HasExited) { break }
+    }
+    [void]$process.WaitForExit(5000)
+    $process.Dispose()
+    throw 'fake owned Caddy did not open its isolated listener port'
+}
+
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('home-direct-caddy-guard-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $temp | Out-Null
 try {
@@ -79,11 +107,34 @@ try {
     Write-TestCaddyfile $runtimeConfig $oldPort 'active-runtime'
     Write-TestCaddyfile $retargetConfig $newPort 'new-canonical'
     $runtimeBefore = (Get-FileHash -LiteralPath $runtimeConfig -Algorithm SHA256).Hash
-    $retargetOutput = @(& pwsh.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $scriptPath -CanonicalConfigPath $retargetConfig -RuntimeConfigPath $runtimeConfig -CaddyPath (Join-Path $temp 'missing-caddy.exe') -Once 2>&1)
-    $retargetText = Normalize-TestOutput $retargetOutput
-    if ($LASTEXITCODE -eq 0) { throw 'main backend retarget without explicit switch must fail closed' }
-    if ((Get-FileHash -LiteralPath $runtimeConfig -Algorithm SHA256).Hash -ne $runtimeBefore) { throw 'blocked retarget must not modify runtime config' }
-    if ($retargetText -notmatch 'requires -AllowMainBackendChange') { throw "unexpected retarget-guard failure: $retargetText" }
+
+    # Boot recovery: with no healthy owned Caddy, canonical routing may replace stale runtime routing without a live-cutover switch.
+    $downRecoveryJob = Start-FakeMcpBackend $newPort 401
+    Start-Sleep -Milliseconds 250
+    $downRecoveryOutput = @(& pwsh.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $scriptPath -CanonicalConfigPath $retargetConfig -RuntimeConfigPath $runtimeConfig -CaddyPath (Join-Path $temp 'missing-caddy.exe') -Once 2>&1)
+    $downRecoveryRequest = Receive-FakeMcpBackend $downRecoveryJob
+    $downRecoveryText = Normalize-TestOutput $downRecoveryOutput
+    if ($LASTEXITCODE -eq 0) { throw 'down-recovery test must reach the intentionally missing Caddy executable' }
+    if ((Get-FileHash -LiteralPath $runtimeConfig -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $retargetConfig -Algorithm SHA256).Hash) { throw 'down recovery must copy canonical routing without AllowMainBackendChange after Host-contract proof' }
+    if ($downRecoveryText -notmatch 'Caddy executable is missing') { throw "down recovery did not progress to Caddy startup: $downRecoveryText" }
+    if ($downRecoveryRequest -notmatch '^POST /mcp HTTP/' -or $downRecoveryRequest -notmatch '(?im)^Host:\s*91-159-12-133\.sslip\.io\s*$') { throw "down-recovery Host-contract probe sent an unexpected request: $downRecoveryRequest" }
+
+    # Restore the stale runtime fixture, then prove a healthy owned Caddy still blocks an implicit live retarget.
+    Write-TestCaddyfile $runtimeConfig $oldPort 'active-runtime-live-guard'
+    $runtimeBefore = (Get-FileHash -LiteralPath $runtimeConfig -Algorithm SHA256).Hash
+    $ownedCaddyPort = Get-FreeTcpPort
+    $ownedCaddy = Start-FakeOwnedCaddy -RuntimeConfigPath $runtimeConfig -ListenPort $ownedCaddyPort -TempRoot $temp
+    try {
+        $retargetOutput = @(& pwsh.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $scriptPath -CanonicalConfigPath $retargetConfig -RuntimeConfigPath $runtimeConfig -CaddyPath $ownedCaddy.Path -Port $ownedCaddyPort -Once 2>&1)
+        $retargetText = Normalize-TestOutput $retargetOutput
+        if ($LASTEXITCODE -eq 0) { throw 'healthy live main backend retarget without explicit switch must fail closed' }
+        if ((Get-FileHash -LiteralPath $runtimeConfig -Algorithm SHA256).Hash -ne $runtimeBefore) { throw 'blocked live retarget must not modify runtime config' }
+        if ($retargetText -notmatch 'requires -AllowMainBackendChange') { throw "unexpected live retarget-guard failure: $retargetText" }
+    }
+    finally {
+        if (-not $ownedCaddy.Process.WaitForExit(6000)) { throw 'fake owned Caddy did not self-expire' }
+        $ownedCaddy.Process.Dispose()
+    }
 
     $backend403Port = Get-FreeTcpPort
     $badHostConfig = Join-Path $temp 'bad-host.Caddyfile'
@@ -140,4 +191,4 @@ try {
     Get-Job -ErrorAction SilentlyContinue | Remove-Job -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
 }
-Write-Output 'PASS home_direct_caddy_supervisor canonical_sync=present auth_header_injection=absent retarget_guard=explicit_switch backend_host_contract=401 retry_loop=nonterminating route_port=dynamic'
+Write-Output 'PASS home_direct_caddy_supervisor canonical_sync=present auth_header_injection=absent retarget_guard=explicit_switch backend_host_contract=401 retry_loop=nonterminating down_recovery=allowed live_retarget=guarded route_port=dynamic'

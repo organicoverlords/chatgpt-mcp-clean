@@ -98,7 +98,9 @@ function Sync-CaddyConfig {
     if (-not $needsSync) { return }
     if ($runtimeExists) {
         $runtimeRoute = Get-MainBackendRoute $RuntimeConfigPath
-        if ($runtimeRoute.Endpoint -ne $canonicalRoute.Endpoint -and -not $AllowMainBackendChange) {
+        $servingHealthy = Test-CaddyHealthy
+        # When Caddy is down/unhealthy this is recovery, not a live cutover: canonical config may replace stale runtime routing.
+        if ($runtimeRoute.Endpoint -ne $canonicalRoute.Endpoint -and $servingHealthy -and -not $AllowMainBackendChange) {
             throw "Main backend retarget from $($runtimeRoute.Endpoint) to $($canonicalRoute.Endpoint) requires -AllowMainBackendChange"
         }
     }
