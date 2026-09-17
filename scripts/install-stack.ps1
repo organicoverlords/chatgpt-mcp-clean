@@ -139,7 +139,7 @@ $caddySpec = Get-Content -LiteralPath $caddySpecPath -Raw | ConvertFrom-Json
 if ([string]$caddySpec.sha256 -notmatch '^[0-9a-f]{64}$') { throw 'invalid pinned Caddy SHA-256' }
 
 $actions = @(
-    "install MCP runtime on loopback 127.0.0.1:$Port with exactly five connector tools",
+    "install MCP runtime on loopback 127.0.0.1:$Port with exactly four connector tools",
     "install local Caddy $($caddySpec.version) on TCP $CaddyHttpsPort for $($origin.Host)",
     'use local-edge owner authorization; no VPS, WireGuard, or Tailscale owner-auth path',
     "install standalone BusyCoordinator into $BusyRoot",

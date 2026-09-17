@@ -59,6 +59,11 @@ assert.doesNotMatch(installSource, /busy-python\.cmd'\) contract/);
 assert.match(doctorSource, /coordinator-contract\.json/);
 assert.match(doctorSource, /\$busyCmd --help/);
 assert.doesNotMatch(doctorSource, /\$busyCmd contract/);
+assert.match(installSource, /exactly four connector tools/);
+assert.doesNotMatch(installSource, /exactly five connector tools/);
+assert.match(doctorSource, /media_delivery/);
+assert.match(doctorSource, /process-result inline images plus ordinary artifact resources/);
+assert.doesNotMatch(doctorSource, /library_delivery/);
 
 const temp = mkdtempSync(join(tmpdir(), "mcp-stack-plan-"));
 const installRoot = join(temp, "install");

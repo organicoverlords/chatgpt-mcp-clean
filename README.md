@@ -3,6 +3,7 @@
 <!-- PROJECT-TIMELINE:BEGIN -->
 ## Project timeline
 
+- [2026-09-17] Added full-stack GitHub-first disaster recovery (#392): the README now defines authority/order and GitHub-only/Commander/MCP recovery paths, while `scripts/restore-stack-from-github.ps1` rebuilds the supported functional Windows stack plus optional rules/Vault/Stack Atlas user context without resetting dirty work or restoring OAuth backups.
 - [2026-09-10] Split lossless file transfer into explicit `upload_local_file` and `download_chatgpt_file` actions (#235): normal `start_process`/`read_output` no longer mount the Library widget, ChatGPT file inputs use native file params for direct streaming to disk, local uploads use exact-byte SHA-256 verification, and compressible HTTP transfers may use zstd level 1 while already-compressed media stays unchanged.
 - [2026-09-10] Added the one-command local home-direct stack installer (#233): one Windows host gets the loopback MCP backend, pinned local Caddy, standalone BusyCoordinator, shared base rules, PlanOnly, and autostart; the ChatGPT connector remains exactly `start_process`, `read_output`, and `kill_process`, while Library delivery stays metadata/resource-widget behavior rather than a fourth tool.
 - [2026-09-06] Made the three-process-tool ChatGPT connector profile the production-safe default, corrected stale full-profile documentation, and added a rotation-aware reroute acceptance analyzer that joins aggregate transport health with exact/unknown-time routing evidence without exposing raw identifiers (#81).
@@ -15,6 +16,113 @@ See the canonical [CHANGELOG.md](CHANGELOG.md) for the complete project timeline
 Minimal authenticated Streamable HTTP MCP for the local Windows shell/process control boundary. The current home-direct serving path runs on the Windows host: local HTTPS Caddy proxies to the loopback MCP backend on `127.0.0.1:3022`, with local-edge authorization. Historical VPS/WireGuard/tunnel tooling remains in the repository for recovery/research history but is not part of this current serving path or the one-package installer.
 
 The default ChatGPT connector contract is `MCP_TOOL_PROFILE=process`, exposing exactly `start_process`, `read_output`, `kill_process`, and `download_chatgpt_file`. Images produced by commands are returned directly in the existing `start_process`/`read_output` result at original resolution; the image handoff adds only `resolution: WIDTHxHEIGHT` and no image hash/widget/bridge metadata. Producers may emit `CHATGPT_ARTIFACT=<absolute path>` for streaming output or a top-level JSON `chatgpt_artifacts` array for machine-readable results. Non-image media such as MP4 remains an ordinary artifact resource, while producers can declare full-resolution keyframes/contact sheets for inline inspection. The broader `full` profile adds only the three Busy tools for internal/local testing and is not the ChatGPT plugin surface.
+
+## Full-stack disaster recovery
+
+This section is the durable recovery entrypoint for a future ChatGPT session or human operator. **Do not rely on chat memory to reconstruct this stack.** If MCP itself is unavailable, start here from GitHub. The supported recovery target is a usable local Windows stack first; exact redundant/frozen bindings are restored only after control is back and current topology has been re-read.
+
+### What is authoritative
+
+Use these sources in this order. Current live evidence always outranks an old report or snapshot.
+
+1. `organicoverlords/chatgpt-mcp-clean` `master`: current MCP source, the supported one-package installer, this recovery script, process contract, Busy package, and generic local Caddy install.
+2. `organicoverlords/agents` `main`: canonical `RULES.md`, `AGENTS.md`, `CONTRACTS.json`, `Get-AgentContract.ps1`, agent pointers, and the Stack Atlas/contract PATH launchers. This is how the assistant's shared working instructions are restored.
+3. `organicoverlords/regression-research` `main`, when the user's Vault is available: durable user directives/history plus `04 Operating Contracts/mcp-current-topology.json` and `mcp-recovery-state.json`. `mcp-current-topology.json` is the current-serving authority; `mcp-recovery-state.json` is **recovery metadata only** and must never be projected as current topology.
+4. The live Windows machine after recovery: exact listeners, task actions, Caddy loaded/on-disk routes, runtime identity, OAuth store identity, and real Host `/mcp` behavior.
+5. `chatgpt/home-direct-stable-runtime`: source owner for the long-lived home-direct Caddy supervisor/config. Use it only when restoring that user-specific serving layer; PR #391/#390 made boot recovery converge canonical routing while Caddy is down without weakening live-retarget protection.
+
+Never hard-code a port, backend generation, binding order, or recovery commit from an old README paragraph, chat, report, or `mcp-recovery-state.json`. Read current topology and then verify live state. One healthy process binding is enough to regain control; redundant bindings are optional recovery/control lanes, not a prerequisite for normal operation.
+
+### Recovery channels
+
+#### GitHub-only recovery
+
+A GitHub connector/plugin cannot execute Windows commands by itself. It **can** recover everything needed to get execution back:
+
+1. Read this `README.md` from `organicoverlords/chatgpt-mcp-clean@master`.
+2. Fetch `scripts/restore-stack-from-github.ps1` from the same ref and give that exact file to the user to run in PowerShell 7. Do not rewrite it from memory when GitHub is available.
+3. If the user has access to `organicoverlords/regression-research`, read `04 Operating Contracts/mcp-current-topology.json` before making claims about the current ports/commits/routes. Read `mcp-recovery-state.json` only as rollback/recovery metadata.
+4. After the script restores one healthy MCP process binding, switch back to MCP for machine work. Do not continue asking the user to manually orchestrate commands that MCP can perform.
+
+If raw-file download is the only route, the user can save the `master` copy of `scripts/restore-stack-from-github.ps1` and run it locally. Prefer a GitHub connector/file fetch or a normal clone over copying a script from an old chat transcript.
+
+#### Commander/local-shell recovery
+
+Commander or any local shell is only an execution transport. Use it to run the same repository-owned script; do not create Commander-specific recovery logic. From a clean MCP repository clone:
+
+```powershell
+pwsh -File .\scripts\restore-stack-from-github.ps1 `
+  -PublicOrigin https://YOUR-MCP-HOST `
+  -OwnerLogin YOUR-OWNER-LOGIN `
+  -RestoreUserContext
+```
+
+If a working MCP binding exists, run the same command through `start_process` instead. Use the current Vault `operator_route_preference` to select among actually exposed healthy bindings; do not hard-code a historical binding order in recovery code.
+
+#### Single PowerShell restore
+
+`scripts/restore-stack-from-github.ps1` is the one-script disaster bootstrap. It can be run from a downloaded copy with no pre-existing MCP checkout. It clones/fast-forwards clean GitHub checkouts, then delegates installation to the existing `install.ps1` / `scripts/install-stack.ps1` installer owner rather than duplicating installer logic.
+
+Preview with **zero mutation**:
+
+```powershell
+pwsh -File .\scripts\restore-stack-from-github.ps1 -RestoreUserContext -Plan
+```
+
+Restore the supported functional stack and the user's control context:
+
+```powershell
+pwsh -File .\scripts\restore-stack-from-github.ps1 `
+  -PublicOrigin https://YOUR-MCP-HOST `
+  -OwnerLogin YOUR-OWNER-LOGIN `
+  -RestoreUserContext
+```
+
+`-RestoreUserContext` additionally restores/updates the Vault checkout, canonical agent rules/contracts, Stack Atlas and `Get-AgentContract` entrypoints, `VaultCheckoutSync`, and the persistent bootstrap snapshot tasks. When Vault contains a valid current topology, `PublicOrigin` can be omitted and recovered from it. `OwnerLogin` can be recovered from an existing supported stack config or surviving current frozen owner file; otherwise the user must supply it because it is intentionally not stored in public GitHub.
+
+The script requires Windows, PowerShell 7, Git, Node.js/npm, and Python. The underlying installer currently requires Node.js 20+. Creating the supported inbound Windows Firewall rule requires one elevated run unless `-SkipFirewall` is used because the rule already exists. The public HTTPS hostname/router path is external to GitHub: DNS/router/NAT must still deliver public TCP 443 to the Windows Caddy HTTPS port configured by the installer.
+
+### What the one-script restore rebuilds
+
+The supported functional restore includes the process-profile MCP server, local HTTPS Caddy, standalone BusyCoordinator, canonical shared rules/contracts, PlanOnly, scheduled autostart, and—when requested—the Vault/Stack Atlas/user-directive control layer. The process profile is exactly `start_process`, `read_output`, `kill_process`, and `download_chatgpt_file`.
+
+The script preserves existing dirty Git checkouts and fails closed instead of resetting or cleaning them. It does not reboot. It does not delete frozen/rollback runtimes. It does not copy, merge, delete, or restore OAuth/token backups. If OAuth/connector authorization state is gone, first restore the endpoint, then reconnect/re-authorize the ChatGPT connector normally. **Never restore an old `oauth.json` over a live store merely because it exists in a backup.** Token/client rotation may have advanced.
+
+A fresh functional install uses its own managed state under `%LOCALAPPDATA%\ChatGPTMcpStack`. Existing user-specific minimal-connector OAuth stores under `%LOCALAPPDATA%\ChatGPTMcpClean\minimal-connectors` are intentionally left untouched. Exact frozen lanes may reuse their own existing stores only after their identity/currentness has been proved.
+
+### Restoring the exact user-specific redundant/frozen stack
+
+Do this only after one functional binding is healthy. The redundant four-binding layout changes over time, so there is deliberately no permanent `3140`, `3137`, or other port constant in the disaster script.
+
+1. Restore/read the Vault and load `04 Operating Contracts/mcp-current-topology.json`. Confirm `schema=mcp-current-topology.v1` and `authority=current_serving_topology`.
+2. Verify the topology against live listeners/tasks and the source rollout PR/commit. If the machine was lost completely, treat the topology as the last durable desired state until live replacements are proved—not as proof that old PIDs/tasks still exist.
+3. Preserve surviving OAuth stores, receipt stores, rollback artifacts, dirty worktrees, and unrelated processes. Never use task/instance names such as `test` or `debug` as disposal authority.
+4. Recreate clean frozen candidates from the current source commit with `scripts/prepare-frozen-home-direct.ps1`. This script creates a hash-checked independent runtime and Scheduled Task but intentionally does **not** change Caddy routes. It requires explicit authorization, current topology, and existing OAuth state for the lane it starts. Use its `-Plan` mode first.
+5. If OAuth for a redundant lane no longer exists, do not copy a backup or another lane's store. Restore one functional connector first, then re-establish that lane's authorization through the current connector/OAuth owner before starting a `-RequireExistingOAuthState` frozen task.
+6. Restore the long-lived Caddy supervisor from `chatgpt/home-direct-stable-runtime`. Validate candidate Caddy config off-path. A healthy live Caddy main-backend retarget still requires the explicit retarget switch and Host `/mcp` proof; when owned Caddy is down/unhealthy, the supervisor may converge stale runtime routing to canonical only after the canonical backend returns the required unauthenticated Host `/mcp` contract.
+7. Before any shared route change, use the existing Busy exact scope and production-change gate, preserve an independent rollback lane, and prove the candidate off-path. Do not restart shared Caddy merely to validate source/config; use temp config/Caddy simulation where possible.
+8. Acceptance for each public route is not `/health` alone. Prove the exact public `Host` against `POST /mcp`; unauthenticated reachability should return the expected authorization response (currently 401 for the MCP contract), not 403/502. Verify runtime identity/source commit, process tool list, OAuth boundary, and loaded Caddy routes.
+
+`scripts/prepare-frozen-home-direct.ps1` is an optional second-stage deployment primitive. A normal user does not need MCPXX, Supertest9001, MCPVisual, and MCPv4 simultaneously; one compatible healthy binding is the recovery minimum and normal operating requirement.
+
+### Validation after recovery
+
+Run the installed doctor and check the control surfaces:
+
+```powershell
+pwsh -File "$env:LOCALAPPDATA\ChatGPTMcpStack\mcp\scripts\stack-doctor.ps1" `
+  -ConfigPath "$env:LOCALAPPDATA\ChatGPTMcpStack\stack-config.json" `
+  -RequireHealthyRuntime
+
+& "$env:USERPROFILE\.agents\Get-AgentContract.ps1" -Id orientation.discovery
+python "$env:USERPROFILE\Desktop\vault\tools\stack_atlas.py" lookup stack_atlas
+```
+
+When restoring this user's context, also verify that `VaultCheckoutSync`, `VaultBootstrapSnapshot`, and `VaultBootstrapSnapshotWatchdog` exist with known owner-installed actions. Then read `mcp-current-topology.json` again and compare it with exact local task/listener/Caddy evidence before calling the exact redundant topology restored.
+
+### Information that GitHub cannot safely reconstruct
+
+GitHub source can rebuild software, rules, instructions, and durable operating context, but it must not manufacture secrets or transient identity. The following require surviving local state or user/platform reauthorization: OAuth tokens/client registrations, private credentials, router/NAT credentials, and any owner identity intentionally not stored in GitHub. Missing credentials are a reauthorization event, not permission to copy stale backups.
 
 ## Local one-package install
 
