@@ -25,6 +25,14 @@ for (const name of toolsWithoutClientUiTitles) {
 }
 assert.deepEqual(server._registeredTools.download_chatgpt_file?._meta?.["openai/fileParams"], ["file"], "download_chatgpt_file must preserve openai/fileParams");
 
+const publicDescriptionBudget = 160;
+const publicDescriptionInstructionLeak = /\b(?:wait_ms|max_chars|destination_path|overwrite|defaults?|input forms|do not|never|retry|poll(?:ing)?)\b/i;
+for (const name of toolsWithoutClientUiTitles) {
+  const description = server._registeredTools[name]?.description || "";
+  assert.ok(description.length <= publicDescriptionBudget, `${name} description must stay capability-focused and <= ${publicDescriptionBudget} characters`);
+  assert.doesNotMatch(description, publicDescriptionInstructionLeak, `${name} description must not duplicate schema/defaults or carry orchestration instructions`);
+}
+
 const structuredProcessToolNames = ["start_process", "read_output", "kill_process"];
 for (const name of structuredProcessToolNames) {
   assert.ok(server._registeredTools[name]?.outputSchema, `${name} must declare outputSchema`);
@@ -100,7 +108,7 @@ const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "854eeb0ba712d29c73db993ab67a1389aa23488768de41e555a29fc6fe4e5c8f";
+const acceptedContractSha256 = "d773575bae5241eb3054c6783475eea68b5bd5829196dcff42e49a2d8bcd93c5";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 const expectedTools = [...baseExpectedTools].sort((a, b) => a.name.localeCompare(b.name));

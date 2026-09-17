@@ -245,9 +245,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
   server.registerTool(
     "start_process",
     {
-      description: legacyStartProcessCommandVisible
-        ? "Execute a local process. Input forms: executable+args with optional stdin/env, script+language with optional env for PowerShell/Python/Node/Bash source, or legacy command for shell composition. Structured source is transported through stdin. wait_ms defaults to 750 ms and is bounded to 0..10000 ms."
-        : "Execute a local process. Input forms: executable+args with optional stdin/env, or script+language with optional env for PowerShell/Python/Node/Bash source. Structured source is transported through stdin. wait_ms defaults to 750 ms and is bounded to 0..10000 ms.",
+      description: "Execute a local process and return structured process output.",
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
       inputSchema: startProcessInputSchema,
       outputSchema: processOutputSchema,
@@ -267,7 +265,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
   server.registerTool(
     "read_output",
     {
-      description: "Read process stdout/stderr or a named bootstrap snapshot. Returns structured data only; it never mounts an app/widget template. When wait_ms is omitted, quiet reads adapt from 2s up to 60s; explicit wait_ms may wait up to 120000 ms. Reads wake immediately on new output or process exit. Each stream is bounded to 60000 characters.",
+      description: "Read bounded stdout/stderr from an existing process or supported snapshot alias.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: z.object({
         process_id: z.string().min(1),
@@ -288,7 +286,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
   server.registerTool(
     "kill_process",
     {
-      description: "Terminate a background process and its entire Windows process tree.",
+      description: "Terminate a process and its child process tree.",
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
       inputSchema: z.object({ process_id: z.string().min(1) }),
       outputSchema: killProcessOutputSchema,
