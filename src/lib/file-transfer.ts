@@ -774,7 +774,7 @@ export function registerFileTransferTools(server: McpServer, callerId: string): 
   server.registerTool(
     "download_chatgpt_file",
     {
-      description: "Save one exact ChatGPT file onto the MCP host without transcoding. Pass the ChatGPT file in file and an absolute destination_path; overwrite defaults to false. The server streams the temporary ChatGPT download URL directly to disk and returns byte count plus SHA-256.",
+      description: "Save an exact ChatGPT file to the MCP host without transcoding and return byte count plus SHA-256.",
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
       _meta: {
         "openai/fileParams": ["file"],
