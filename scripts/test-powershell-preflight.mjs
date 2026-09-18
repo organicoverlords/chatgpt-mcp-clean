@@ -288,6 +288,17 @@ rejects("$lane='C:\\work'; $ownerPid=20052; while((Get-Date)-lt (Get-Date).AddMi
 rejects("Wait-Process -Id 20052; & 'C:\\work\\scripts\\Invoke-P3HotSourceBuild.ps1' -Module P3Gameplay", /P3 build-slot waits/);
 rejects("$lane='C:\\work'; $ubt='C:\\UE\\UnrealBuildTool.dll'; $slot=[Threading.Mutex]::new($false,'Global\\P3BuildGraphSlot_v3_1'); $held=$slot.WaitOne(120000); & $dot $ubt p3Editor Win64 Development '-Project=C:\\work\\p3.uproject' -Module=p3", /P3 build-slot mutex waits/);
 
+rejects("Start-Sleep -Seconds 42; Write-Output READY", /inert fixed-duration pacing waits/);
+rejects("Start-Sleep -Seconds 42; Write-Output 'READY'", /inert fixed-duration pacing waits/);
+rejects("Start-Sleep -Milliseconds 42000", /inert fixed-duration pacing waits/);
+
+const sleepThenObserve = await run("Start-Sleep -Milliseconds 1; $exists=Test-Path -LiteralPath $env:TEMP; Write-Output $exists", "caller_sleep_then_observe");
+assert.match(sleepThenObserve.stdout, /True/i);
+const sleepThenCompute = await run("Start-Sleep -Milliseconds 1; Write-Output (Get-Date -Format o)", "caller_sleep_then_compute");
+assert.equal(sleepThenCompute.exit_code, 0, JSON.stringify(sleepThenCompute));
+const sleepLiteral = await run("Write-Output 'Start-Sleep -Seconds 42; Write-Output READY'", "caller_sleep_literal");
+assert.match(sleepLiteral.stdout, /Start-Sleep -Seconds 42/);
+
 rejects("python C:\\Users\\Example\\Desktop\\vault\\tools\\swarm_route.py route --work-id p3-2442-integration --kind portable-light; Write-Output 'LOCAL_WORK_CONTINUED'", /standalone start_process/);
 rejects("python 'C:\\Users\\Example\\Desktop\\vault\\tools\\swarm_route.py' route --work-id p3-2442-integration --kind portable-light\nWrite-Output 'LOCAL_WORK_CONTINUED'", /standalone start_process/);
 rejects("python C:\\Users\\Example\\Desktop\\vault\\tools\\swarm_route.py route --work-id p3-2442-integration --kind portable-light | ConvertFrom-Json", /standalone start_process/);

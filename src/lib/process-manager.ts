@@ -557,6 +557,35 @@ function vaultRootRecursiveScanError(command: string, code: string): string | un
   return undefined;
 }
 
+function inertFixedWaitError(command: string, code: string): string | undefined {
+  if (!/\b(?:Start-Sleep|sleep)\b/i.test(code)) return undefined;
+
+  const boundaries = [...code.matchAll(/[;\r\n]/g)].map((match) => match.index ?? 0);
+  const starts = [0, ...boundaries.map((index) => index + 1)];
+  const ends = [...boundaries, command.length];
+  let sawFixedSleep = false;
+
+  for (let segmentIndex = 0; segmentIndex < starts.length; segmentIndex += 1) {
+    const codeSegment = code.slice(starts[segmentIndex]!, ends[segmentIndex]!).trim();
+    if (!codeSegment) continue;
+
+    const fixedSleep = /^(?:Start-Sleep|sleep)(?:\s+-(?:Seconds|Milliseconds)\s+|\s+)(?:\d+(?:\.\d+)?)\s*$/i;
+    if (fixedSleep.test(codeSegment)) {
+      sawFixedSleep = true;
+      continue;
+    }
+
+    const staticOutput = /^(?:Write-Output|Write-Host|echo)(?:\s+[A-Za-z0-9_.:\/-]+)*\s*$/i;
+    if (staticOutput.test(codeSegment)) continue;
+
+    return undefined;
+  }
+
+  if (!sawFixedSleep) return undefined;
+  return "inert fixed-duration pacing waits are blocked; observe owner/event/status state or use a resumable handoff instead of sleeping";
+}
+
+
 function p3BuildSlotWaitError(command: string, code: string): string | undefined {
   const invokesP3Build = /\bInvoke-P3(?:HotSource)?Build\.ps1\b/i.test(command);
   const waitProcess = /\bWait-Process\b/i.test(code);
@@ -1138,6 +1167,8 @@ function commandPolicyError(command: string, code = powershellCodeMask(command))
   if (rootScanError) return rootScanError;
   const vaultScanError = vaultRootRecursiveScanError(command, code);
   if (vaultScanError) return vaultScanError;
+  const inertWaitError = inertFixedWaitError(command, code);
+  if (inertWaitError) return inertWaitError;
   const p3BuildWaitError = p3BuildSlotWaitError(command, code);
   if (p3BuildWaitError) return p3BuildWaitError;
   const swarmRouteError = swarmRouteDecisionIsolationError(command, code);
