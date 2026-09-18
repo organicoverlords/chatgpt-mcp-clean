@@ -98,6 +98,19 @@ try {
   assert.equal(paged.next_action, "READ_SAME_PROCESS_ID");
   assert.equal(paged.output_page.page_limit, 24_000);
   assert.ok(paged.stdout.length <= 24_000);
+  const modelVisiblePage = {
+    content: [],
+    structuredContent: {
+      ...paged,
+      caller_id: "caller_paging_regression",
+      serving_identity: {
+        tool_contract_version: "process-tools.v3",
+        backend_generation: "backend-paging-regression",
+        source_commit: "a".repeat(40),
+      },
+    },
+  };
+  assert.ok(JSON.stringify(modelVisiblePage).length < 32_000, "paged bootstrap MCP result must stay well below the ~62 KB stalled response");
   const expectedTotal = paged.output_page.stdout_total;
   pagePieces.push(paged.stdout);
   writeBootstrap({ marker: "replacement-after-first-page", padding: "y".repeat(55_000) });
