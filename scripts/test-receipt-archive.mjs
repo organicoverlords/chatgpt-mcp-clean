@@ -62,6 +62,25 @@ try {
   assert.equal(persisted.evidence_completeness, "complete");
   assert.equal(persisted.execution_outcome, "success");
 
+  const stdinSecret = "RESPONSE_GATE_CANDIDATE_MUST_NOT_PERSIST_7f4d";
+  const stdinStarted = withTelemetryContext(
+    { request_id: "request_receipt_stdin_privacy", caller_id: "caller_receipt_archive_test" },
+    () => manager.startStructured(process.execPath, ["-e", "process.stdin.resume(); process.stdin.on('end',()=>console.log('STDIN_CONSUMED'))"], undefined, "caller_receipt_archive_test", undefined, undefined, stdinSecret),
+  );
+  const stdinCompleted = await waitForExit(manager, stdinStarted.process_id);
+  assert.equal(stdinCompleted.exit_code, 0, JSON.stringify(stdinCompleted));
+  assert.equal(stdinCompleted.command.includes(stdinSecret), false, "caller-visible process command must not expose structured stdin");
+  const stdinArchiveDay = stdinCompleted.finished_at.slice(0, 10);
+  const stdinArchivedPath = join(receiptDirectory, "archive", stdinArchiveDay, stdinStarted.process_id + ".json");
+  const stdinArchiveDeadline = Date.now() + 5_000;
+  while (!existsSync(stdinArchivedPath) && Date.now() < stdinArchiveDeadline) await sleep(10);
+  assert.equal(existsSync(stdinArchivedPath), true, "structured-stdin completion must be durably archived");
+  const stdinArchivedRaw = readFileSync(stdinArchivedPath, "utf8");
+  const stdinArchived = JSON.parse(stdinArchivedRaw);
+  assert.equal(stdinArchivedRaw.includes(stdinSecret), false, "durable process receipt must not persist structured stdin plaintext");
+  assert.equal(stdinArchived.command.includes(stdinSecret), false);
+  assert.match(stdinArchived.stdout, /STDIN_CONSUMED/);
+
   const boundedStarted = withTelemetryContext(
     { request_id: "request_receipt_bounded_test", caller_id: "caller_receipt_archive_test" },
     () => manager.start("[Console]::Out.Write('X' * 100500)", undefined, "caller_receipt_archive_test"),
