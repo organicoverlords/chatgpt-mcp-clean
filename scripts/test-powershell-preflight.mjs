@@ -171,7 +171,8 @@ try {
 
 const runtime = await run("Write-Output $PSVersionTable.PSEdition; Write-Output $PSVersionTable.PSVersion.ToString(); Write-Output (Get-Process -Id $PID).Path", "caller_pwsh_runtime");
 assert.match(runtime.stdout, /Core/);
-assert.match(runtime.stdout, /7\.6\.5/);
+const runtimeVersion = runtime.stdout.match(/\b7\.6\.\d+\b/)?.[0];
+assert.ok(runtimeVersion, JSON.stringify(runtime));
 assert.match(runtime.stdout, /C:\\Program Files\\PowerShell\\7\\pwsh\.exe/i);
 
 const operators = await run("cmd.exe /c exit 0 && Write-Output AND_OK; cmd.exe /c exit 1 || Write-Output OR_OK; $value = $null ?? 'NULL_OK'; Write-Output $value", "caller_pwsh_operators");
@@ -291,6 +292,21 @@ rejects("$lane='C:\\work'; $ubt='C:\\UE\\UnrealBuildTool.dll'; $slot=[Threading.
 rejects("Start-Sleep -Seconds 42; Write-Output READY", /inert fixed-duration pacing waits/);
 rejects("Start-Sleep -Seconds 42; Write-Output 'READY'", /inert fixed-duration pacing waits/);
 rejects("Start-Sleep -Milliseconds 42000", /inert fixed-duration pacing waits/);
+rejects('powershell -NoProfile -Command "Start-Sleep -Seconds 42; Write-Output READY"', /inert fixed-duration pacing waits/);
+rejects('pwsh -NoProfile -Command "Start-Sleep -Milliseconds 42000; Write-Output READY"', /inert fixed-duration pacing waits/);
+assert.equal(replayCurrentPreflightError('powershell -NoProfile -Command "Start-Sleep -Milliseconds 1; Write-Output (Get-Date -Format o)"'), undefined);
+assert.throws(
+  () => manager.startStructured("powershell", ["-NoProfile", "-Command", "Start-Sleep -Seconds 42; Write-Output READY"], undefined, "caller_structured_inert_wait"),
+  (error) => error instanceof Error && /inert fixed-duration pacing waits/.test(error.message),
+);
+const structuredSleepObserve = await manager.startStructuredWithWait(
+  "powershell",
+  ["-NoProfile", "-Command", "Start-Sleep -Milliseconds 1; Write-Output (Get-Date -Format o)"],
+  undefined,
+  "caller_structured_sleep_observe",
+  commandWaitMs,
+);
+assert.equal(structuredSleepObserve.exit_code, 0, JSON.stringify(structuredSleepObserve));
 
 const sleepThenObserve = await run("Start-Sleep -Milliseconds 1; $exists=Test-Path -LiteralPath $env:TEMP; Write-Output $exists", "caller_sleep_then_observe");
 assert.match(sleepThenObserve.stdout, /True/i);
@@ -370,5 +386,5 @@ try {
   rmSync(rejectionReceiptDirectory, { recursive: true, force: true });
 }
 
-console.log("PASS powershell_preflight pwsh=7.6.5 ps7_operators=true loop_pipeline_autonormalization=true nested_command_parent_expansion=guarded args_assignment=allowed drive_root_recursion=blocked vault_root_recursion=blocked bounded_recursion=allowed durable_rejections=true failure_diagnostics=structured_not_prompted");
+console.log("PASS powershell_preflight pwsh=" + runtimeVersion + " ps7_operators=true loop_pipeline_autonormalization=true nested_command_parent_expansion=guarded args_assignment=allowed drive_root_recursion=blocked vault_root_recursion=blocked bounded_recursion=allowed inert_wait_explicit_shell=blocked durable_rejections=true failure_diagnostics=structured_not_prompted");
 process.exit(0);

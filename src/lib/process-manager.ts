@@ -1220,6 +1220,24 @@ function commandPreflightError(command: string, executionMode: CommandExecutionM
   return undefined;
 }
 
+function explicitPowerShellCommandPayload(executionPlan: CommandExecutionPlan): string | undefined {
+  if (executionPlan.mode !== "explicit_shell") return undefined;
+  const executable = executionPlan.executable.replaceAll("/", "\\");
+  if (!/(?:^|\\)(?:pwsh|powershell)(?:\.exe)?$/i.test(executable)) return undefined;
+  const commandIndex = executionPlan.args.findIndex((arg) => /^-{1,2}(?:c|command)$/i.test(arg.trim()));
+  if (commandIndex < 0 || commandIndex + 1 >= executionPlan.args.length) return undefined;
+  const payload = executionPlan.args.slice(commandIndex + 1).join(" ").trim();
+  return payload || undefined;
+}
+
+function commandExecutionPreflightError(command: string, executionPlan: CommandExecutionPlan): string | undefined {
+  const outerError = commandPreflightError(command, executionPlan.mode);
+  if (outerError) return outerError;
+  const payload = explicitPowerShellCommandPayload(executionPlan);
+  if (!payload) return undefined;
+  return commandPreflightError(payload, "powershell");
+}
+
 function workerExecArgv(source: string[] = process.execArgv): string[] {
   const result: string[] = [];
   for (let index = 0; index < source.length; index += 1) {
@@ -1610,7 +1628,8 @@ export function replayWorkerExecArgv(source: string[]): string[] {
 
 export function replayCurrentPreflightError(command: string): string | undefined {
   const prepared = replayPrepareStartProcessCommand(command);
-  return commandPreflightError(prepared.command, prepared.execution_mode);
+  const executionPlan = planCommandExecution(prepared.command, POWERSHELL_EXE);
+  return commandExecutionPreflightError(prepared.command, executionPlan);
 }
 
 export function replayCurrentPolicyError(command: string): string | undefined {
@@ -1788,7 +1807,7 @@ export class ProcessManager {
     if (!repair || repair.command === state.command) return false;
     const normalized = replayNormalizeStartProcessCommand(repair.command).command;
     const repairPlan = planCommandExecution(normalized, POWERSHELL_EXE);
-    const preflightError = commandPreflightError(normalized, repairPlan.mode);
+    const preflightError = commandExecutionPreflightError(normalized, repairPlan);
     if (preflightError) return false;
     const finishedAt = new Date().toISOString();
     state.repairAttempts.push({
@@ -2576,7 +2595,7 @@ export class ProcessManager {
   ): StartResult {
     const preflightError = transportPreflightError ?? (preflightMode === "policy"
       ? commandPolicyError(preflightCommand)
-      : commandPreflightError(preflightCommand, executionPlan.mode));
+      : commandExecutionPreflightError(preflightCommand, executionPlan));
     if (preflightError) {
       const rejectionId = randomUUID();
       void this.persistPreflightRejectionAsync(rejectionId, submittedCommand ?? effectiveCommand, workingDirectory, callerId, preflightError);
