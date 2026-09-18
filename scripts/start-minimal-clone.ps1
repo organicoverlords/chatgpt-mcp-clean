@@ -11,6 +11,7 @@ param(
     [switch]$SkipBuild,
     [switch]$RestartOnUnexpectedExit,
     [switch]$ReloadOnGenerationChange,
+    [ValidateSet('Normal','AboveNormal')][string]$RuntimePriorityClass = 'AboveNormal',
     [ValidateRange(1,60)][int]$RestartBackoffSeconds = 2,
     [ValidateRange(0,1000)][int]$RestartLimit = 0,
     [ValidateRange(100,5000)][int]$GenerationProbeMilliseconds = 1000,
@@ -20,29 +21,49 @@ $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $Root
 function Set-McpRuntimePriority {
-    $currentProcess = Get-Process -Id $PID
-    $currentProcess.PriorityClass = 'Normal'
+    param(
+        [Parameter(Mandatory=$true)][System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory=$true)][ValidateSet('Normal','AboveNormal')][string]$CpuPriorityClass
+    )
+    $Process.PriorityClass = $CpuPriorityClass
     if (-not ('McpRuntimePriorityNative' -as [type])) {
         Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 public static class McpRuntimePriorityNative {
     [StructLayout(LayoutKind.Sequential)] public struct ProcessMemoryPriorityInfo { public uint MemoryPriority; }
+    [StructLayout(LayoutKind.Sequential)] public struct ProcessPowerThrottlingState { public uint Version; public uint ControlMask; public uint StateMask; }
     [DllImport("kernel32.dll", SetLastError=true)] public static extern bool SetProcessInformation(IntPtr process, int informationClass, ref ProcessMemoryPriorityInfo information, uint informationSize);
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern bool SetProcessInformation(IntPtr process, int informationClass, ref ProcessPowerThrottlingState information, uint informationSize);
     [DllImport("ntdll.dll")] public static extern int NtSetInformationProcess(IntPtr process, int informationClass, ref uint information, uint informationSize);
 }
 "@
     }
     $memory = New-Object McpRuntimePriorityNative+ProcessMemoryPriorityInfo
     $memory.MemoryPriority = 5
-    if (-not [McpRuntimePriorityNative]::SetProcessInformation($currentProcess.Handle, 0, [ref]$memory, [Runtime.InteropServices.Marshal]::SizeOf($memory))) {
+    if (-not [McpRuntimePriorityNative]::SetProcessInformation($Process.Handle, 0, [ref]$memory, [Runtime.InteropServices.Marshal]::SizeOf($memory))) {
         throw "failed to set MCP memory priority: win32=$([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
+    $power = New-Object McpRuntimePriorityNative+ProcessPowerThrottlingState
+    $power.Version = 1
+    $power.ControlMask = 1
+    $power.StateMask = 0
+    if (-not [McpRuntimePriorityNative]::SetProcessInformation($Process.Handle, 4, [ref]$power, [Runtime.InteropServices.Marshal]::SizeOf($power))) {
+        throw "failed to disable MCP execution-speed throttling: win32=$([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+    }
     $ioPriority = [uint32]2
-    $ioStatus = [McpRuntimePriorityNative]::NtSetInformationProcess($currentProcess.Handle, 33, [ref]$ioPriority, 4)
+    $ioStatus = [McpRuntimePriorityNative]::NtSetInformationProcess($Process.Handle, 33, [ref]$ioPriority, 4)
     if ($ioStatus -ne 0) { throw ('failed to set MCP I/O priority: ntstatus=0x{0:X8}' -f ([uint32]$ioStatus)) }
+    $Process.Refresh()
+    return [pscustomobject]@{
+        pid = $Process.Id
+        cpu_priority_class = [string]$Process.PriorityClass
+        memory_priority = 5
+        io_priority = 2
+        execution_speed_throttling = 'disabled'
+    }
 }
-Set-McpRuntimePriority
+$supervisorPriorityState = Set-McpRuntimePriority -Process (Get-Process -Id $PID) -CpuPriorityClass $RuntimePriorityClass
 
 $originUri = [uri]$PublicOrigin
 $publicSlug = $originUri.AbsolutePath.Trim('/')
@@ -67,7 +88,10 @@ if ($RequireExistingOAuthState) {
     $OAuthStorePath = [IO.Path]::GetFullPath($OAuthStorePath)
     & (Join-Path $Root 'scripts\protect-oauth-state.ps1') -OAuthStorePath $OAuthStorePath -VerifyOnly -RequireExistingState
 }
-if ($ValidateOnly) { Write-Output 'IDENTITY_PREFLIGHT_OK'; exit 0 }
+if ($ValidateOnly) {
+    Write-Output ("IDENTITY_PREFLIGHT_OK runtime_priority={0} memory_priority={1} execution_speed_throttling={2}" -f $supervisorPriorityState.cpu_priority_class,$supervisorPriorityState.memory_priority,$supervisorPriorityState.execution_speed_throttling)
+    exit 0
+}
 
 if (Test-Path '.env') {
     foreach ($line in Get-Content -LiteralPath '.env') {
@@ -184,6 +208,21 @@ $restartCount = 0
 while ($true) {
     $childStartedAt = [DateTimeOffset]::UtcNow
     $child = Start-Process -FilePath $nodePath -ArgumentList @('dist/index.js') -WorkingDirectory $Root -PassThru -NoNewWindow
+    try {
+        $childPriorityState = Set-McpRuntimePriority -Process $child -CpuPriorityClass $RuntimePriorityClass
+    } catch {
+        Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue
+        throw
+    }
+    Write-LauncherEvent @{
+        event = 'runtime_priority_applied'
+        child_pid = $child.Id
+        cpu_priority_class = [string]$childPriorityState.cpu_priority_class
+        memory_priority = [int]$childPriorityState.memory_priority
+        io_priority = [int]$childPriorityState.io_priority
+        execution_speed_throttling = [string]$childPriorityState.execution_speed_throttling
+        supervisor_cpu_priority_class = [string]$supervisorPriorityState.cpu_priority_class
+    }
     $generationRestart = $false
     $nextIdentity = $null
     $candidateKey = ''
