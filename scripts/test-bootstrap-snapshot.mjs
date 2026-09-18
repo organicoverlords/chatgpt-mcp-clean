@@ -38,9 +38,12 @@ try {
   assert.equal(isBootstrapSnapshot(randomUUID()), false);
   await assert.rejects(readBootstrapSnapshot(), { code: "ENOENT" });
   writeBootstrap();
-  const concurrent = await Promise.allSettled([readBootstrapSnapshot(1), ...Array.from({ length: 8 }, () => readBootstrapSnapshot())]);
-  assert.equal(concurrent[0].status, "rejected");
-  const snapshots = concurrent.slice(1).map(result => {
+  const tinyPage = await readBootstrapSnapshot(1, "bootstrap", "tiny-page-caller");
+  assert.equal(tinyPage.next_action, "READ_SAME_PROCESS_ID");
+  assert.equal(tinyPage.output_page.page_chars, 1);
+  assert.equal(tinyPage.output_page.page_limit, 1);
+  const concurrent = await Promise.allSettled(Array.from({ length: 8 }, () => readBootstrapSnapshot()));
+  const snapshots = concurrent.map(result => {
     assert.equal(result.status, "fulfilled");
     assert.equal(result.value.mcp_status, "OK");
     assert.equal(result.value.next_action, "STOP_READING");
@@ -88,6 +91,35 @@ try {
     }),
   ]);
   console.log('PASS atomic publisher replacement during 256 concurrent reads');
+
+  writeBootstrap({ marker: "stable-pages", padding: "x".repeat(55_000) });
+  const pagePieces = [];
+  let paged = await readBootstrapSnapshot(60_000, "bootstrap", "paging-stability-caller");
+  assert.equal(paged.next_action, "READ_SAME_PROCESS_ID");
+  assert.equal(paged.output_page.page_limit, 24_000);
+  assert.ok(paged.stdout.length <= 24_000);
+  const expectedTotal = paged.output_page.stdout_total;
+  pagePieces.push(paged.stdout);
+  writeBootstrap({ marker: "replacement-after-first-page", padding: "y".repeat(55_000) });
+  while (paged.next_action === "READ_SAME_PROCESS_ID") {
+    paged = await readBootstrapSnapshot(60_000, "bootstrap", "paging-stability-caller");
+    assert.ok(paged.stdout.length <= 24_000);
+    pagePieces.push(paged.stdout);
+  }
+  const reconstructed = pagePieces.join("");
+  assert.equal(reconstructed.length, expectedTotal);
+  assert.equal(JSON.parse(reconstructed).marker, "stable-pages");
+  assert.ok(pagePieces.length >= 3);
+
+  const replacementPieces = [];
+  let replacement = await readBootstrapSnapshot(60_000, "bootstrap", "paging-stability-caller");
+  while (true) {
+    replacementPieces.push(replacement.stdout);
+    if (replacement.next_action === "STOP_READING") break;
+    replacement = await readBootstrapSnapshot(60_000, "bootstrap", "paging-stability-caller");
+  }
+  assert.equal(JSON.parse(replacementPieces.join("")).marker, "replacement-after-first-page");
+  console.log("PASS lossless bootstrap paging stays snapshot-stable across producer refresh");
   writeFileSync(process.env.MCP_TIMELINE_SNAPSHOT_PATH, JSON.stringify({
     schema: "vault.timeline.bootstrap.v1", generated_at: new Date(Date.now() - 1000_000).toISOString(),
     overview: { timeline_materialized: { status: "FRESH", refresh_minutes: 5, coverage_status: "HISTORICAL_INCOMPLETE" } },

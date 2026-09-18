@@ -277,7 +277,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
     async ({ process_id, max_chars, wait_ms }) => {
       const boundedMaxChars = Math.max(1, Math.min(max_chars ?? 60_000, 60_000));
       return structuredTextResult(isBootstrapSnapshot(process_id)
-        ? await readBootstrapSnapshot(boundedMaxChars, process_id)
+        ? await readBootstrapSnapshot(boundedMaxChars, process_id, callerId)
         : await processManager.readOutput(process_id, boundedMaxChars, wait_ms), callerId, servingIdentity);
     },
   );
