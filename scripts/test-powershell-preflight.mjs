@@ -382,6 +382,27 @@ try {
   assert.equal(rejection.command, durableRejectedCommand);
   assert.match(rejection.reason, /unbalanced/);
   assert.ok(rejection.rejection_id);
+
+  const structuredSecret = "RESPONSE_GATE_REJECTED_CANDIDATE_MUST_NOT_PERSIST_2c91";
+  assert.throws(
+    () => durableManager.startStructured(process.execPath, ["-e", "process.stdin.resume()"], undefined, "caller_structured_stdin_privacy_reject", undefined, undefined, "Get-ChildItem C:\\ -Recurse\n" + structuredSecret),
+    /start_process_preflight_failed:/,
+  );
+  const structuredDeadline = Date.now() + 2_000;
+  let structuredRejection;
+  while (Date.now() < structuredDeadline && !structuredRejection) {
+    try {
+      for (const name of readdirSync(dayDirectory).filter((item) => item.startsWith("rejected-") && item.endsWith(".json"))) {
+        const candidate = JSON.parse(readFileSync(join(dayDirectory, name), "utf8"));
+        if (candidate.caller_id === "caller_structured_stdin_privacy_reject") { structuredRejection = candidate; break; }
+      }
+    } catch {}
+    if (!structuredRejection) await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+  }
+  assert.ok(structuredRejection, "structured-stdin preflight rejection must be durably recorded");
+  assert.match(structuredRejection.reason, /drive[- ]root|recursive/i);
+  assert.equal(JSON.stringify(structuredRejection).includes(structuredSecret), false, "preflight rejection archive must not persist structured stdin plaintext");
+  assert.equal(structuredRejection.command.includes(structuredSecret), false);
 } finally {
   rmSync(rejectionReceiptDirectory, { recursive: true, force: true });
 }
