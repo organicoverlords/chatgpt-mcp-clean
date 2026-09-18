@@ -97,6 +97,10 @@ try {
     "$env:MCP_RUNTIME_SOURCE_DIRTY = if ($Identity.source_dirty) { '1' } else { '0' }",
   ]) assert.ok(launcher.includes(required), `launcher missing runtime identity binding: ${required}`);
   assert.match(launcher, /Get-FileHash -LiteralPath \$runtimeDistIndex -Algorithm SHA256/);
+  assert.ok(launcher.includes("[ValidateSet('Normal','AboveNormal')][string]$RuntimePriorityClass = 'AboveNormal'"));
+  assert.ok(launcher.includes("ProcessPowerThrottlingState"));
+  assert.ok(launcher.includes("Set-McpRuntimePriority -Process $child -CpuPriorityClass $RuntimePriorityClass"));
+  assert.ok(launcher.includes("event = 'runtime_priority_applied'"));
   const publicHost = new URL(publicOrigin).hostname;
   const bareHost = await requestWithHost(origin, publicHost);
   assert.equal(bareHost.status, 401, `configured public host should reach auth, got ${bareHost.status}: ${bareHost.body}`);
