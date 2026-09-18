@@ -102,10 +102,12 @@ async function initialize() {
   return sessionId;
 }
 function toolResult(result) {
-  assert.ok(result.body?.result, result.text);
-  const content = result.body.result.content;
-  assert.ok(Array.isArray(content) && content[0]?.text, result.text);
-  return JSON.parse(content[0].text);
+  const tool = result.body?.result;
+  assert.ok(tool, result.text);
+  if (tool.structuredContent && typeof tool.structuredContent === "object") return tool.structuredContent;
+  const text = (tool.content || []).find((entry) => entry?.type === "text" && entry?.text)?.text;
+  assert.ok(text, result.text);
+  return JSON.parse(text);
 }
 async function callTool(sessionId, name, args = {}) {
   return toolResult(await mcpPost(sessionId, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name, arguments: args } }));
