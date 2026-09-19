@@ -14,9 +14,12 @@ param(
     [string]$CurrentTopologyPath = (Join-Path $env:USERPROFILE 'Desktop\vault\04 Operating Contracts\mcp-current-topology.json'),
     [string]$CaddyAdminOrigin = 'http://127.0.0.1:2019',
     [string]$ExplicitUserAuthorizationEvidence = '',
+    [string]$OwnerBasicAuthUsername = '',
+    [string]$OwnerBasicAuthHash = '',
     [switch]$CurrentPortFromTargetHost,
     [switch]$TargetLoadedRoute,
     [switch]$CreateTargetHost,
+    [switch]$PolicyOnly,
     [switch]$Plan
 )
 $ErrorActionPreference='Stop'
@@ -126,6 +129,31 @@ function Replace-CaddyTargetUpstream([string]$ConfigText,[string]$HostName,[int]
     $next=$block.Replace($needle,$replacement)
     return $ConfigText.Substring(0,[int]$range.Start)+$next+$ConfigText.Substring([int]$range.Start+[int]$range.Length)
 }
+function Set-CaddyTargetOwnerBasicAuth([string]$ConfigText,[string]$HostName,[int]$BackendPort,[string]$Username,[string]$PasswordHash){
+    if([string]::IsNullOrWhiteSpace($Username) -xor [string]::IsNullOrWhiteSpace($PasswordHash)){ throw 'OwnerBasicAuthUsername and OwnerBasicAuthHash must be supplied together' }
+    if([string]::IsNullOrWhiteSpace($Username)){ return $ConfigText }
+    if($Username -notmatch '^[A-Za-z0-9._-]{1,64}$'){ throw 'OwnerBasicAuthUsername contains unsupported characters' }
+    if($PasswordHash -notmatch '^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$'){ throw 'OwnerBasicAuthHash must be a bcrypt hash accepted by Caddy basic_auth' }
+    $range=Get-CaddySiteBlockRange $ConfigText $HostName
+    $block=$ConfigText.Substring([int]$range.Start,[int]$range.Length)
+    $pattern='(?ms)\s*@local_authorize\s*\{\s*path /authorize\s*remote_ip private_ranges\s*\}\s*handle @local_authorize\s*\{\s*reverse_proxy 127\.0\.0\.1:[0-9]+\s*\}\s*@authorize path /authorize\s*respond @authorize "Owner authorization required" 403'
+    $matches=@([regex]::Matches($block,$pattern))
+    if($matches.Count -ne 1){ throw "target host $HostName must contain exactly one legacy local owner-authorization stanza; found $($matches.Count)" }
+    $replacement=@"
+    @authorize path /authorize
+    handle @authorize {
+        basic_auth {
+            $Username $PasswordHash
+        }
+        reverse_proxy 127.0.0.1:$BackendPort {
+            header_up X-Forwarded-For 127.0.0.1
+            header_up -Authorization
+        }
+    }
+"@
+    $next=[regex]::Replace($block,$pattern,[Environment]::NewLine+$replacement.TrimEnd(),1)
+    return $ConfigText.Substring(0,[int]$range.Start)+$next+$ConfigText.Substring([int]$range.Start+[int]$range.Length)
+}
 if(-not (Test-Path -LiteralPath $CaddyConfigPath -PathType Leaf)){ throw "Caddy config missing: $CaddyConfigPath" }
 $initialConfig=Get-Content -LiteralPath $CaddyConfigPath -Raw
 $loadedTarget=$null
@@ -162,11 +190,18 @@ if($CreateTargetHost){
         $currentPort=$requestedCurrentPort
     }
 }
+if($PolicyOnly){
+    if($CreateTargetHost -or $TargetLoadedRoute){ throw 'PolicyOnly cannot be combined with CreateTargetHost or TargetLoadedRoute' }
+    if($null -eq $currentPort){ throw 'PolicyOnly requires an existing target host route' }
+    if($CandidatePort -ne [int]$currentPort){ throw "PolicyOnly must preserve the current backend port: current=$currentPort requested=$CandidatePort" }
+    if([string]::IsNullOrWhiteSpace($OwnerBasicAuthUsername) -or [string]::IsNullOrWhiteSpace($OwnerBasicAuthHash)){ throw 'PolicyOnly requires owner basic-auth credentials' }
+}
 if($Plan){
     $planOriginal=[IO.File]::ReadAllText($CaddyConfigPath)
     $planPersistedPort=if($CreateTargetHost){$null}elseif($TargetLoadedRoute){[int]$persistedCurrentPort}else{[int]$currentPort}
-    $planCandidateText=if($CreateTargetHost){ Add-CaddyTargetHost $planOriginal $StableHost $CandidatePort }else{ Replace-CaddyTargetUpstream $planOriginal $StableHost ([int]$planPersistedPort) $CandidatePort }
-    [pscustomobject]@{status='PLAN';operation=$(if($CreateTargetHost){'ADD_ISOLATED_ROUTE'}elseif($TargetLoadedRoute){'REPLACE_LOADED_ROUTE'}else{'REPLACE_ROUTE'});target_host=$StableHost;candidate_port=$CandidatePort;old_port=$currentPort;persisted_old_port=$planPersistedPort;loaded_dial_paths=if($loadedTarget){@($loadedTarget.dial_paths)}else{@()};candidate_config=$planCandidateText} | ConvertTo-Json -Depth 5 -Compress
+    $planCandidateText=if($CreateTargetHost){ Add-CaddyTargetHost $planOriginal $StableHost $CandidatePort }elseif($PolicyOnly){ $planOriginal }else{ Replace-CaddyTargetUpstream $planOriginal $StableHost ([int]$planPersistedPort) $CandidatePort }
+    $planCandidateText=Set-CaddyTargetOwnerBasicAuth $planCandidateText $StableHost $CandidatePort $OwnerBasicAuthUsername $OwnerBasicAuthHash
+    [pscustomobject]@{status='PLAN';operation=$(if($CreateTargetHost){'ADD_ISOLATED_ROUTE'}elseif($PolicyOnly){'POLICY_ONLY'}elseif($TargetLoadedRoute){'REPLACE_LOADED_ROUTE'}else{'REPLACE_ROUTE'});target_host=$StableHost;candidate_port=$CandidatePort;old_port=$currentPort;persisted_old_port=$planPersistedPort;owner_auth=$(if($OwnerBasicAuthUsername){'basic'}else{'unchanged'});loaded_dial_paths=if($loadedTarget){@($loadedTarget.dial_paths)}else{@()};candidate_config=$planCandidateText} | ConvertTo-Json -Depth 5 -Compress
     exit 0
 }
 function Load-Caddy([string]$Config){
@@ -249,7 +284,7 @@ function Restart-CaddyFromPersistentConfig([string]$OriginalConfig,[string]$Proo
     }
     throw "persistent rollback route did not recover: $last"
 }
-if($null -ne $currentPort -and $CandidatePort -eq [int]$currentPort){ throw 'candidate must use an alternate port' }
+if(-not $PolicyOnly -and $null -ne $currentPort -and $CandidatePort -eq [int]$currentPort){ throw 'candidate must use an alternate port' }
 if($CandidatePort -eq $IndependentRollbackPort){ throw 'candidate must not reuse the independent rollback port' }
 if(-not (Test-Path -LiteralPath $CaddyConfigPath -PathType Leaf)){ throw "Caddy config missing: $CaddyConfigPath" }
 if(-not (Test-Path -LiteralPath $CaddyExe -PathType Leaf)){ throw "Caddy executable missing: $CaddyExe" }
@@ -267,7 +302,7 @@ if($CreateTargetHost){
     $rollbackProofPort=[int]$currentPort
     $rollbackProofHost=$StableHost
 }
-if($CandidatePort -eq $rollbackProofPort){ throw 'candidate must not reuse the rollback proof route port' }
+if(-not $PolicyOnly -and $CandidatePort -eq $rollbackProofPort){ throw 'candidate must not reuse the rollback proof route port' }
 $rollbackProof=Health $rollbackProofPort
 if($rollbackProof.status -ne 'ok' -or [int]$rollbackProof.port -ne $rollbackProofPort){ throw 'rollback proof route health failed' }
 if($null -ne $currentPort){
@@ -292,7 +327,8 @@ $gate=$gateText | ConvertFrom-Json
 if($gate.verdict -ne 'PASS'){ throw ("production change gate blocked: " + (($gate.reasons) -join ',')) }
 $original=[IO.File]::ReadAllText($CaddyConfigPath)
 $persistedPortForReplace=if($TargetLoadedRoute){[int]$persistedCurrentPort}else{[int]$currentPort}
-$candidateText=if($CreateTargetHost){ Add-CaddyTargetHost $original $StableHost $CandidatePort }else{ Replace-CaddyTargetUpstream $original $StableHost $persistedPortForReplace $CandidatePort }
+$candidateText=if($CreateTargetHost){ Add-CaddyTargetHost $original $StableHost $CandidatePort }elseif($PolicyOnly){ $original }else{ Replace-CaddyTargetUpstream $original $StableHost $persistedPortForReplace $CandidatePort }
+$candidateText=Set-CaddyTargetOwnerBasicAuth $candidateText $StableHost $CandidatePort $OwnerBasicAuthUsername $OwnerBasicAuthHash
 $temp=Join-Path (Split-Path -Parent $CaddyConfigPath) ("Caddyfile.issue274-{0}.tmp" -f [guid]::NewGuid().ToString('N'))
 $backup="$CaddyConfigPath.pre-home-direct-replace-$(Get-Date -Format yyyyMMddHHmmss)"
 [IO.File]::WriteAllText($temp,$candidateText,(New-Object Text.UTF8Encoding($false)))
@@ -329,7 +365,7 @@ if($TargetLoadedRoute){
         $public=Wait-CandidatePublicRoute $PublicOrigin $CandidatePort $CandidateGeneration
         Copy-Item -LiteralPath $CaddyConfigPath -Destination $backup
         Move-Item -LiteralPath $temp -Destination $CaddyConfigPath -Force
-        [pscustomobject]@{status='PASS';operation=$(if($CreateTargetHost){'ADD_ISOLATED_ROUTE'}else{'REPLACE_ROUTE'});candidate_port=$CandidatePort;candidate_generation=$CandidateGeneration;old_port=$currentPort;rollback_port=$IndependentRollbackPort;public_port=[int]$public.port;public_generation=[string]$public.backend_generation;caddy_backup=$backup;old_backend_action=$(if($CreateTargetHost){'NO_EXISTING_TARGET_ROUTE'}else{'PRESERVE_FOR_ROLLBACK'})} | ConvertTo-Json -Compress
+        [pscustomobject]@{status='PASS';operation=$(if($CreateTargetHost){'ADD_ISOLATED_ROUTE'}elseif($PolicyOnly){'POLICY_ONLY'}else{'REPLACE_ROUTE'});candidate_port=$CandidatePort;candidate_generation=$CandidateGeneration;old_port=$currentPort;rollback_port=$IndependentRollbackPort;public_port=[int]$public.port;public_generation=[string]$public.backend_generation;caddy_backup=$backup;old_backend_action=$(if($CreateTargetHost){'NO_EXISTING_TARGET_ROUTE'}elseif($PolicyOnly){'UNCHANGED'}else{'PRESERVE_FOR_ROLLBACK'})} | ConvertTo-Json -Compress
     } catch {
         $primaryError=$_.Exception
         $rollbackError=$null
