@@ -84,6 +84,8 @@ try {
   const plan = JSON.parse(cp.stdout.trim());
   assert.equal(plan.ok, true);
   assert.equal(plan.plan_only, true);
+  assert.equal(plan.reconciliation_required, true);
+  assert.ok(Array.isArray(plan.completion_gate) && plan.completion_gate.length >= 5);
   assert.equal(plan.topology, 'local-home-direct');
   assert.equal(plan.tool_count, 4);
   assert.equal(plan.media_delivery, 'process-result inline images plus ordinary artifact resources');

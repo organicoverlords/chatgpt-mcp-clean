@@ -105,6 +105,23 @@ Do this only after one functional binding is healthy. The redundant four-binding
 
 `scripts/prepare-frozen-home-direct.ps1` is an optional second-stage deployment primitive. A normal user does not need MCPXX, Supertest9001, MCPVisual, and MCPv4 simultaneously; one compatible healthy binding is the recovery minimum and normal operating requirement.
 
+### Mandatory completion gate after MCP install, update, restore, or route cutover
+
+An MCP change is not complete merely because health is green or Caddy points at the new port. Before reporting completion, reconcile the whole current-control surface:
+
+1. Prove the serving bindings from live evidence: exact route, backend generation/source commit, four-tool contract, Scheduled Task owner, OAuth-store identity, and intended process receipt/control directory. Never assume sibling bindings share identities.
+2. Prove Windows runtime hardening on every newly serving backend: CPU priority AboveNormal, memory priority 5, and execution-speed throttling disabled. Do not use High/Realtime, lock the whole heap, or raise user workloads.
+3. For bootstrap aliases, request the normal large read and follow READ_SAME_PROCESS_ID until STOP_READING. Reconstruct the exact JSON and require bootstrap_end.status=COMPLETE. Large snapshots must use bounded lossless continuation pages.
+4. Preserve old backends until running-process continuity is proved. Cross-backend read_output/kill_process requires the replacement to use the same receipt/control directory as the backend that owns those live processes. Do not kill foreign work to accelerate a cutover.
+5. For a one-binding-at-a-time shared-production cutover, claim an exact Busy scope beginning mcp:binding: and use the production-change gate with rollback plus off-path proof. A broad Caddy/MCP scope does not qualify for guarded-binding rollout semantics.
+6. Keep an independent rollback route healthy and preserve the immediately previous serving generation off-route until acceptance is complete. Never merge or copy OAuth stores as part of rollback.
+7. Reconcile durable current state before the final answer: Vault mcp-current-topology.json, mcp-recovery-state.json, Stack Atlas metadata/tests, install/restore/update guidance, and the canonical agent/control contract that governs MCP changes.
+8. Run a stale-current-reference audit for superseded serving ports, commits, task names, broad Busy scopes, and receipt-store assumptions in current docs/contracts. Do not rewrite dated incident reports, fixtures, or historical evidence.
+9. When the Vault/Stack Atlas control layer changed, refresh its installed/runtime projection and re-run the relevant bootstrap/Atlas acceptance checks. A Git commit alone does not prove the local runtime copy changed.
+10. Record rollback identity, validation evidence, and intentionally preserved old generations. Only then call the update or restore complete.
+
+This checklist is the update procedure for future MCP generations. Port numbers and commits in examples are never durable authority.
+
 ### Validation after recovery
 
 Run the installed doctor and check the control surfaces:

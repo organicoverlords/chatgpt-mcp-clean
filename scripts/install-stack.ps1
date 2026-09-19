@@ -138,6 +138,13 @@ foreach ($required in @($planProfileSource,$caddySpecPath,(Join-Path $busySource
 $caddySpec = Get-Content -LiteralPath $caddySpecPath -Raw | ConvertFrom-Json
 if ([string]$caddySpec.sha256 -notmatch '^[0-9a-f]{64}$') { throw 'invalid pinned Caddy SHA-256' }
 
+$completionGate = @(
+    'verify live route/runtime/task/OAuth/receipt identity before declaring completion',
+    'verify AboveNormal CPU, memory priority 5, and execution-speed throttling disabled on newly serving backends',
+    'for large bootstrap aliases, follow lossless continuation pages through bootstrap_end.status=COMPLETE',
+    'preserve previous backends until running-process continuity is proved against the correct receipt/control directory',
+    'reconcile current topology, recovery metadata, Atlas/Vault and current install/restore/update documentation'
+)
 $actions = @(
     "install MCP runtime on loopback 127.0.0.1:$Port with exactly four connector tools",
     "install local Caddy $($caddySpec.version) on TCP $CaddyHttpsPort for $($origin.Host)",
@@ -151,7 +158,7 @@ $actions = @(
     $(if ($NoStart -or $NoAutostart) { 'do not start MCP/Caddy now' } else { 'start MCP and local Caddy now' })
 )
 if ($Plan) {
-    [ordered]@{ ok=$true; plan_only=$true; topology='local-home-direct'; tool_count=4; media_delivery='process-result inline images plus ordinary artifact resources'; source_commit=$sourceCommit; actions=$actions; no_mutation=$true } | ConvertTo-Json -Depth 4
+    [ordered]@{ ok=$true; plan_only=$true; topology='local-home-direct'; tool_count=4; media_delivery='process-result inline images plus ordinary artifact resources'; source_commit=$sourceCommit; actions=$actions; completion_gate=$completionGate; reconciliation_required=$true; no_mutation=$true } | ConvertTo-Json -Depth 4
     exit 0
 }
 
@@ -307,5 +314,6 @@ if ($LASTEXITCODE -ne 0) { throw 'stack doctor reported an installation failure'
     config_path=$configPath; mcp_url=$mcpUrl; local_health=("http://127.0.0.1:{0}/health" -f $Port); local_https_port=$CaddyHttpsPort
     busy_command=(Join-Path $BusyRoot 'busy-python.cmd'); rules_root=$RulesRoot; plan_only_profile=$planProfile
     agent_entrypoints=[bool]$WithAgentEntrypoints; autostart=(-not $NoAutostart)
+    reconciliation_required=$true; completion_gate=$completionGate
     router_requirement="forward public TCP 443 to this Windows machine TCP $CaddyHttpsPort; no VPS is used"
 } | ConvertTo-Json -Depth 5
