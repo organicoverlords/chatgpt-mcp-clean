@@ -3,7 +3,6 @@
 <!-- PROJECT-TIMELINE:BEGIN -->
 ## Project timeline
 
-- [2026-09-17] Added full-stack GitHub-first disaster recovery (#392): the README now defines authority/order and GitHub-only/Commander/MCP recovery paths, while `scripts/restore-stack-from-github.ps1` rebuilds the supported functional Windows stack plus optional rules/Vault/Stack Atlas user context without resetting dirty work or restoring OAuth backups.
 - [2026-09-10] Split lossless file transfer into explicit `upload_local_file` and `download_chatgpt_file` actions (#235): normal `start_process`/`read_output` no longer mount the Library widget, ChatGPT file inputs use native file params for direct streaming to disk, local uploads use exact-byte SHA-256 verification, and compressible HTTP transfers may use zstd level 1 while already-compressed media stays unchanged.
 - [2026-09-10] Added the one-command local home-direct stack installer (#233): one Windows host gets the loopback MCP backend, pinned local Caddy, standalone BusyCoordinator, shared base rules, PlanOnly, and autostart; the ChatGPT connector remains exactly `start_process`, `read_output`, and `kill_process`, while Library delivery stays metadata/resource-widget behavior rather than a fourth tool.
 - [2026-09-06] Made the three-process-tool ChatGPT connector profile the production-safe default, corrected stale full-profile documentation, and added a rotation-aware reroute acceptance analyzer that joins aggregate transport health with exact/unknown-time routing evidence without exposing raw identifiers (#81).
