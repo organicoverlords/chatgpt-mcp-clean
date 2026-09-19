@@ -155,16 +155,24 @@ export class BoundedJsonlWriter {
 
     for (const line of lines) {
       const bytes = Buffer.byteLength(line, "utf8");
-      const ageExpired = () => this.size > 0 && this.now() - this.openedAt >= this.maxAgeMs;
-      if (this.size + chunkBytes > 0 && (this.size + chunkBytes + bytes > this.maxBytes || ageExpired())) {
+      if (this.rotationRequired(bytes, chunkBytes)) {
         await flushChunk();
-        if (this.size > 0 && (this.size + bytes > this.maxBytes || ageExpired())) await this.rotate();
+        if (this.rotationRequired(bytes)) await this.rotate();
       }
       if (chunkBytes > 0 && chunkBytes + bytes > this.maxBatchBytes) await flushChunk();
       chunk += line;
       chunkBytes += bytes;
     }
     await flushChunk();
+  }
+
+  private ageExpired(): boolean {
+    return this.size > 0 && this.now() - this.openedAt >= this.maxAgeMs;
+  }
+
+  private rotationRequired(nextBytes: number, bufferedBytes = 0): boolean {
+    return this.size + bufferedBytes > 0
+      && (this.size + bufferedBytes + nextBytes > this.maxBytes || this.ageExpired());
   }
 
   private archiveDirectory(): string {
