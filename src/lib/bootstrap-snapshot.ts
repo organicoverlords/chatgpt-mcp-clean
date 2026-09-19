@@ -61,6 +61,30 @@ function pruneSnapshotPageSessions(now = Date.now()): void {
   for (const [key] of oldest) snapshotPageSessions.delete(key);
 }
 
+const BOOTSTRAP_ENVELOPE_SECTIONS = ["conversation", "working_order", "current", "history_and_health", "plumbing", "other_roots"] as const;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function bootstrapRoot(payload: unknown, key: string): unknown {
+  if (!isRecord(payload)) return undefined;
+  const matches: unknown[] = [];
+  if (Object.prototype.hasOwnProperty.call(payload, key)) matches.push(payload[key]);
+  const orientation = isRecord(payload.orientation) ? payload.orientation : undefined;
+  const envelope = orientation && BOOTSTRAP_ENVELOPE_SECTIONS.some(section => Object.prototype.hasOwnProperty.call(orientation, section));
+  if (envelope && orientation) {
+    for (const section of BOOTSTRAP_ENVELOPE_SECTIONS) {
+      const values = orientation[section];
+      if (values === undefined || values === null) continue;
+      if (!isRecord(values)) throw new Error(`Snapshot producer returned invalid bootstrap envelope section=${section}`);
+      if (Object.prototype.hasOwnProperty.call(values, key)) matches.push(values[key]);
+    }
+  }
+  if (matches.length > 1) throw new Error(`Snapshot producer returned ambiguous bootstrap envelope root=${key}`);
+  return matches[0];
+}
+
 // Producer-owned files, never client-supplied paths or commands.
 function snapshotPath(timeline: boolean): string {
   const configured = process.env[timeline ? "MCP_TIMELINE_SNAPSHOT_PATH" : "MCP_BOOTSTRAP_SNAPSHOT_PATH"]?.trim();
@@ -134,9 +158,10 @@ export async function readBootstrapSnapshot(
     payload = JSON.parse(buffer.subarray(0, bytes).toString("utf8").replace(/^\uFEFF/, ""));
   } finally { await file.close(); }
   const generatedAt = Date.parse(payload?.generated_at);
+  const bootstrapEnd = timeline ? undefined : bootstrapRoot(payload, "bootstrap_end");
   if (payload?.schema !== (timeline ? "vault.timeline.bootstrap.v1" : "bootstrap.v1")
       || !Number.isFinite(generatedAt) || generatedAt > Date.now() + 5_000
-      || (!timeline && (payload?.bootstrap_end?.status !== "COMPLETE" || payload?.bootstrap_end?.schema !== "bootstrap.v1"))) {
+      || (!timeline && (!isRecord(bootstrapEnd) || bootstrapEnd.status !== "COMPLETE" || bootstrapEnd.schema !== "bootstrap.v1"))) {
     throw new Error("Snapshot producer returned incomplete or invalid payload");
   }
   const ageSeconds = Math.max(0, (Date.now() - generatedAt) / 1000);
