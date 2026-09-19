@@ -33,10 +33,29 @@ function writeBootstrap(overrides = {}) {
     bootstrap_end: { status: "COMPLETE", schema: "bootstrap.v1" }, ...overrides,
   }));
 }
+
+function writeBootstrapEnvelope(overrides = {}) {
+  writeFileSync(process.env.MCP_BOOTSTRAP_SNAPSHOT_PATH, JSON.stringify({
+    schema: "bootstrap.v1", generated_at: new Date().toISOString(),
+    orientation: {
+      conversation: { conversation_context: { messages: [{ text: "message-first-envelope" }] } },
+      plumbing: { bootstrap_end: { status: "COMPLETE", schema: "bootstrap.v1" } },
+    },
+    ...overrides,
+  }));
+}
 try {
   for (const id of ["bootstrap", "231b7e74-4cc8-43d0-9702-fd6dfa2215b3", "timeline", "checkup"]) assert.equal(isBootstrapSnapshot(id), true);
   assert.equal(isBootstrapSnapshot(randomUUID()), false);
   await assert.rejects(readBootstrapSnapshot(), { code: "ENOENT" });
+  writeBootstrapEnvelope();
+  const envelopeSnapshot = await readBootstrapSnapshot(60_000, "bootstrap", "envelope-caller");
+  const envelopePayload = JSON.parse(envelopeSnapshot.stdout);
+  assert.equal(envelopePayload.bootstrap_end, undefined);
+  assert.equal(envelopePayload.orientation.plumbing.bootstrap_end.status, "COMPLETE");
+  assert.equal(envelopePayload.orientation.conversation.conversation_context.messages[0].text, "message-first-envelope");
+  writeBootstrapEnvelope({ bootstrap_end: { status: "COMPLETE", schema: "bootstrap.v1" } });
+  await assert.rejects(readBootstrapSnapshot(60_000, "bootstrap", "ambiguous-envelope-caller"), /ambiguous bootstrap envelope/);
   writeBootstrap();
   const tinyPage = await readBootstrapSnapshot(1, "bootstrap", "tiny-page-caller");
   assert.equal(tinyPage.next_action, "READ_SAME_PROCESS_ID");
