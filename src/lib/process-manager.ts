@@ -2876,6 +2876,22 @@ export class ProcessManager {
     }
   }
 
+  private async waitForProcessChange(state: ProcessState, waitMs: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      let timer: NodeJS.Timeout;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        state.waiters.delete(finish);
+        resolve();
+      };
+      state.waiters.add(finish);
+      timer = setTimeout(finish, waitMs);
+    });
+  }
+
   async readWithWait(processId: string, maxChars = MAX_READ_CHARS, waitMs = 0): Promise<Record<string, unknown>> {
     const boundedWaitMs = boundReadWaitMs(waitMs);
     emitTelemetry({
@@ -2896,19 +2912,7 @@ export class ProcessManager {
     const lastReadRevision = state.lastReadRevisionByCaller.get(observerCallerId) ?? 0;
     if (state.revision > lastReadRevision) return this.read(processId, maxChars);
 
-    await new Promise<void>((resolve) => {
-      let settled = false;
-      let timer: NodeJS.Timeout;
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        state.waiters.delete(finish);
-        resolve();
-      };
-      state.waiters.add(finish);
-      timer = setTimeout(finish, boundedWaitMs);
-    });
+    await this.waitForProcessChange(state, boundedWaitMs);
     if (state.exitCode === null && state.revision <= lastReadRevision) {
       return {
         ...processResponseState(state.startedAt, true),
