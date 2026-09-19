@@ -1,10 +1,16 @@
 # Changelog
 
+- [2026-09-19] Raised process and Bootstrap output paging to 100,000 characters per page so current Bootstrap V2 snapshots and larger command output require fewer reads.
+
+- [2026-09-19] Raised explicit `start_process` and `read_output` waits to 240 seconds and aligned backend/front-door request ceilings at 270 seconds to reduce polling without exceeding the public five-minute idle window.
+
+- [2026-09-19] Removed the inbound ChatGPT-to-host file-import tool from the production MCP profile; process MCP now exposes only `start_process`, `read_output`, and `kill_process`. Local process artifacts continue to use the existing outbound resource/result path.
+
 All notable project changes are recorded here in Keep a Changelog 1.1.0 style.
 
 ## [Unreleased]
 
-- [2026-09-10] Split lossless file transfer into explicit `upload_local_file` and `download_chatgpt_file` actions (#235): normal `start_process`/`read_output` no longer mount the Library widget, ChatGPT file inputs use native file params for direct streaming to disk, local uploads use exact-byte SHA-256 verification, and compressible HTTP transfers may use zstd level 1 while already-compressed media stays unchanged.
+- [2026-09-10] Historically split file transfer into explicit inbound/outbound actions (#235); the inbound ChatGPT-to-host action was removed from the MCP surface on 2026-09-19. Normal `start_process`/`read_output` do not mount a Library widget.
 - [2026-09-10] Added the one-command local home-direct stack installer (#233): one Windows host gets the loopback MCP backend, pinned local Caddy, standalone BusyCoordinator, shared base rules, PlanOnly, and autostart; the ChatGPT connector remains exactly `start_process`, `read_output`, and `kill_process`, while Library delivery stays metadata/resource-widget behavior rather than a fourth tool.
 - [2026-09-06] Made the three-process-tool ChatGPT connector profile the production-safe default, corrected stale full-profile documentation, and added a rotation-aware reroute acceptance analyzer that joins aggregate transport health with exact/unknown-time routing evidence without exposing raw identifiers (#81).
 - [2026-09-05] Extended the public Caddy client idle timeout from 15 seconds to 5 minutes after packet/access-log correlation showed Caddy was closing otherwise healthy client connections at about 15 seconds; retained WireGuard-only backend routing and the 30-second/max-4 upstream keep-alive pool, and live proof reused the same TLS socket after 20 seconds idle.

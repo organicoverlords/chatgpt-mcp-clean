@@ -1,10 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, createWriteStream } from "node:fs";
+import { createReadStream } from "node:fs";
 import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
-import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
-import { basename, dirname, extname, isAbsolute } from "node:path";
-import { Readable, Transform } from "node:stream";
+import { basename, extname, isAbsolute } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { constants as zlibConstants, createZstdCompress } from "node:zlib";
 import type { Request, Response as ExpressResponse } from "express";
@@ -18,7 +15,6 @@ const LOCAL_TRANSFER_TTL_MS = 5 * 60 * 1000;
 const LOCAL_RESOURCE_TTL_MS = 8 * 60 * 60 * 1000;
 const DEFAULT_MAX_FILE_BYTES = 512 * 1024 * 1024;
 const ZSTD_MIN_BYTES = 64 * 1024;
-const MAX_REDIRECTS = 4;
 const MAX_REVIEW_ZIP_ENTRIES = 512;
 const MAX_REVIEW_ZIP_DIRECTORY_BYTES = 8 * 1024 * 1024;
 const MAX_REVIEW_MANIFEST_BYTES = 1024 * 1024;
@@ -56,14 +52,6 @@ const ALREADY_COMPRESSED_EXTENSIONS = new Set([
   ".7z", ".avi", ".gif", ".glb", ".gz", ".jpeg", ".jpg", ".mkv", ".mov", ".mp4", ".pdf", ".png", ".webm", ".webp", ".zip", ".zst",
 ]);
 
-const ChatgptFileSchema = z.object({
-  download_url: z.string().min(1),
-  file_id: z.string().min(1),
-  mime_type: z.string().optional(),
-  file_name: z.string().optional(),
-});
-
-export type ChatgptFileInput = z.infer<typeof ChatgptFileSchema>;
 
 const UploadLocalFileOutputSchema = z.object({
   direction: z.literal("local_to_chatgpt"),
@@ -76,16 +64,6 @@ const UploadLocalFileOutputSchema = z.object({
   resource_uri: z.string().url(),
 });
 
-const DownloadChatgptFileOutputSchema = z.object({
-  direction: z.literal("chatgpt_to_local"),
-  status: z.literal("ok"),
-  file_id: z.string(),
-  file_name: z.string(),
-  mime_type: z.string(),
-  destination_path: z.string(),
-  bytes: z.number().int().positive(),
-  sha256: z.string().regex(/^[0-9a-f]{64}$/),
-});
 export type LocalFileTransfer = {
   token: string;
   path: string;
@@ -640,112 +618,6 @@ export async function serveLocalFileTransfer(req: Request, res: ExpressResponse)
   // without re-uploading or materializing the image for each inspection.
 }
 
-function isPrivateIpv4(address: string): boolean {
-  const parts = address.split(".").map(Number);
-  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return true;
-  const [a, b] = parts;
-  return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
-}
-
-function isPrivateIp(address: string): boolean {
-  const version = isIP(address);
-  if (version === 4) return isPrivateIpv4(address);
-  if (version !== 6) return true;
-  const normalized = address.toLowerCase();
-  return normalized === "::" || normalized === "::1" || normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb") || normalized.startsWith("fc") || normalized.startsWith("fd");
-}
-
-export async function assertPublicHttpsUrl(raw: string): Promise<URL> {
-  const url = new URL(raw);
-  if (url.protocol !== "https:" || url.username || url.password) throw new Error("download URL must be public https");
-  const host = url.hostname.replace(/^\[|\]$/g, "");
-  if (isIP(host) && isPrivateIp(host)) throw new Error("download URL must not target a private address");
-  const addresses = await lookup(url.hostname, { all: true, verbatim: true });
-  if (!addresses.length || addresses.some((entry) => isPrivateIp(entry.address))) throw new Error("download URL resolved to a non-public address");
-  return url;
-}
-
-type FetchLike = (input: string | URL | globalThis.Request, init?: globalThis.RequestInit) => Promise<globalThis.Response>;
-
-async function fetchExactFile(
-  rawUrl: string,
-  fetchImpl: FetchLike,
-  validateUrl: (raw: string) => Promise<URL>,
-): Promise<globalThis.Response> {
-  let url = await validateUrl(rawUrl);
-  for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
-    const response = await fetchImpl(url, { redirect: "manual", headers: { "accept-encoding": "identity" } });
-    if (response.status >= 300 && response.status < 400) {
-      const location = response.headers.get("location");
-      if (!location || redirects === MAX_REDIRECTS) throw new Error("ChatGPT file download redirect limit exceeded");
-      url = await validateUrl(new URL(location, url).href);
-      continue;
-    }
-    return response;
-  }
-  throw new Error("ChatGPT file download redirect limit exceeded");
-}
-
-function validateDownloadResponse(response: globalThis.Response): void {
-  validateDownloadResponse(response);
-}
-
-export async function downloadChatgptFile(
-  file: ChatgptFileInput,
-  destinationPath: string,
-  overwrite = false,
-  options: { fetchImpl?: FetchLike; validateUrl?: (raw: string) => Promise<URL> } = {},
-) {
-  if (!isAbsolute(destinationPath)) throw new Error("download_chatgpt_file destination_path must be absolute");
-  const fetchImpl = options.fetchImpl || globalThis.fetch;
-  const validateUrl = options.validateUrl || assertPublicHttpsUrl;
-  const response = await fetchExactFile(file.download_url, fetchImpl, validateUrl);
-  if (!response.ok || !response.body) throw new Error(`ChatGPT file download failed with HTTP ${response.status}`);
-  const contentEncoding = (response.headers.get("content-encoding") || "identity").toLowerCase();
-  if (contentEncoding !== "identity") throw new Error(`ChatGPT file download returned unexpected content-encoding ${contentEncoding}`);
-  const contentLength = Number(response.headers.get("content-length") || 0);
-  if (Number.isFinite(contentLength) && contentLength > maxFileBytes()) throw new Error(`downloaded file exceeds ${maxFileBytes()} byte limit`);
-
-  await mkdir(dirname(destinationPath), { recursive: true });
-  const existing = await stat(destinationPath).catch(() => null);
-  if (existing && !overwrite) throw new Error("destination already exists; set overwrite=true to replace it");
-
-  const tempPath = `${destinationPath}.part-${randomUUID()}`;
-  const hash = createHash("sha256");
-  let bytes = 0;
-  const meter = new Transform({
-    transform(chunk, _encoding, callback) {
-      const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      bytes += data.length;
-      if (bytes > maxFileBytes()) {
-        callback(new Error(`downloaded file exceeds ${maxFileBytes()} byte limit`));
-        return;
-      }
-      hash.update(data);
-      callback(null, data);
-    },
-  });
-
-  try {
-    await pipeline(Readable.fromWeb(response.body as any), meter, createWriteStream(tempPath, { flags: "wx" }));
-    if (bytes <= 0) throw new Error("downloaded file was empty");
-    if (existing && overwrite) await rm(destinationPath, { force: true });
-    await rename(tempPath, destinationPath);
-    return {
-      status: "ok",
-      file_id: file.file_id,
-      file_name: file.file_name || basename(destinationPath),
-      mime_type: file.mime_type || mimeTypeFor(destinationPath),
-      destination_path: destinationPath,
-      bytes,
-      sha256: hash.digest("hex"),
-    };
-  } catch (error) {
-    await rm(tempPath, { force: true }).catch(() => undefined);
-    throw error;
-  }
-}
-
 export async function localFileTransferHandoff(item: LocalFileTransfer) {
   const reviewImages = item.mime_type === "application/zip" ? await visualReviewZipResources(item) : [];
   const content: any[] = [localFileResourceLink(item)];
@@ -768,34 +640,12 @@ export async function prepareMarkedArtifactHandoffs(value: unknown): Promise<Arr
   return handoffs;
 }
 
-export function registerFileTransferTools(server: McpServer, callerId: string): void {
+export function registerArtifactFileResource(server: McpServer, callerId: string): void {
   server.registerResource(
     "file-transfer-resource",
     new ResourceTemplate("mcp-upload://file-transfer/{token}", { list: undefined }),
     { title: "Exact transferred file", description: "Exact original local file or manifest-declared review member returned by a tool" },
     async (uri) => ({ contents: [await localFileResourceContents(uri.href)] }),
   );
-  server.registerTool(
-    "download_chatgpt_file",
-    {
-      description: "Save an exact ChatGPT file to the MCP host without transcoding and return byte count plus SHA-256.",
-      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-      _meta: {
-        "openai/fileParams": ["file"],
-      },
-      inputSchema: z.object({
-        file: ChatgptFileSchema,
-        destination_path: z.string().min(1),
-        overwrite: z.boolean().optional(),
-      }),
-      outputSchema: DownloadChatgptFileOutputSchema,
-    },
-    async ({ file, destination_path, overwrite = false }) => {
-      const result = await downloadChatgptFile(file, destination_path, overwrite);
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify({ caller_id: callerId, ...result }) }],
-        structuredContent: { direction: "chatgpt_to_local", ...result },
-      };
-    },
-  );
+
 }

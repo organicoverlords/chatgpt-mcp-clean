@@ -11,8 +11,8 @@ const resource = `${publicOrigin}/mcp`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const toolProfile = (process.env.MCP_TOOL_PROFILE || "process").trim().toLowerCase();
 const expectedTools = (toolProfile === "process"
-  ? ["download_chatgpt_file", "kill_process", "read_output", "start_process"]
-  : ["busy_claim", "busy_list", "busy_release", "download_chatgpt_file", "kill_process", "read_output", "start_process"]).sort();
+  ? ["kill_process", "read_output", "start_process"]
+  : ["busy_claim", "busy_list", "busy_release", "kill_process", "read_output", "start_process"]).sort();
 
 async function jsonFetch(url, options = {}) {
   const response = await fetch(url, options);
@@ -174,7 +174,7 @@ const listed = await mcpPost(sessionA, { jsonrpc: "2.0", id: 2, method: "tools/l
 const names = listed.body.result.tools.map((tool) => tool.name).sort();
 assert.deepEqual(names, expectedTools);
 const startProcessTool = listed.body.result.tools.find((tool) => tool.name === "start_process");
-assert.equal(startProcessTool.inputSchema.properties.wait_ms.maximum, 10_000);
+assert.equal(startProcessTool.inputSchema.properties.wait_ms.maximum, 240_000);
 assert.equal(startProcessTool.inputSchema.properties.wait_ms.minimum, 0);
 assert.deepEqual(startProcessTool.inputSchema.properties.activity_target.properties.type.enum, ["card", "node", "project"]);
 assert.equal(startProcessTool.inputSchema.properties.activity_target.properties.id.maxLength, 160);
@@ -184,7 +184,7 @@ const invalidActivityTarget = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date
 assertToolErrorWithoutAppMeta(invalidActivityTarget, "schema-invalid start_process");
 assert.match(invalidActivityTarget.body.result.content?.[0]?.text || "", /activity_target|invalid|validation/i);
 const readOutputTool = listed.body.result.tools.find((tool) => tool.name === "read_output");
-assert.equal(readOutputTool.inputSchema.properties.wait_ms.maximum, 120_000);
+assert.equal(readOutputTool.inputSchema.properties.wait_ms.maximum, 240_000);
 assert.equal(readOutputTool.inputSchema.properties.wait_ms.minimum, 0);
 for (const [name, tool] of [["start_process", startProcessTool], ["read_output", readOutputTool]]) {
   assert.equal(tool._meta?.["openai/outputTemplate"], undefined, `${name} must not mount a widget over MCP transport`);

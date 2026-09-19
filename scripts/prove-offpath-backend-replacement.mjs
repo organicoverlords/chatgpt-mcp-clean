@@ -137,7 +137,7 @@ try {
   };
   const before = await rpc({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
   const beforeTools = before.body.result.tools.map((tool) => tool.name).sort();
-  assert.deepEqual(beforeTools, ["download_chatgpt_file", "kill_process", "read_output", "start_process"], "off-path production proof must exercise only the fixed four-tool ChatGPT connector surface");
+  assert.deepEqual(beforeTools, ["kill_process", "read_output", "start_process"], "off-path production proof must exercise only the fixed three-tool ChatGPT connector surface");
   const beforeByName = Object.fromEntries(before.body.result.tools.map((tool) => [tool.name, tool]));
   for (const [name, annotations] of Object.entries(expectedProcessAnnotations)) {
     assert.deepEqual(beforeByName[name]?.annotations, annotations, `${name} safety annotations missing before replacement`);

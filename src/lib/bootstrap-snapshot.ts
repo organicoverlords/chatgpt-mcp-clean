@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 export const BOOTSTRAP_PROCESS_ALIAS = "bootstrap";
 const LEGACY_BOOTSTRAP_PROCESS_ID = "231b7e74-4cc8-43d0-9702-fd6dfa2215b3";
-const SNAPSHOT_PAGE_MAX_CHARS = 60_000;
+const SNAPSHOT_PAGE_MAX_CHARS = 100_000;
 const BOOTSTRAP_SNAPSHOT_MAX_BYTES = 96 * 1024;
 const TIMELINE_SNAPSHOT_MAX_BYTES = 64 * 1024;
 const SNAPSHOT_PAGE_SESSION_TTL_MS = 30 * 60 * 1000;
@@ -133,7 +133,7 @@ function pageSnapshot(
 }
 
 export async function readBootstrapSnapshot(
-  maxChars = 60_000,
+  maxChars = 100_000,
   processId = BOOTSTRAP_PROCESS_ALIAS,
   callerId = "caller_unknown",
 ): Promise<Record<string, unknown>> {

@@ -1,97 +1,5 @@
 [
   {
-    "name": "download_chatgpt_file",
-    "description": "Save an exact ChatGPT file to the MCP host without transcoding and return byte count plus SHA-256.",
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "file": {
-          "type": "object",
-          "properties": {
-            "download_url": {
-              "type": "string",
-              "minLength": 1
-            },
-            "file_id": {
-              "type": "string",
-              "minLength": 1
-            },
-            "mime_type": {
-              "type": "string"
-            },
-            "file_name": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "download_url",
-            "file_id"
-          ],
-          "additionalProperties": false
-        },
-        "destination_path": {
-          "type": "string",
-          "minLength": 1
-        },
-        "overwrite": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "file",
-        "destination_path"
-      ],
-      "additionalProperties": false
-    },
-    "outputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "direction": {
-          "type": "string",
-          "const": "chatgpt_to_local"
-        },
-        "status": {
-          "type": "string",
-          "const": "ok"
-        },
-        "file_id": {
-          "type": "string"
-        },
-        "file_name": {
-          "type": "string"
-        },
-        "mime_type": {
-          "type": "string"
-        },
-        "destination_path": {
-          "type": "string"
-        },
-        "bytes": {
-          "type": "integer",
-          "exclusiveMinimum": 0,
-          "maximum": 9007199254740991
-        },
-        "sha256": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
-        }
-      },
-      "required": [
-        "direction",
-        "status",
-        "file_id",
-        "file_name",
-        "mime_type",
-        "destination_path",
-        "bytes",
-        "sha256"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
     "name": "kill_process",
     "description": "Terminate a process and its child process tree.",
     "inputSchema": {
@@ -120,7 +28,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v3"
+              "const": "process-tools.v4"
             },
             "backend_generation": {
               "type": "string",
@@ -217,7 +125,7 @@
         "wait_ms": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 120000
+          "maximum": 240000
         }
       },
       "required": [
@@ -237,7 +145,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v3"
+              "const": "process-tools.v4"
             },
             "backend_generation": {
               "type": "string",
@@ -813,7 +721,7 @@
         "wait_ms": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 10000
+          "maximum": 240000
         },
         "activity_target": {
           "type": "object",
@@ -866,7 +774,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v3"
+              "const": "process-tools.v4"
             },
             "backend_generation": {
               "type": "string",

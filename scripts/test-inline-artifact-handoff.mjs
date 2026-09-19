@@ -14,7 +14,7 @@ await writeFile(pngB, PNG_1X1);
 await writeFile(video, Buffer.from("000000186674797069736F6D", "hex"));
 
 const server = createServer("inline-artifact-test", { backend_generation: "inline-test", source_commit: "0123456789abcdef0123456789abcdef01234567" });
-assert.deepEqual(Object.keys(server._registeredTools).sort(), ["download_chatgpt_file", "kill_process", "read_output", "start_process"]);
+assert.deepEqual(Object.keys(server._registeredTools).sort(), ["kill_process", "read_output", "start_process"]);
 for (const forbidden of ["view_image", "upload_local_file", "read_local_file", "mount_visual_proof_bridge"]) {
   assert.equal(server._registeredTools[forbidden], undefined, `${forbidden} must not be exposed`);
 }
@@ -58,4 +58,4 @@ assert.equal(imageEntries(videoResult).length, 0, "video must not masquerade as 
 assert.equal(mediaEntries(videoResult).filter((entry) => entry.type === "resource_link").length, 1, "video remains an ordinary artifact while keyframes/contact sheets are marked separately");
 
 await rm(local, { recursive: true, force: true });
-console.log("PASS inline_artifact_handoff four_tools=true direct_fullres=true read_output_stream=true multi_keyframe=true legacy_marker=true video_resource=true");
+console.log("PASS inline_artifact_handoff three_tools=true direct_fullres=true read_output_stream=true multi_keyframe=true legacy_marker=true video_resource=true");

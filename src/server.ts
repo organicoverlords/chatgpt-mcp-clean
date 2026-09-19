@@ -4,7 +4,7 @@ import { isBootstrapSnapshot, readBootstrapSnapshot } from "./lib/bootstrap-snap
 import { z } from "zod";
 import { BusyStore } from "./lib/busy-store.js";
 import { ProcessManager } from "./lib/process-manager.js";
-import { prepareMarkedArtifactHandoffs, registerFileTransferTools } from "./lib/file-transfer.js";
+import { prepareMarkedArtifactHandoffs, registerArtifactFileResource } from "./lib/file-transfer.js";
 
 // The deployed ChatGPT connector surface is the process profile. Keep the broader
 // full profile explicit-only for internal/local tests so repo inspection without a
@@ -34,7 +34,7 @@ const processEnvironmentSchema = z.record(
 
 const startProcessCommonShape = {
   working_directory: z.string().optional(),
-  wait_ms: z.number().int().min(0).max(10_000).optional(),
+  wait_ms: z.number().int().min(0).max(240_000).optional(),
   activity_target: activityTargetSchema.optional(),
   action_class: actionClassSchema.optional(),
 };
@@ -106,7 +106,7 @@ const snapshotFreshnessSchema = z.object({
   read_mode: z.literal("MATERIALIZED_ONLY"),
 }).strict();
 
-export const PROCESS_TOOL_CONTRACT_VERSION = "process-tools.v3" as const;
+export const PROCESS_TOOL_CONTRACT_VERSION = "process-tools.v4" as const;
 
 export type ProcessServingIdentity = {
   backend_generation?: string;
@@ -239,7 +239,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
     ...(runtimeIdentity.source_commit ? { source_commit: runtimeIdentity.source_commit } : {}),
   };
   const server = new McpServer({ name: "shell-mcp", version: "0.1.0" });
-  registerFileTransferTools(server, callerId);
+  registerArtifactFileResource(server, callerId);
 
 
   server.registerTool(
@@ -270,12 +270,12 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       inputSchema: z.object({
         process_id: z.string().min(1),
         max_chars: z.number().int().optional(),
-        wait_ms: z.number().int().min(0).max(120_000).optional(),
+        wait_ms: z.number().int().min(0).max(240_000).optional(),
       }),
       outputSchema: processOutputSchema,
     },
     async ({ process_id, max_chars, wait_ms }) => {
-      const boundedMaxChars = Math.max(1, Math.min(max_chars ?? 60_000, 60_000));
+      const boundedMaxChars = Math.max(1, Math.min(max_chars ?? 100_000, 100_000));
       return structuredTextResult(isBootstrapSnapshot(process_id)
         ? await readBootstrapSnapshot(boundedMaxChars, process_id, callerId)
         : await processManager.readOutput(process_id, boundedMaxChars, wait_ms), callerId, servingIdentity);

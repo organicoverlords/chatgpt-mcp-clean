@@ -47,7 +47,7 @@ if ($config) {
     } else { Add-Check 'busy-contract' $false ("cmd={0}; contract={1}" -f $busyCmd,$busyContractPath) }
     Add-Check 'rules' ((Test-Path -LiteralPath (Join-Path $rulesRoot 'RULES.md') -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $rulesRoot 'AGENTS.md') -PathType Leaf)) $rulesRoot
     Add-Check 'topology' ([string]$config.topology -eq 'local-home-direct') ([string]$config.topology)
-    Add-Check 'four-tool-profile' (([string]$config.tool_profile -eq 'process') -and ([int]$config.tool_count -eq 4)) ("profile={0} count={1}" -f $config.tool_profile,$config.tool_count)
+    Add-Check 'three-tool-profile' (([string]$config.tool_profile -eq 'process') -and ([int]$config.tool_count -eq 3)) ("profile={0} count={1}" -f $config.tool_profile,$config.tool_count)
     $mediaProperty = $config.PSObject.Properties['media_delivery']
     $mediaDelivery = if ($mediaProperty) { [string]$mediaProperty.Value } else { '' }
     Add-Check 'media-delivery' ($mediaDelivery -eq 'process-result inline images plus ordinary artifact resources') $mediaDelivery

@@ -323,8 +323,8 @@ httpServer.keepAliveTimeout = 0;
 // longer than this is a stalled connector upload, not useful long-running work.
 // Keep a broken request from holding the route indefinitely while the worker
 // reconnects and retries with the same process_id.
-httpServer.headersTimeout = 35_000;
-httpServer.requestTimeout = 30_000;
+httpServer.headersTimeout = 275_000;
+httpServer.requestTimeout = 270_000;
 httpServer.timeout = 0;
 
 process.on("uncaughtExceptionMonitor", (error, origin) => {
