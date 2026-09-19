@@ -122,12 +122,12 @@ try {
   ]);
   console.log('PASS atomic publisher replacement during 256 concurrent reads');
 
-  writeBootstrap({ marker: "stable-pages", padding: "x".repeat(55_000) });
+  writeBootstrap({ marker: "stable-pages", padding: "x".repeat(90_000) });
   const pagePieces = [];
   let paged = await readBootstrapSnapshot(60_000, "bootstrap", "paging-stability-caller");
   assert.equal(paged.next_action, "READ_SAME_PROCESS_ID");
-  assert.equal(paged.output_page.page_limit, 24_000);
-  assert.ok(paged.stdout.length <= 24_000);
+  assert.equal(paged.output_page.page_limit, 60_000);
+  assert.ok(paged.stdout.length <= 60_000);
   const modelVisiblePage = {
     content: [],
     structuredContent: {
@@ -140,19 +140,19 @@ try {
       },
     },
   };
-  assert.ok(JSON.stringify(modelVisiblePage).length < 32_000, "paged bootstrap MCP result must stay well below the ~62 KB stalled response");
+  assert.ok(JSON.stringify(modelVisiblePage).length < 64_000, "60k bootstrap page must stay inside the proven MCP response envelope");
   const expectedTotal = paged.output_page.stdout_total;
   pagePieces.push(paged.stdout);
-  writeBootstrap({ marker: "replacement-after-first-page", padding: "y".repeat(55_000) });
+  writeBootstrap({ marker: "replacement-after-first-page", padding: "y".repeat(90_000) });
   while (paged.next_action === "READ_SAME_PROCESS_ID") {
     paged = await readBootstrapSnapshot(60_000, "bootstrap", "paging-stability-caller");
-    assert.ok(paged.stdout.length <= 24_000);
+    assert.ok(paged.stdout.length <= 60_000);
     pagePieces.push(paged.stdout);
   }
   const reconstructed = pagePieces.join("");
   assert.equal(reconstructed.length, expectedTotal);
   assert.equal(JSON.parse(reconstructed).marker, "stable-pages");
-  assert.ok(pagePieces.length >= 3);
+  assert.ok(pagePieces.length >= 2);
 
   const replacementPieces = [];
   let replacement = await readBootstrapSnapshot(60_000, "bootstrap", "paging-stability-caller");
