@@ -686,6 +686,10 @@ async function fetchExactFile(
   throw new Error("ChatGPT file download redirect limit exceeded");
 }
 
+function validateDownloadResponse(response: globalThis.Response): void {
+  validateDownloadResponse(response);
+}
+
 export async function downloadChatgptFile(
   file: ChatgptFileInput,
   destinationPath: string,
