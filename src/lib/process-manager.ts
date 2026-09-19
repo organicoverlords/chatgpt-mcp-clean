@@ -2457,8 +2457,20 @@ export class ProcessManager {
     finally { try { await unlinkAsync(temporaryPath); } catch {} }
   }
 
+  private isValidCompletedReceipt(receipt: CompletedProcessReceipt, processId: string): boolean {
+    return receipt.version === 1
+      && receipt.process_id === processId
+      && typeof receipt.pid === "number"
+      && typeof receipt.command === "string"
+      && typeof receipt.cwd === "string"
+      && typeof receipt.stdout === "string"
+      && typeof receipt.stderr === "string"
+      && typeof receipt.started_at === "string"
+      && typeof receipt.finished_at === "string";
+  }
+
   private formatReceipt(receipt: CompletedProcessReceipt, processId: string, maxChars: number): Record<string, unknown> | undefined {
-    if (receipt.version !== 1 || receipt.process_id !== processId || typeof receipt.pid !== "number" || typeof receipt.command !== "string" || typeof receipt.cwd !== "string" || typeof receipt.stdout !== "string" || typeof receipt.stderr !== "string" || typeof receipt.started_at !== "string" || typeof receipt.finished_at !== "string") return undefined;
+    if (!this.isValidCompletedReceipt(receipt, processId)) return undefined;
     const limit = Math.max(1, Math.min(maxChars, MAX_READ_CHARS));
     const observer = currentTelemetryContext();
     const observerCallerId = observer.caller_id ?? "caller_unknown";
