@@ -158,7 +158,7 @@ $actions = @(
     $(if ($NoStart -or $NoAutostart) { 'do not start MCP/Caddy now' } else { 'start MCP and local Caddy now' })
 )
 if ($Plan) {
-    [ordered]@{ ok=$true; plan_only=$true; topology='local-home-direct'; tool_count=4; media_delivery='process-result inline images plus ordinary artifact resources'; source_commit=$sourceCommit; actions=$actions; completion_gate=$completionGate; reconciliation_required=$true; no_mutation=$true } | ConvertTo-Json -Depth 4
+    [ordered]@{ ok=$true; plan_only=$true; topology='local-home-direct'; tool_count=3; media_delivery='process-result inline images plus ordinary artifact resources'; source_commit=$sourceCommit; actions=$actions; completion_gate=$completionGate; reconciliation_required=$true; no_mutation=$true } | ConvertTo-Json -Depth 4
     exit 0
 }
 
@@ -177,7 +177,7 @@ try {
         & npm.cmd run build --silent
         if ($LASTEXITCODE -ne 0) { throw 'MCP build failed' }
         & node.exe scripts/verify-process-contract.mjs
-        if ($LASTEXITCODE -ne 0) { throw 'four-tool MCP connector contract verification failed' }
+        if ($LASTEXITCODE -ne 0) { throw 'three-tool MCP connector contract verification failed' }
         & npm.cmd prune --omit=dev --silent
         if ($LASTEXITCODE -ne 0) { throw 'npm production prune failed' }
     } finally { Pop-Location }
@@ -268,7 +268,7 @@ $config = [ordered]@{
     owner_auth_mode = 'local-edge'
     owner_login = $OwnerLogin
     tool_profile = 'process'
-    tool_count = 4
+    tool_count = 3
     media_delivery = 'process-result inline images plus ordinary artifact resources'
     caddy_exe = $caddyExe
     caddy_config = $caddyFile
@@ -289,7 +289,7 @@ if ($NoAutostart) {
     $principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
     $mcpArgs = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}"' -f (Join-Path $InstallRoot 'mcp\scripts\start-stack.ps1'),$configPath
-    Register-ScheduledTask -TaskName $TaskName -Action (New-ScheduledTaskAction -Execute $pwsh -Argument $mcpArgs -WorkingDirectory (Join-Path $InstallRoot 'mcp')) -Trigger $trigger -Principal $principal -Settings $settings -Description 'Local ChatGPT MCP four-tool backend' -Force | Out-Null
+    Register-ScheduledTask -TaskName $TaskName -Action (New-ScheduledTaskAction -Execute $pwsh -Argument $mcpArgs -WorkingDirectory (Join-Path $InstallRoot 'mcp')) -Trigger $trigger -Principal $principal -Settings $settings -Description 'Local ChatGPT MCP three-tool backend' -Force | Out-Null
     $caddyArgs = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}"' -f (Join-Path $InstallRoot 'mcp\scripts\start-stack-caddy.ps1'),$configPath
     Register-ScheduledTask -TaskName $CaddyTaskName -Action (New-ScheduledTaskAction -Execute $pwsh -Argument $caddyArgs -WorkingDirectory $caddyRoot) -Trigger $trigger -Principal $principal -Settings $settings -Description 'Local ChatGPT MCP HTTPS Caddy edge' -Force | Out-Null
     & (Join-Path $RulesRoot 'Install-AgentRulesCheckoutSyncTask.ps1') -TaskName $RulesSyncTaskName -IntervalMinutes 1
@@ -309,7 +309,7 @@ $doctor = Join-Path $InstallRoot 'mcp\scripts\stack-doctor.ps1'
 & $doctor -ConfigPath $configPath
 if ($LASTEXITCODE -ne 0) { throw 'stack doctor reported an installation failure' }
 [ordered]@{
-    ok=$true; topology='local-home-direct'; tool_count=4; tools=@('start_process','read_output','kill_process','download_chatgpt_file')
+    ok=$true; topology='local-home-direct'; tool_count=3; tools=@('start_process','read_output','kill_process')
     media_delivery='process-result inline images plus ordinary artifact resources'; source_commit=$sourceCommit; install_root=$InstallRoot
     config_path=$configPath; mcp_url=$mcpUrl; local_health=("http://127.0.0.1:{0}/health" -f $Port); local_https_port=$CaddyHttpsPort
     busy_command=(Join-Path $BusyRoot 'busy-python.cmd'); rules_root=$RulesRoot; plan_only_profile=$planProfile

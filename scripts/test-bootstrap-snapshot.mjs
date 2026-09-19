@@ -49,13 +49,13 @@ try {
   assert.equal(isBootstrapSnapshot(randomUUID()), false);
   await assert.rejects(readBootstrapSnapshot(), { code: "ENOENT" });
   writeBootstrapEnvelope();
-  const envelopeSnapshot = await readBootstrapSnapshot(60_000, "bootstrap", "envelope-caller");
+  const envelopeSnapshot = await readBootstrapSnapshot(100_000, "bootstrap", "envelope-caller");
   const envelopePayload = JSON.parse(envelopeSnapshot.stdout);
   assert.equal(envelopePayload.bootstrap_end, undefined);
   assert.equal(envelopePayload.orientation.plumbing.bootstrap_end.status, "COMPLETE");
   assert.equal(envelopePayload.orientation.conversation.conversation_context.messages[0].text, "message-first-envelope");
   writeBootstrapEnvelope({ bootstrap_end: { status: "COMPLETE", schema: "bootstrap.v1" } });
-  await assert.rejects(readBootstrapSnapshot(60_000, "bootstrap", "ambiguous-envelope-caller"), /ambiguous bootstrap envelope/);
+  await assert.rejects(readBootstrapSnapshot(100_000, "bootstrap", "ambiguous-envelope-caller"), /ambiguous bootstrap envelope/);
   writeBootstrap();
   const tinyPage = await readBootstrapSnapshot(1, "bootstrap", "tiny-page-caller");
   assert.equal(tinyPage.next_action, "READ_SAME_PROCESS_ID");
@@ -79,17 +79,19 @@ try {
   }
   writeBootstrap({ schema: "bootstrap.v2", bootstrap_end: { status: "COMPLETE", schema: "bootstrap.v2" }, padding: "x".repeat(90_000) });
   const v2Pieces = [];
-  let v2Page = await readBootstrapSnapshot(60_000, "bootstrap", "v2-large-caller");
+  let v2Page = await readBootstrapSnapshot(100_000, "bootstrap", "v2-large-caller");
+  assert.equal(v2Page.next_action, "STOP_READING");
+  assert.ok(v2Page.stdout.length > 90_000 && v2Page.stdout.length <= 100_000, "near-max V2 snapshot should complete in one 100k read");
   while (true) {
     v2Pieces.push(v2Page.stdout);
     if (v2Page.next_action === "STOP_READING") break;
-    v2Page = await readBootstrapSnapshot(60_000, "bootstrap", "v2-large-caller");
+    v2Page = await readBootstrapSnapshot(100_000, "bootstrap", "v2-large-caller");
   }
   const v2Payload = JSON.parse(v2Pieces.join(""));
   assert.equal(v2Payload.schema, "bootstrap.v2");
   assert.equal(v2Payload.bootstrap_end.schema, "bootstrap.v2");
   writeFileSync(process.env.MCP_BOOTSTRAP_SNAPSHOT_PATH, " ".repeat(96 * 1024 + 1));
-  await assert.rejects(readBootstrapSnapshot(60_000, "bootstrap", "oversize-v2-caller"), /96 KiB/);
+  await assert.rejects(readBootstrapSnapshot(100_000, "bootstrap", "oversize-v2-caller"), /96 KiB/);
   writeBootstrap();
   const latencies = [];
   for (let batch = 0; batch < 16; batch++) {
@@ -124,29 +126,29 @@ try {
 
   writeBootstrap({ marker: "stable-pages", padding: "x".repeat(90_000) });
   const pagePieces = [];
-  let paged = await readBootstrapSnapshot(60_000, "bootstrap", "paging-stability-caller");
+  let paged = await readBootstrapSnapshot(32_000, "bootstrap", "paging-stability-caller");
   assert.equal(paged.next_action, "READ_SAME_PROCESS_ID");
-  assert.equal(paged.output_page.page_limit, 60_000);
-  assert.ok(paged.stdout.length <= 60_000);
+  assert.equal(paged.output_page.page_limit, 32_000);
+  assert.ok(paged.stdout.length <= 32_000);
   const modelVisiblePage = {
     content: [],
     structuredContent: {
       ...paged,
       caller_id: "caller_paging_regression",
       serving_identity: {
-        tool_contract_version: "process-tools.v3",
+        tool_contract_version: "process-tools.v4",
         backend_generation: "backend-paging-regression",
         source_commit: "a".repeat(40),
       },
     },
   };
-  assert.ok(JSON.stringify(modelVisiblePage).length < 64_000, "60k bootstrap page must stay inside the proven MCP response envelope");
+  assert.ok(JSON.stringify(modelVisiblePage).length < 64_000, "forced 32k bootstrap page must stay inside the proven MCP response envelope");
   const expectedTotal = paged.output_page.stdout_total;
   pagePieces.push(paged.stdout);
   writeBootstrap({ marker: "replacement-after-first-page", padding: "y".repeat(90_000) });
   while (paged.next_action === "READ_SAME_PROCESS_ID") {
-    paged = await readBootstrapSnapshot(60_000, "bootstrap", "paging-stability-caller");
-    assert.ok(paged.stdout.length <= 60_000);
+    paged = await readBootstrapSnapshot(32_000, "bootstrap", "paging-stability-caller");
+    assert.ok(paged.stdout.length <= 32_000);
     pagePieces.push(paged.stdout);
   }
   const reconstructed = pagePieces.join("");
@@ -155,11 +157,11 @@ try {
   assert.ok(pagePieces.length >= 2);
 
   const replacementPieces = [];
-  let replacement = await readBootstrapSnapshot(60_000, "bootstrap", "paging-stability-caller");
+  let replacement = await readBootstrapSnapshot(32_000, "bootstrap", "paging-stability-caller");
   while (true) {
     replacementPieces.push(replacement.stdout);
     if (replacement.next_action === "STOP_READING") break;
-    replacement = await readBootstrapSnapshot(60_000, "bootstrap", "paging-stability-caller");
+    replacement = await readBootstrapSnapshot(32_000, "bootstrap", "paging-stability-caller");
   }
   assert.equal(JSON.parse(replacementPieces.join("")).marker, "replacement-after-first-page");
   console.log("PASS lossless bootstrap paging stays snapshot-stable across producer refresh");
@@ -185,7 +187,7 @@ try {
   try {
     for (const id of ["231b7e74-4cc8-43d0-9702-fd6dfa2215b3", "bootstrap", "timeline", "checkup"]) {
       const started = performance.now();
-      const reply = await client.callTool({ name: "read_output", arguments: { process_id: id, max_chars: 32000, wait_ms: 0 } });
+      const reply = await client.callTool({ name: "read_output", arguments: { process_id: id, max_chars: 100000, wait_ms: 0 } });
       assert.equal(reply.isError, undefined, JSON.stringify(reply));
       assert.equal(reply.structuredContent.snapshot_alias, true);
       console.log(`PASS local MCP read_output ${id}: ${Math.round(performance.now() - started)} ms, no subprocess`);

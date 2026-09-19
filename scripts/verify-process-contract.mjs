@@ -16,14 +16,13 @@ const actualTools = Object.entries(server._registeredTools)
   .sort(([a], [b]) => a.localeCompare(b))
   .map(([name, tool]) => ({ name, description: tool.description || "", inputSchema: z.toJSONSchema(tool.inputSchema), ...(tool.outputSchema ? { outputSchema: z.toJSONSchema(tool.outputSchema) } : {}) }));
 
-const toolsWithoutClientUiTitles = ["start_process", "read_output", "kill_process", "download_chatgpt_file"];
+const toolsWithoutClientUiTitles = ["start_process", "read_output", "kill_process"];
 for (const name of toolsWithoutClientUiTitles) {
   const tool = server._registeredTools[name];
   assert.equal(tool?.title, undefined, `${name} must not advertise client UI title metadata`);
   assert.equal(tool?._meta?.["openai/toolInvocation/invoking"], undefined, `${name} must not advertise invoking status metadata`);
   assert.equal(tool?._meta?.["openai/toolInvocation/invoked"], undefined, `${name} must not advertise invoked status metadata`);
 }
-assert.deepEqual(server._registeredTools.download_chatgpt_file?._meta?.["openai/fileParams"], ["file"], "download_chatgpt_file must preserve openai/fileParams");
 
 const publicDescriptionBudget = 160;
 const publicDescriptionInstructionLeak = /\b(?:wait_ms|max_chars|destination_path|overwrite|defaults?|input forms|do not|never|retry|poll(?:ing)?)\b/i;
@@ -56,6 +55,10 @@ assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output BAD
 
 const readInputSchema = server._registeredTools.read_output?.inputSchema;
 assert.ok(readInputSchema, "read_output input schema missing");
+assert.equal((await startInputSchema.safeParseAsync({ executable: process.execPath, wait_ms: 240_000 })).success, true, "start_process must accept 240s explicit waits");
+assert.equal((await startInputSchema.safeParseAsync({ executable: process.execPath, wait_ms: 240_001 })).success, false, "start_process must bound waits above 240s");
+assert.equal((await readInputSchema.safeParseAsync({ process_id: "probe", wait_ms: 240_000 })).success, true, "read_output must accept 240s explicit waits");
+assert.equal((await readInputSchema.safeParseAsync({ process_id: "probe", wait_ms: 240_001 })).success, false, "read_output must bound waits above 240s");
 assert.equal((await readInputSchema.safeParseAsync({ process_id: "probe", max_chars: 0 })).success, true, "read_output max_chars=0 must be accepted and clamped instead of burning a retry turn");
 assert.equal((await readInputSchema.safeParseAsync({ process_id: "probe", max_chars: -100 })).success, true, "read_output negative max_chars must be accepted and clamped instead of burning a retry turn");
 assert.equal((await readInputSchema.safeParseAsync({ process_id: "probe", max_chars: 1_000_000 })).success, true, "read_output oversized max_chars must be accepted and clamped instead of burning a retry turn");
@@ -65,7 +68,7 @@ async function assertStructuredProcessResult(name, args) {
   const result = await tool.handler(args, {});
   assert.ok(result.structuredContent, `${name} must return structuredContent`);
   assert.deepEqual(result.structuredContent.serving_identity, {
-    tool_contract_version: "process-tools.v3",
+    tool_contract_version: "process-tools.v4",
     backend_generation: "backend-contract-test",
     source_commit: contractSourceCommit,
   }, `${name} must expose exact serving backend/source/contract identity`);
@@ -93,13 +96,13 @@ const stdinStructured = await assertStructuredProcessResult("start_process", {
   wait_ms: 10_000,
 });
 assert.equal(String(stdinStructured.stdout || ""), "contract-stdin\n", "structured stdin must reach the child without shell transport");
-const readStructured = await assertStructuredProcessResult("read_output", { process_id: startStructured.process_id, max_chars: 60_000, wait_ms: 0 });
+const readStructured = await assertStructuredProcessResult("read_output", { process_id: startStructured.process_id, max_chars: 100_000, wait_ms: 0 });
 assert.equal(readStructured.process_id, startStructured.process_id, "read_output structured result must preserve process identity");
 const tinyReadStructured = await assertStructuredProcessResult("read_output", { process_id: startStructured.process_id, max_chars: 0, wait_ms: 0 });
 assert.ok(String(tinyReadStructured.stdout || "").length <= 1, "max_chars=0 must clamp to one retained character");
 assert.equal(tinyReadStructured.output_page?.page_limit, 1, "max_chars=0 must expose the effective clamped page limit");
 const oversizedReadStructured = await assertStructuredProcessResult("read_output", { process_id: startStructured.process_id, max_chars: 1_000_000, wait_ms: 0 });
-assert.ok(String(oversizedReadStructured.stdout || "").length <= 60_000, "oversized max_chars must clamp to the transport cap");
+assert.ok(String(oversizedReadStructured.stdout || "").length <= 100_000, "oversized max_chars must clamp to the transport cap");
 const killStructured = await assertStructuredProcessResult("kill_process", { process_id: startStructured.process_id });
 assert.equal(killStructured.already_exited, true, "kill_process structured regression probe should exercise already-exited variant");
 const contractPath = resolve("config/process-tool-contract.json");
@@ -108,7 +111,7 @@ const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "d773575bae5241eb3054c6783475eea68b5bd5829196dcff42e49a2d8bcd93c5";
+const acceptedContractSha256 = "89aa8f6a9204c854e256749631a44a07da4730c7990c780a7ac8506e4c3352ce";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 const expectedTools = [...baseExpectedTools].sort((a, b) => a.name.localeCompare(b.name));

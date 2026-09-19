@@ -62,7 +62,7 @@ function Assert-Candidate([string]$Root,[string]$Commit){
 }
 $commit=$ExpectedCommit.ToLowerInvariant()
 $short=$commit.Substring(0,7)
-$toolContract=@('start_process','read_output','kill_process','download_chatgpt_file')
+$toolContract=@('start_process','read_output','kill_process')
 if(-not $TaskName){ $TaskName="McpV4FrozenStable${Port}-${short}" }
 if(-not $DeploymentRoot){ $DeploymentRoot=Join-Path $env:LOCALAPPDATA ("ChatGPTMcpFrozen\\{0}" -f $short) }
 $DeploymentRoot=[IO.Path]::GetFullPath($DeploymentRoot)

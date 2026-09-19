@@ -32,7 +32,7 @@ async function unusedPort() {
   });
 }
 
-async function waitHealth(origin, expectedPort, timeoutMs = 15_000) {
+async function waitHealth(origin, expectedPort, timeoutMs = 15_000, stderr = () => "") {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -44,7 +44,7 @@ async function waitHealth(origin, expectedPort, timeoutMs = 15_000) {
     } catch {}
     await sleep(100);
   }
-  throw new Error(`health timeout: ${origin}`);
+  throw new Error(`health timeout: ${origin}; stderr=${stderr().slice(-4000)}`);
 }
 
 function startClone(id, port, extraEnv = {}) {
@@ -170,7 +170,10 @@ try {
   const portB = await unusedPort();
   cloneA = startClone("clone-a", portA, { MCP_FORCE_CONNECTION_CLOSE: "1" });
   cloneB = startClone("clone-b", portB);
-  await Promise.all([waitHealth(cloneA.origin, portA), waitHealth(cloneB.origin, portB)]);
+  await Promise.all([
+    waitHealth(cloneA.origin, portA).catch((error) => { throw new Error(`${error.message}; clone-a exit=${cloneA.child.exitCode}; stderr=${cloneA.stderr().slice(-4000)}`); }),
+    waitHealth(cloneB.origin, portB).catch((error) => { throw new Error(`${error.message}; clone-b exit=${cloneB.child.exitCode}; stderr=${cloneB.stderr().slice(-4000)}`); }),
+  ]);
   const aHealth = await jsonFetch(`${cloneA.origin}/health`);
   assert.equal(aHealth.response.headers.get("connection"), "close", "opt-in clone must close each HTTP response connection");
   assert.equal(aHealth.body.force_connection_close, true);
@@ -192,7 +195,7 @@ try {
     connect(cloneB, "clone-b-client-1"),
     connect(cloneB, "clone-b-client-2"),
   ]);
-  const expected = ["download_chatgpt_file", "kill_process", "read_output", "start_process"];
+  const expected = ["kill_process", "read_output", "start_process"];
   for (const client of [a1, a2, b1, b2]) {
     const tools = await client.tools();
     const names = tools.map((tool) => tool.name).sort();
@@ -201,17 +204,10 @@ try {
     assert.deepEqual(byName.start_process.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: true });
     assert.deepEqual(byName.read_output.annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: false });
     assert.deepEqual(byName.kill_process.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: false });
-    const expectedInvocationUi = {
-      start_process: { title: "Run command", invoking: "Running command…", invoked: "Command returned" },
-      read_output: { title: "Check command", invoking: "Checking command…", invoked: "Command checked" },
-      kill_process: { title: "Stop process", invoking: "Stopping process…", invoked: "Process stop checked" },
-      download_chatgpt_file: { title: "Save ChatGPT file", invoking: "Saving file…", invoked: "File saved" },
-    };
-    for (const [name, expectedUi] of Object.entries(expectedInvocationUi)) {
-      assert.equal(byName[name].title, expectedUi.title, `${name} should expose a concise user-facing title`);
-      assert.equal(byName[name]._meta?.["openai/toolInvocation/invoking"], expectedUi.invoking, `${name} should expose concise invoking status`);
-      assert.equal(byName[name]._meta?.["openai/toolInvocation/invoked"], expectedUi.invoked, `${name} should expose concise invoked status`);
-      assert.ok(expectedUi.invoking.length <= 64 && expectedUi.invoked.length <= 64, `${name} invocation statuses must stay within Apps SDK limits`);
+    for (const name of ["start_process", "read_output", "kill_process"]) {
+      assert.equal(byName[name].title, undefined, `${name} must not advertise client UI title metadata`);
+      assert.equal(byName[name]._meta?.["openai/toolInvocation/invoking"], undefined, `${name} must not advertise invoking status metadata`);
+      assert.equal(byName[name]._meta?.["openai/toolInvocation/invoked"], undefined, `${name} must not advertise invoked status metadata`);
     }
     for (const name of ["start_process", "read_output"]) {
       assert.equal(byName[name]?._meta?.["openai/outputTemplate"], undefined, `${name} must not mount an app/widget template`);
@@ -236,7 +232,7 @@ try {
   }
   assert.equal(new Set(bootstrapReads.map((snapshot) => snapshot.stdout)).size, 1, "materialized aliases must share one producer snapshot");
 
-  const started = await a1.call("start_process", { command: "Write-Output 'CLONE_MULTI_CLIENT'; Start-Sleep -Milliseconds 600; Write-Output 'DONE'" });
+  const started = await a1.call("start_process", { executable: process.execPath, args: ["-e", "console.log(\"CLONE_MULTI_CLIENT\");console.log(\"DONE\")"] });
   assert.ok(started.process_id);
   let seenByOtherClient;
   for (let i = 0; i < 10; i++) {
@@ -261,7 +257,8 @@ try {
   assert.match(handedOff.stdout, /DONE/);
 
   const liveStarted = await a1.call("start_process", {
-    command: "Start-Sleep -Milliseconds 300; Write-Output 'CLONE_LIVE_HANDOFF'; Start-Sleep -Seconds 10",
+    executable: process.execPath,
+    args: ["-e", "require(\"node:net\").createServer(()=>{}).listen(0,()=>console.log(\"CLONE_LIVE_HANDOFF\"))"],
   });
   let liveSeenFromB;
   for (let i = 0; i < 10; i++) {

@@ -7,10 +7,10 @@ import { currentTelemetryContext, emitTelemetry, withTelemetryContext, type Tele
 import { planCommandExecution, planStructuredExecution, planStructuredScript, type CommandExecutionMode, type CommandExecutionPlan, type StructuredScriptLanguage } from "./command-execution-plan.js";
 
 const MAX_CAPTURE_CHARS = 100_000;
-// The read_output contract allows up to 60,000 characters per stream/page.
+// The read_output contract allows up to 100,000 characters per stream/page.
 // Completed output still pages losslessly through the same process_id when retained output exceeds that limit.
-const MAX_READ_CHARS = 60_000;
-export const MAX_READ_WAIT_MS = 120_000;
+const MAX_READ_CHARS = 100_000;
+export const MAX_READ_WAIT_MS = 240_000;
 export const ADAPTIVE_READ_WAIT_MS = [2_000, 5_000, 10_000, 30_000, 60_000] as const;
 
 export function boundReadWaitMs(waitMs: number): number {
@@ -2740,7 +2740,7 @@ export class ProcessManager {
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
     const started = this.start(command, cwd, callerId, activityTarget, actionClass);
-    const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
+    const boundedWaitMs = Math.max(0, Math.min(waitMs, 240_000));
     emitTelemetry({
       event: "process_wait_requested",
       action: "start",
@@ -2834,7 +2834,7 @@ export class ProcessManager {
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
     const started = this.startScript(language, script, cwd, callerId, activityTarget, actionClass, environment);
-    const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
+    const boundedWaitMs = Math.max(0, Math.min(waitMs, 240_000));
     emitTelemetry({ event: "process_wait_requested", action: "start_script", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
@@ -2856,7 +2856,7 @@ export class ProcessManager {
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
     const started = this.startStructured(executable, args, cwd, callerId, activityTarget, actionClass, stdin, environment);
-    const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
+    const boundedWaitMs = Math.max(0, Math.min(waitMs, 240_000));
     emitTelemetry({ event: "process_wait_requested", action: "start_structured", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);

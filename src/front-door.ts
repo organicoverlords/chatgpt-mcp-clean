@@ -230,7 +230,7 @@ async function proxyRequest(request: IncomingMessage, response: ServerResponse, 
       finish();
     });
   });
-  upstream.setTimeout(35_000, () => upstream.destroy(new Error("backend request timeout")));
+  upstream.setTimeout(270_000, () => upstream.destroy(new Error("backend request timeout")));
   upstream.on("error", (error) => {
     if (requestId) frontDoorLog("front_backend_error", { request_id: requestId, backend_port: target.port, error: error.message });
     if (!response.destroyed && !response.headersSent) {
@@ -314,8 +314,8 @@ server.listen(PORT, HOST, () => {
   console.error(`shell-mcp front door listening on http://${HOST}:${PORT}; backend=127.0.0.1:${target.port} generation=${target.generation}`);
 });
 server.keepAliveTimeout = 0;
-server.headersTimeout = 40_000;
-server.requestTimeout = 35_000;
+server.headersTimeout = 275_000;
+server.requestTimeout = 270_000;
 server.timeout = 0;
 const stop = () => {
   server.close(() => {

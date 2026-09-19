@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { ADAPTIVE_READ_WAIT_MS, MAX_READ_WAIT_MS, ProcessManager, adaptiveReadWaitMs, boundReadWaitMs } from "../dist/lib/process-manager.js";
 
 
-assert.equal(MAX_READ_WAIT_MS, 120_000);
+assert.equal(MAX_READ_WAIT_MS, 240_000);
 assert.deepEqual(ADAPTIVE_READ_WAIT_MS, [2_000, 5_000, 10_000, 30_000, 60_000]);
-assert.equal(boundReadWaitMs(999_999), 120_000);
+assert.equal(boundReadWaitMs(999_999), 240_000);
 assert.equal(boundReadWaitMs(-1), 0);
 assert.equal(adaptiveReadWaitMs(0), 2_000);
 assert.equal(adaptiveReadWaitMs(3), 30_000);
@@ -14,7 +14,7 @@ assert.equal(adaptiveReadWaitMs(99), 60_000);
 const manager = new ProcessManager();
 let started;
 try {
-  started = manager.start("Start-Sleep -Milliseconds 4500; Write-Output 'ADAPTIVE_WAKE'; Start-Sleep -Seconds 5", undefined, "caller_adaptive_read_test");
+  started = manager.startStructured(process.execPath, ["-e", "setTimeout(()=>{console.log(\"ADAPTIVE_WAKE\");setTimeout(()=>{},5000)},4500)"], undefined, "caller_adaptive_read_test");
   const firstAt = Date.now();
   const first = await manager.readOutput(started.process_id, 6_000);
   const firstMs = Date.now() - firstAt;
