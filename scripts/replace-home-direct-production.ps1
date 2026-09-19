@@ -179,7 +179,10 @@ function Load-Caddy([string]$Config){
         $adaptedText=([string]::Join("`n",[string[]]$adapted)+"`n")
         [IO.File]::WriteAllText($json,$adaptedText,(New-Object Text.UTF8Encoding($false)))
         & curl.exe -fsS --max-time 5 -H 'Content-Type: application/json' --data-binary ("@$json") 'http://127.0.0.1:2019/load' | Out-Null
-        if($LASTEXITCODE -ne 0){ throw 'Caddy admin load failed' }
+        $curlExit=$LASTEXITCODE
+        # Caddy may apply a config and restart the admin handler before curl receives a response.
+        # Treat only curl timeout (28) as indeterminate; exact route probes below decide success.
+        if($curlExit -ne 0 -and $curlExit -ne 28){ throw "Caddy admin load failed: curl_exit=$curlExit" }
     } finally { Remove-Item -LiteralPath $json -Force -ErrorAction SilentlyContinue }
 }
 function Wait-CandidateLocalRoute([string]$HostName,[int]$ExpectedPort,[string]$ExpectedGeneration){
