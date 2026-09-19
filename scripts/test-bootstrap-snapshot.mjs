@@ -77,7 +77,7 @@ try {
     writeBootstrap(invalid);
     await assert.rejects(readBootstrapSnapshot(), /incomplete or invalid/);
   }
-  writeBootstrap({ schema: "bootstrap.v2", bootstrap_end: { status: "COMPLETE", schema: "bootstrap.v2" }, padding: "x".repeat(58_000) });
+  writeBootstrap({ schema: "bootstrap.v2", bootstrap_end: { status: "COMPLETE", schema: "bootstrap.v2" }, padding: "x".repeat(90_000) });
   const v2Pieces = [];
   let v2Page = await readBootstrapSnapshot(60_000, "bootstrap", "v2-large-caller");
   while (true) {
@@ -88,8 +88,8 @@ try {
   const v2Payload = JSON.parse(v2Pieces.join(""));
   assert.equal(v2Payload.schema, "bootstrap.v2");
   assert.equal(v2Payload.bootstrap_end.schema, "bootstrap.v2");
-  writeFileSync(process.env.MCP_BOOTSTRAP_SNAPSHOT_PATH, " ".repeat(64 * 1024 + 1));
-  await assert.rejects(readBootstrapSnapshot(60_000, "bootstrap", "oversize-v2-caller"), /64 KiB/);
+  writeFileSync(process.env.MCP_BOOTSTRAP_SNAPSHOT_PATH, " ".repeat(96 * 1024 + 1));
+  await assert.rejects(readBootstrapSnapshot(60_000, "bootstrap", "oversize-v2-caller"), /96 KiB/);
   writeBootstrap();
   const latencies = [];
   for (let batch = 0; batch < 16; batch++) {
