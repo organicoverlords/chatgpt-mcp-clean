@@ -73,6 +73,7 @@ async function jsonFetch(url, options = {}) {
 }
 function rpcPayload(result) {
   assert.ok(result.body?.result, result.text);
+  if (result.body.result.structuredContent) return result.body.result.structuredContent;
   const text = result.body.result.content?.find((item) => item.type === "text")?.text;
   return text ? JSON.parse(text) : result.body.result;
 }
@@ -142,7 +143,7 @@ try {
     assert.deepEqual(beforeByName[name]?.annotations, annotations, `${name} safety annotations missing before replacement`);
   }
   assert.equal(before.response.headers.has("x-shell-mcp-front-door"), false, "front door must not inject worker-visible response metadata");
-  const started = await call("start_process", { command: "Write-Output 'BLUE_PROCESS'; Start-Sleep -Seconds 120", wait_ms: 2_500 });
+  const started = await call("start_process", { command: "Write-Output 'BLUE_PROCESS'; [System.Threading.ManualResetEventSlim]::new().Wait()", wait_ms: 2_500 });
   assert.ok(started.process_id && started.running);
 
   const healthFailures = [];
