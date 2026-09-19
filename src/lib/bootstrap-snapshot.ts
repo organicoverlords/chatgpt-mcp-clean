@@ -4,6 +4,8 @@ import { join } from "node:path";
 export const BOOTSTRAP_PROCESS_ALIAS = "bootstrap";
 const LEGACY_BOOTSTRAP_PROCESS_ID = "231b7e74-4cc8-43d0-9702-fd6dfa2215b3";
 const SNAPSHOT_PAGE_MAX_CHARS = 24_000;
+const BOOTSTRAP_SNAPSHOT_MAX_BYTES = 96 * 1024;
+const TIMELINE_SNAPSHOT_MAX_BYTES = 64 * 1024;
 const SNAPSHOT_PAGE_SESSION_TTL_MS = 30 * 60 * 1000;
 const SNAPSHOT_PAGE_MAX_SESSIONS = 128;
 
@@ -147,21 +149,23 @@ export async function readBootstrapSnapshot(
   // Bounded asynchronous file read: no subprocess, network probe, or refresh on reads.
   const file = await open(snapshotPath(timeline), "r");
   try {
-    const buffer = Buffer.alloc(64 * 1024 + 1);
+    const maxSnapshotBytes = timeline ? TIMELINE_SNAPSHOT_MAX_BYTES : BOOTSTRAP_SNAPSHOT_MAX_BYTES;
+    const buffer = Buffer.alloc(maxSnapshotBytes + 1);
     let bytes = 0;
     while (bytes < buffer.length) {
       const read = await file.read(buffer, bytes, buffer.length - bytes, null);
       if (!read.bytesRead) break;
       bytes += read.bytesRead;
     }
-    if (bytes > 64 * 1024) throw new Error("Snapshot exceeds 64 KiB producer limit");
+    if (bytes > maxSnapshotBytes) throw new Error(`Snapshot exceeds ${maxSnapshotBytes / 1024} KiB producer limit`);
     payload = JSON.parse(buffer.subarray(0, bytes).toString("utf8").replace(/^\uFEFF/, ""));
   } finally { await file.close(); }
   const generatedAt = Date.parse(payload?.generated_at);
   const bootstrapEnd = timeline ? undefined : bootstrapRoot(payload, "bootstrap_end");
-  if (payload?.schema !== (timeline ? "vault.timeline.bootstrap.v1" : "bootstrap.v1")
+  const acceptedBootstrapSchema = payload?.schema === "bootstrap.v1" || payload?.schema === "bootstrap.v2";
+  if ((timeline ? payload?.schema !== "vault.timeline.bootstrap.v1" : !acceptedBootstrapSchema)
       || !Number.isFinite(generatedAt) || generatedAt > Date.now() + 5_000
-      || (!timeline && (!isRecord(bootstrapEnd) || bootstrapEnd.status !== "COMPLETE" || bootstrapEnd.schema !== "bootstrap.v1"))) {
+      || (!timeline && (!isRecord(bootstrapEnd) || bootstrapEnd.status !== "COMPLETE" || bootstrapEnd.schema !== payload.schema))) {
     throw new Error("Snapshot producer returned incomplete or invalid payload");
   }
   const ageSeconds = Math.max(0, (Date.now() - generatedAt) / 1000);
