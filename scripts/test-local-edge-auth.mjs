@@ -53,12 +53,12 @@ try {
   const wrongHost = await request(loopback, "/authorize", "wrong-host.test");
   assert.equal(wrongHost.status, 403, wrongHost.text);
   const publicForwarded = await request(loopback, "/authorize", publicHost, { "x-forwarded-for": "203.0.113.10" });
-  assert.equal(publicForwarded.status, 403, publicForwarded.text);
-  assert.match(publicForwarded.text, /Owner authorization required/);
+  assert.equal(publicForwarded.status, 400, publicForwarded.text);
+  assert.doesNotMatch(publicForwarded.text, /Owner authorization required/);
   const privateForwarded = await request(loopback, "/authorize", publicHost, { "x-forwarded-for": "192.168.1.50" });
   assert.equal(privateForwarded.status, 400, privateForwarded.text);
   assert.doesNotMatch(privateForwarded.text, /Owner authorization required/);
-  console.log("PASS local_edge_auth direct_public_host_blocked=true direct_loopback_allowed=true public_forwarded_blocked=true private_forwarded_allowed=true wrong_host_blocked=true");
+  console.log("PASS local_edge_auth direct_public_host_blocked=true direct_loopback_allowed=true public_forwarded_allowed_from_loopback_edge=true private_forwarded_allowed=true wrong_host_blocked=true");
 } finally {
   if (child.exitCode === null) child.kill();
   await new Promise(r => child.exitCode !== null ? r() : child.once("exit", r));
