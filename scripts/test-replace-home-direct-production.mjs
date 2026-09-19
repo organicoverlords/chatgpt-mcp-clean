@@ -42,6 +42,22 @@ try {
   assert.notEqual(peerMismatch.status, 0);
   assert.match(`${peerMismatch.stdout}\n${peerMismatch.stderr}`, /ExpectedCurrentPort disagrees with target host route/);
 
+  const policyCaddyPath = join(temporary, "Caddyfile-policy");
+  writeFileSync(policyCaddyPath, `mcpx.example.test {\n\t@local_authorize {\n\t\tpath /authorize\n\t\tremote_ip private_ranges\n\t}\n\thandle @local_authorize {\n\t\treverse_proxy 127.0.0.1:${topologyPort}\n\t}\n\t@authorize path /authorize\n\trespond @authorize "Owner authorization required" 403\n\thandle {\n\t\treverse_proxy 127.0.0.1:${topologyPort}\n\t}\n}\n`);
+  const policy = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", wrapper,
+    "-CandidatePort", String(topologyPort), "-CandidateGeneration", "candidate-test", "-Actor", "test", "-BusyScope", "test-scope",
+    "-CaddyConfigPath", policyCaddyPath, "-StableHost", "mcpx.example.test", "-CurrentPortFromTargetHost", "-PolicyOnly", "-Plan",
+    "-OwnerBasicAuthUsername", "owner", "-OwnerBasicAuthHash", "$2a$14$g5Oqz4KW7EF.DinxCTcoIeaJfw3B.N2rs4nAwj1Ib21XHQyLV4r.W"], { encoding: "utf8", windowsHide: true });
+  assert.equal(policy.status, 0, `${policy.stdout}\n${policy.stderr}`);
+  const policyPlan = JSON.parse(policy.stdout.trim());
+  assert.equal(policyPlan.operation, "POLICY_ONLY");
+  assert.equal(policyPlan.old_port, topologyPort);
+  assert.equal(policyPlan.candidate_port, topologyPort);
+  assert.equal((policyPlan.candidate_config.match(new RegExp(`reverse_proxy 127\\.0\\.0\\.1:${topologyPort}`, "g")) || []).length, 2);
+  assert.match(policyPlan.candidate_config, /basic_auth/);
+  assert.match(policyPlan.candidate_config, /header_up X-Forwarded-For 127\.0\.0\.1/);
+  assert.doesNotMatch(policyPlan.candidate_config, /remote_ip private_ranges/);
+
   const isolatedHost = "supertest9000.91-159-12-133.sslip.io";
   const createPlan = run(["-StableHost", isolatedHost, "-PublicOrigin", `https://${isolatedHost}`, "-CreateTargetHost", "-Plan"], peerPort + 5);
   assert.equal(createPlan.status, 0, `${createPlan.stdout}\n${createPlan.stderr}`);
