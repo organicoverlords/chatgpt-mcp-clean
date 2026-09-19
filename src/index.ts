@@ -31,12 +31,16 @@ const runtimeIdentityRaw = {
   distSha256: (process.env.MCP_RUNTIME_DIST_SHA256 || "").trim().toLowerCase(),
   sourceDirty: (process.env.MCP_RUNTIME_SOURCE_DIRTY || "").trim(),
 };
-const runtimeIdentityValueCount = Object.values(runtimeIdentityRaw).filter(Boolean).length;
-if (runtimeIdentityValueCount !== 0 && runtimeIdentityValueCount !== 4) throw new Error("MCP runtime identity must be supplied completely or omitted");
-if (runtimeIdentityRaw.instanceId && !/^[A-Za-z0-9._-]+$/.test(runtimeIdentityRaw.instanceId)) throw new Error("MCP_RUNTIME_INSTANCE_ID is invalid");
-if (runtimeIdentityRaw.sourceCommit && !/^[0-9a-f]{40}$/.test(runtimeIdentityRaw.sourceCommit)) throw new Error("MCP_RUNTIME_SOURCE_COMMIT is invalid");
-if (runtimeIdentityRaw.distSha256 && !/^[0-9a-f]{64}$/.test(runtimeIdentityRaw.distSha256)) throw new Error("MCP_RUNTIME_DIST_SHA256 is invalid");
-if (runtimeIdentityRaw.sourceDirty && !/^[01]$/.test(runtimeIdentityRaw.sourceDirty)) throw new Error("MCP_RUNTIME_SOURCE_DIRTY must be 0 or 1");
+function validateRuntimeIdentity(raw: typeof runtimeIdentityRaw): number {
+  const valueCount = Object.values(raw).filter(Boolean).length;
+  if (valueCount !== 0 && valueCount !== 4) throw new Error("MCP runtime identity must be supplied completely or omitted");
+  if (raw.instanceId && !/^[A-Za-z0-9._-]+$/.test(raw.instanceId)) throw new Error("MCP_RUNTIME_INSTANCE_ID is invalid");
+  if (raw.sourceCommit && !/^[0-9a-f]{40}$/.test(raw.sourceCommit)) throw new Error("MCP_RUNTIME_SOURCE_COMMIT is invalid");
+  if (raw.distSha256 && !/^[0-9a-f]{64}$/.test(raw.distSha256)) throw new Error("MCP_RUNTIME_DIST_SHA256 is invalid");
+  if (raw.sourceDirty && !/^[01]$/.test(raw.sourceDirty)) throw new Error("MCP_RUNTIME_SOURCE_DIRTY must be 0 or 1");
+  return valueCount;
+}
+const runtimeIdentityValueCount = validateRuntimeIdentity(runtimeIdentityRaw);
 const runtimeIdentity = {
   launcher_bound: runtimeIdentityValueCount === 4,
   instance_id: runtimeIdentityRaw.instanceId || null,
