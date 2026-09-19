@@ -245,10 +245,10 @@ app.use("/authorize", (req, res, next) => {
     }
   } else {
     const directLocalAuthorizationHosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, frontDoorHost]);
-    const directLocal = directLocalAuthorizationHosts.has(host) && isPrivateOrLocalClientAddress(req.socket.remoteAddress);
+    const directLocal = directLocalAuthorizationHosts.has(host) && isPrivateOrLocalClientAddress(req.ip);
     const forwardedPrivate = Boolean(req.header("x-forwarded-for"))
       && authorizationHost === host
-      && isPrivateOrLocalClientAddress(req.socket.remoteAddress);
+      && isPrivateOrLocalClientAddress(req.ip);
     if (!directLocal && !forwardedPrivate) {
       res.status(403).send("Owner authorization required");
       return;
