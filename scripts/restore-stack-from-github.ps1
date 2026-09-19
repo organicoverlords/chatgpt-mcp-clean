@@ -138,6 +138,14 @@ $planResult = [ordered]@{
     functional_restore = @('MCP process profile','local Caddy','BusyCoordinator','agent rules/contracts','PlanOnly','autostart')
     user_context_restore = $(if ($RestoreUserContext) { @('Vault checkout','durable user directives/operating contracts','Stack Atlas entrypoints','Vault checkout sync','bootstrap snapshot tasks') } else { @() })
     redundant_bindings = 'second-stage only; read Vault mcp-current-topology.json and never hard-code historical ports/commits'
+    completion_gate = @(
+        'prove live route/runtime/task/OAuth/receipt identity and independent rollback',
+        'prove runtime priority hardening and lossless COMPLETE bootstrap paging on restored serving bindings',
+        'preserve old backends until running-process continuity is proved through the correct receipt/control directory',
+        'reconcile mcp-current-topology.json, mcp-recovery-state.json, Stack Atlas/Vault and current install/restore/update instructions',
+        'audit current docs/contracts for stale serving ports, commits, task names and broad Busy scopes; leave historical evidence unchanged'
+    )
+    reconciliation_required = $true
 }
 if ($Plan) {
     $planResult | ConvertTo-Json -Depth 7
@@ -238,5 +246,12 @@ $result = [ordered]@{
     oauth_policy = 'No OAuth/token backup was copied, restored, deleted, or merged. If authorization state is missing, reconnect/authorize the ChatGPT connector after the endpoint is healthy.'
     current_topology_policy = 'If Vault is restored, mcp-current-topology.json is current serving authority; mcp-recovery-state.json is recovery metadata only.'
     control_recovery = 'One healthy process binding is enough to regain control. Restore redundant/frozen bindings only as a second stage from current topology and current source with existing production gates.'
+    reconciliation_required = $true
+    completion_gate = @(
+        'prove live route/runtime/task/OAuth/receipt identity and independent rollback',
+        'prove runtime priority hardening and lossless COMPLETE bootstrap paging on restored serving bindings',
+        'preserve old backends until running-process continuity is proved through the correct receipt/control directory',
+        'reconcile topology, recovery, Atlas/Vault and current install/restore/update guidance before declaring restore complete'
+    )
 }
 $result | ConvertTo-Json -Depth 8

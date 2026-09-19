@@ -24,6 +24,9 @@ for (const required of [
   "preserved without reset/clean",
   "No OAuth/token backup was copied, restored, deleted, or merged",
   "One healthy process binding is enough to regain control",
+  "reconciliation_required = $true",
+  "lossless COMPLETE bootstrap paging",
+  "correct receipt/control directory",
 ]) assert.ok(script.includes(required), `missing restore invariant: ${required}`);
 
 for (const forbidden of [
@@ -53,6 +56,7 @@ for (const required of [
   "organicoverlords/regression-research",
   "chatgpt/home-direct-stable-runtime",
   "prepare-frozen-home-direct.ps1",
+  "Mandatory completion gate after MCP install",
 ]) assert.ok(readme.includes(required), `README recovery contract missing: ${required}`);
 
 console.log("PASS restore_stack_from_github plan_safe=true dirty_preserved=true oauth_preserved=true user_context=true github_only_documented=true redundant_second_stage=true");
