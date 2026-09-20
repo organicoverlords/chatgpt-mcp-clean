@@ -710,11 +710,6 @@
           ],
           "description": "Runtime for script."
         },
-        "command": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Legacy shell-command compatibility for shell composition."
-        },
         "working_directory": {
           "type": "string"
         },

@@ -143,7 +143,7 @@ try {
     assert.deepEqual(beforeByName[name]?.annotations, annotations, `${name} safety annotations missing before replacement`);
   }
   assert.equal(before.response.headers.has("x-shell-mcp-front-door"), false, "front door must not inject worker-visible response metadata");
-  const started = await call("start_process", { command: "Write-Output 'BLUE_PROCESS'; [System.Threading.ManualResetEventSlim]::new().Wait()", wait_ms: 2_500 });
+  const started = await call("start_process", { language: "powershell", script: "Write-Output 'BLUE_PROCESS'; [System.Threading.ManualResetEventSlim]::new().Wait()", wait_ms: 2_500 });
   assert.ok(started.process_id && started.running);
 
   const healthFailures = [];

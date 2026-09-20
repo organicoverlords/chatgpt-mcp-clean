@@ -169,7 +169,7 @@ try {
     }
   })();
 
-  const started = await toolCall(origin, "start_process", { command: "test" });
+  const started = await toolCall(origin, "start_process", { executable: process.execPath, args: ["--version"] });
   assert.equal(started.status, 200);
   assert.equal(JSON.parse(JSON.parse(await started.text()).result.content[0].text).backend, "blue");
   const requestEvidence = await waitForRequestLog((entries) => entries.some((entry) => entry.event === "front_backend_dispatch"));

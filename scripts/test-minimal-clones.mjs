@@ -278,7 +278,7 @@ try {
   await new Promise((resolveExit) => cloneA.child.once("exit", resolveExit));
   const bHealth = await waitHealth(cloneB.origin, portB);
   assert.equal(bHealth.status, "ok");
-  const afterAFailure = await b2.call("start_process", { command: "Write-Output 'B_SURVIVED_A'" });
+  const afterAFailure = await b2.call("start_process", { language: "powershell", script: "Write-Output 'B_SURVIVED_A'" });
   let bOutput;
   for (let i = 0; i < 30; i++) {
     await sleep(50);
