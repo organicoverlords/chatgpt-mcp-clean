@@ -26,6 +26,9 @@ function resolutionEntries(result) { return mediaEntries(result).filter((entry) 
 const directCode = `console.log('CHATGPT_ARTIFACT='+${JSON.stringify(pngA)})`;
 const direct = await server._registeredTools.start_process.handler({ executable: process.execPath, args: ["-e", directCode], wait_ms: 2000 }, {});
 assert.equal(imageEntries(direct).length, 1);
+assert.equal(mediaEntries(direct)[0]?.type, "text", "image-bearing tool results must lead with compact text compatibility metadata");
+assert.equal(mediaEntries(direct)[0]?.text, "resolution: 1x1");
+assert.equal(mediaEntries(direct)[1]?.type, "image", "original image must immediately follow the compatibility text block");
 assert.equal(imageEntries(direct)[0].mimeType, "image/png");
 assert.deepEqual(Buffer.from(imageEntries(direct)[0].data, "base64"), PNG_1X1, "inline image must be the original bytes");
 assert.deepEqual(resolutionEntries(direct).map((entry) => entry.text), ["resolution: 1x1"]);
