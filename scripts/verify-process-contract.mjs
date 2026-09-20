@@ -48,10 +48,8 @@ for (const forbidden of ["view_image", "upload_local_file", "read_local_file", "
 }
 const startInputSchema = server._registeredTools.start_process?.inputSchema;
 assert.ok(startInputSchema, "start_process input schema missing");
-assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output LEGACY" })).success, true, "legacy command input must remain valid");
+assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output LEGACY" })).success, false, "legacy command input must be rejected");
 assert.equal((await startInputSchema.safeParseAsync({ executable: "node", args: ["--version"], stdin: "" })).success, true, "structured executable+args+stdin input must be valid");
-assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output BAD", executable: "node" })).success, false, "command and executable modes must be mutually exclusive");
-assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output BAD", stdin: "x" })).success, false, "legacy command mode must reject structured stdin");
 
 const readInputSchema = server._registeredTools.read_output?.inputSchema;
 assert.ok(readInputSchema, "read_output input schema missing");
@@ -78,7 +76,7 @@ async function assertStructuredProcessResult(name, args) {
   return result.structuredContent;
 }
 
-const startStructured = await assertStructuredProcessResult("start_process", { command: "Write-Output process-contract-structured", wait_ms: 10_000 });
+const startStructured = await assertStructuredProcessResult("start_process", { language: "powershell", script: "Write-Output process-contract-structured", wait_ms: 10_000 });
 assert.match(startStructured.stdout || "", /process-contract-structured/, "start_process structured output should preserve stdout");
 const trickyArg = String.raw`space ; $dollar \"quote\" ` + "`tick";
 const argvStructured = await assertStructuredProcessResult("start_process", {
@@ -111,7 +109,7 @@ const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "89aa8f6a9204c854e256749631a44a07da4730c7990c780a7ac8506e4c3352ce";
+const acceptedContractSha256 = "716c18f9c120b241fc58d0e301f6454069e16bc19db6f954050f8c54b62abdc1";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 const expectedTools = [...baseExpectedTools].sort((a, b) => a.name.localeCompare(b.name));

@@ -38,7 +38,6 @@ const startProcessCommonShape = {
   activity_target: activityTargetSchema.optional(),
   action_class: actionClassSchema.optional(),
 };
-const legacyStartProcessCommandVisible = (process.env.MCP_START_PROCESS_LEGACY_COMMAND_VISIBLE || "1").trim() !== "0";
 const startProcessInputSchema = z.object({
   executable: z.string().min(1).describe("Program name or absolute executable path; paired with args and optional stdin; no shell re-parsing.").optional(),
   args: z.array(z.string()).max(512).describe("Argument vector passed directly to executable without shell re-parsing.").optional(),
@@ -46,19 +45,14 @@ const startProcessInputSchema = z.object({
   env: processEnvironmentSchema.describe("Child-process environment overrides for executable or script input.").optional(),
   script: z.string().min(1).max(1_000_000).describe("Multiline source text for the selected runtime; transported through stdin.").optional(),
   language: z.enum(["powershell", "python", "node", "bash"]).describe("Runtime for script.").optional(),
-  ...(legacyStartProcessCommandVisible ? {
-    command: z.string().min(1).describe("Legacy shell-command compatibility for shell composition.").optional(),
-  } : {}),
   ...startProcessCommonShape,
 }).strict().superRefine((value, ctx) => {
-  const input = value as typeof value & { command?: string };
-  const legacy = input.command !== undefined;
+  const input = value;
   const structured = input.executable !== undefined;
   const scripted = input.script !== undefined;
-  if (Number(legacy) + Number(structured) + Number(scripted) !== 1) ctx.addIssue({ code: "custom", message: legacyStartProcessCommandVisible ? "provide exactly one of command, executable, or script" : "provide exactly one of executable or script" });
+  if (Number(structured) + Number(scripted) !== 1) ctx.addIssue({ code: "custom", message: "provide exactly one of executable or script" });
   if (!structured && input.args !== undefined) ctx.addIssue({ code: "custom", path: ["args"], message: "args is only valid with executable" });
   if (!structured && input.stdin !== undefined) ctx.addIssue({ code: "custom", path: ["stdin"], message: "stdin is only valid with executable" });
-  if (legacy && input.env !== undefined) ctx.addIssue({ code: "custom", path: ["env"], message: "env is only valid with executable or script" });
   if (scripted !== (input.language !== undefined)) ctx.addIssue({ code: "custom", path: ["language"], message: "language is required exactly when script is provided" });
 });
 
@@ -251,13 +245,10 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       outputSchema: processOutputSchema,
     },
     async (input) => {
-      const typedInput = input as typeof input & { command?: string };
-      const { working_directory, wait_ms, activity_target, action_class } = typedInput;
-      const value = typedInput.command !== undefined
-        ? await processManager.startWithWait(typedInput.command, working_directory, callerId, wait_ms ?? 750, activity_target, action_class)
-        : typedInput.executable !== undefined
-          ? await processManager.startStructuredWithWait(typedInput.executable, typedInput.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, typedInput.stdin, typedInput.env)
-          : await processManager.startScriptWithWait(typedInput.language!, typedInput.script!, working_directory, callerId, wait_ms ?? 750, activity_target, action_class, typedInput.env);
+      const { working_directory, wait_ms, activity_target, action_class } = input;
+      const value = input.executable !== undefined
+        ? await processManager.startStructuredWithWait(input.executable, input.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, input.stdin, input.env)
+        : await processManager.startScriptWithWait(input.language!, input.script!, working_directory, callerId, wait_ms ?? 750, activity_target, action_class, input.env);
       return structuredTextResult(value, callerId, servingIdentity);
     },
   );

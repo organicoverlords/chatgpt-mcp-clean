@@ -199,20 +199,11 @@ assert.ok(startProcessTool.outputSchema?.properties?.failure_diagnostic, "start_
 assert.ok(startProcessTool.inputSchema.properties.script, "start_process must advertise structured script input over MCP transport");
 assert.deepEqual(startProcessTool.inputSchema.properties.language.enum, ["powershell", "python", "node", "bash"]);
 const startProcessPropertyOrder = Object.keys(startProcessTool.inputSchema.properties);
-const legacyCommandExpected = (process.env.MCP_START_PROCESS_LEGACY_COMMAND_VISIBLE || "1").trim() !== "0";
-assert.match(startProcessTool.inputSchema.properties.executable.description || "", /no shell re-parsing/i);
-assert.match(startProcessTool.inputSchema.properties.script.description || "", /transported through stdin/i);
-if (legacyCommandExpected) {
-  assert.ok(startProcessPropertyOrder.indexOf("executable") < startProcessPropertyOrder.indexOf("command"), JSON.stringify(startProcessPropertyOrder));
-  assert.ok(startProcessPropertyOrder.indexOf("script") < startProcessPropertyOrder.indexOf("command"), JSON.stringify(startProcessPropertyOrder));
-  assert.match(startProcessTool.inputSchema.properties.command.description || "", /Legacy shell-command compatibility/i);
-} else {
-  assert.equal(startProcessTool.inputSchema.properties.command, undefined, JSON.stringify(startProcessPropertyOrder));
-  assert.doesNotMatch(startProcessTool.description || "", /legacy command/i);
-  const hiddenLegacyAttempt = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: "start_process", arguments: { command: "Write-Output LEGACY_COMMAND_MUST_NOT_RUN" } } });
-  assert.equal(hiddenLegacyAttempt.body?.result?.isError, true, hiddenLegacyAttempt.text);
-  assert.match(hiddenLegacyAttempt.body.result.content?.[0]?.text || "", /command|Unrecognized key|validation/i);
-}
+assert.equal(startProcessTool.inputSchema.properties.command, undefined, JSON.stringify(startProcessPropertyOrder));
+assert.doesNotMatch(startProcessTool.description || "", /legacy command/i);
+const hiddenLegacyAttempt = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: "start_process", arguments: { command: "Write-Output LEGACY_COMMAND_MUST_NOT_RUN" } } });
+assert.equal(hiddenLegacyAttempt.body?.result?.isError, true, hiddenLegacyAttempt.text);
+assert.match(hiddenLegacyAttempt.body.result.content?.[0]?.text || "", /command|Unrecognized key|validation/i);
 const lossyCmdShimTransport = await mcpPost(sessionA, {
   jsonrpc: "2.0",
   id: Date.now(),
