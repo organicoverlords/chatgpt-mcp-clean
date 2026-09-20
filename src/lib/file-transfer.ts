@@ -293,8 +293,11 @@ function imageResolution(data: Buffer, mimeType: string): ImageResolution {
 function inlineImageContent(data: Buffer, mimeType: string): any[] {
   const { width, height } = imageResolution(data, mimeType);
   return [
-    { type: "image" as const, data: data.toString("base64"), mimeType },
+    // Keep a tiny text block first for ChatGPT hosts that classify mixed tool results
+    // from the leading content item. This reuses the existing resolution metadata and
+    // does not restore the duplicate process JSON removed by #366.
     { type: "text" as const, text: `resolution: ${width}x${height}` },
+    { type: "image" as const, data: data.toString("base64"), mimeType },
   ];
 }
 
