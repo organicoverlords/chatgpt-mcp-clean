@@ -162,7 +162,7 @@ export async function readBootstrapSnapshot(
   } finally { await file.close(); }
   const generatedAt = Date.parse(payload?.generated_at);
   const bootstrapEnd = timeline ? undefined : bootstrapRoot(payload, "bootstrap_end");
-  const acceptedBootstrapSchema = payload?.schema === "bootstrap.v1" || payload?.schema === "bootstrap.v2";
+  const acceptedBootstrapSchema = payload?.schema === "bootstrap.v1" || payload?.schema === "bootstrap.v2" || payload?.schema === "bootstrap.v4";
   if ((timeline ? payload?.schema !== "vault.timeline.bootstrap.v1" : !acceptedBootstrapSchema)
       || !Number.isFinite(generatedAt) || generatedAt > Date.now() + 5_000
       || (!timeline && (!isRecord(bootstrapEnd) || bootstrapEnd.status !== "COMPLETE" || bootstrapEnd.schema !== payload.schema))) {

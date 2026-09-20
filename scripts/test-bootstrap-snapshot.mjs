@@ -90,6 +90,11 @@ try {
   const v2Payload = JSON.parse(v2Pieces.join(""));
   assert.equal(v2Payload.schema, "bootstrap.v2");
   assert.equal(v2Payload.bootstrap_end.schema, "bootstrap.v2");
+  writeBootstrap({ schema: "bootstrap.v4", bootstrap_end: { status: "COMPLETE", schema: "bootstrap.v4" }, padding: "x".repeat(80_000) });
+  const v4Page = await readBootstrapSnapshot(100_000, "bootstrap", "v4-caller");
+  assert.equal(JSON.parse(v4Page.stdout).schema, "bootstrap.v4");
+  writeBootstrap({ schema: "bootstrap.v3", bootstrap_end: { status: "COMPLETE", schema: "bootstrap.v3" } });
+  await assert.rejects(readBootstrapSnapshot(100_000, "bootstrap", "unknown-schema-caller"), /incomplete or invalid/);
   writeFileSync(process.env.MCP_BOOTSTRAP_SNAPSHOT_PATH, " ".repeat(96 * 1024 + 1));
   await assert.rejects(readBootstrapSnapshot(100_000, "bootstrap", "oversize-v2-caller"), /96 KiB/);
   writeBootstrap();
