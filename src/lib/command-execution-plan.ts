@@ -262,7 +262,7 @@ function splitTopLevelSequence(command: string): SequencePart[] | undefined {
 }
 
 function powershellPlan(command: string, powershellExe: string, reason: string): CommandExecutionPlan {
-  return { mode: "powershell", executable: powershellExe, args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command", command], reason };
+  return { mode: "powershell", executable: powershellExe, args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], reason };
 }
 
 /** Execute multiline generated code through stdin instead of serializing it into a shell command string. */
@@ -277,7 +277,7 @@ export function planStructuredScript(
     return {
       mode: "powershell",
       executable: powershellExe,
-      args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command", "$source=[Console]::In.ReadToEnd(); try { $block=[scriptblock]::Create($source) } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }; & $block"],
+      args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "$source=[Console]::In.ReadToEnd(); try { $block=[scriptblock]::Create($source) } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }; & $block"],
       stdin: script,
       ...(childEnv ? { env: { ...childEnv } } : {}),
       reason: "structured_script_powershell_stdin_scriptblock",

@@ -29,6 +29,23 @@ type StepResult = { code: number; signal: NodeJS.Signals | null };
 
 const OUTPUT_FLUSH_INTERVAL_MS = 50;
 const OUTPUT_BATCH_MAX_CHARS = 100_000;
+// Bound only the interval before PowerShell proves script execution has started.
+// After the hidden marker arrives, ordinary long-running commands have no launcher timeout.
+const DEFAULT_POWERSHELL_STARTUP_TIMEOUT_MS = 10_000;
+
+function powershellStartupTimeoutMs(): number {
+  const configured = Number(process.env.MCP_POWERSHELL_STARTUP_TIMEOUT_MS || DEFAULT_POWERSHELL_STARTUP_TIMEOUT_MS);
+  return Number.isFinite(configured) ? Math.max(250, Math.min(60_000, configured)) : DEFAULT_POWERSHELL_STARTUP_TIMEOUT_MS;
+}
+
+function powerShellReadyStep(step: CommandExecutionStep, requestId: string): { step: CommandExecutionStep; marker?: string } {
+  const commandIndex = step.args.findIndex((value) => value.toLowerCase() === "-command");
+  if (commandIndex < 0 || commandIndex + 1 >= step.args.length) return { step };
+  const marker = `__MCP_POWERSHELL_READY_${requestId}__`;
+  const args = [...step.args];
+  args[commandIndex + 1] = `[Console]::Out.WriteLine('${marker}');${args[commandIndex + 1]}`;
+  return { step: { ...step, args }, marker };
+}
 
 const data = workerData as LaunchData;
 const port = parentPort;
@@ -119,14 +136,17 @@ function runStep(
   stepCount: number,
 ): Promise<StepResult> {
   return new Promise((resolve, reject) => {
-    const child = crossSpawn(step.executable, step.args, {
+    const prepared: { step: CommandExecutionStep; marker?: string } = plan.mode === "powershell" ? powerShellReadyStep(step, requestId) : { step };
+    const effectiveStep = prepared.step;
+    const startupTimeoutMs = prepared.marker ? powershellStartupTimeoutMs() : 0;
+    const child = crossSpawn(effectiveStep.executable, effectiveStep.args, {
       cwd,
       windowsHide: true,
-      stdio: [step.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
+      stdio: [effectiveStep.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
       env,
     });
     if (!child.pid) {
-      reject(new Error(`Background process did not receive a PID: ${step.executable}`));
+      reject(new Error(`Background process did not receive a PID: ${effectiveStep.executable}`));
       return;
     }
     addChild(requestId, child);
@@ -141,14 +161,57 @@ function runStep(
       stepReason: step.reason,
     });
     if (pendingKills.has(requestId)) requestKill(requestId);
-    child.stdout?.on("data", (chunk) => queueOutput(requestId, "stdout", chunk));
-    child.stderr?.on("data", (chunk) => queueOutput(requestId, "stderr", chunk));
-    if (step.stdin !== undefined) child.stdin?.end(step.stdin);
 
     let settled = false;
+    let powerShellReady = prepared.marker === undefined;
+    let powerShellStartupTimedOut = false;
+    let startupBuffer = "";
+    let startupTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearStartupTimer = () => {
+      if (!startupTimer) return;
+      clearTimeout(startupTimer);
+      startupTimer = undefined;
+    };
+    const handleStdout = (chunk: Buffer | string) => {
+      if (powerShellReady || !prepared.marker) {
+        queueOutput(requestId, "stdout", chunk);
+        return;
+      }
+      startupBuffer += chunk.toString();
+      const markerIndex = startupBuffer.indexOf(prepared.marker);
+      if (markerIndex < 0) {
+        const keep = Math.max(prepared.marker.length + 8, 256);
+        if (startupBuffer.length > keep) startupBuffer = startupBuffer.slice(-keep);
+        return;
+      }
+      powerShellReady = true;
+      clearStartupTimer();
+      const before = startupBuffer.slice(0, markerIndex);
+      let after = startupBuffer.slice(markerIndex + prepared.marker.length);
+      after = after.replace(/^\r?\n/, "");
+      startupBuffer = "";
+      if (before) queueOutput(requestId, "stdout", before);
+      if (after) queueOutput(requestId, "stdout", after);
+    };
+
+    if (prepared.marker) {
+      startupTimer = setTimeout(() => {
+        if (settled || powerShellReady) return;
+        powerShellStartupTimedOut = true;
+        requestKill(requestId);
+        try { child.kill(); } catch {}
+      }, startupTimeoutMs);
+      startupTimer.unref();
+    }
+
+    child.stdout?.on("data", handleStdout);
+    child.stderr?.on("data", (chunk) => queueOutput(requestId, "stderr", chunk));
+    if (effectiveStep.stdin !== undefined) child.stdin?.end(effectiveStep.stdin);
+
     child.once("error", (error) => {
       if (settled) return;
       settled = true;
+      clearStartupTimer();
       flushOutput(requestId);
       removeChild(requestId, child);
       reject(error);
@@ -156,8 +219,13 @@ function runStep(
     child.once("exit", (code, signal) => {
       if (settled) return;
       settled = true;
+      clearStartupTimer();
       flushOutput(requestId);
       removeChild(requestId, child);
+      if (powerShellStartupTimedOut) {
+        reject(new Error(`PowerShell startup handshake timed out after ${startupTimeoutMs}ms`));
+        return;
+      }
       resolve({ code: code ?? -1, signal });
     });
   });
