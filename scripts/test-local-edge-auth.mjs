@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -18,7 +18,7 @@ const unusedPort = () => new Promise((resolvePort, reject) => {
 const request = (origin, path, host, headers = {}) => new Promise((resolveRequest, reject) => {
   const r = httpRequest(new URL(path, origin), { headers: { Host: host, ...headers } }, (res) => {
     let text = ""; res.setEncoding("utf8"); res.on("data", c => { text += c; });
-    res.on("end", () => resolveRequest({ status: res.statusCode ?? 0, text }));
+    res.on("end", () => resolveRequest({ status: res.statusCode ?? 0, text, location: res.headers.location ?? "" }));
   });
   r.once("error", reject); r.end();
 });
@@ -28,12 +28,31 @@ const port = await unusedPort();
 const loopback = `http://127.0.0.1:${port}`;
 const publicOrigin = "https://local-edge.test";
 const publicHost = new URL(publicOrigin).host;
+const chatGptClientId = "11111111-1111-4111-8111-111111111111";
+const chatGptRedirect = "https://chatgpt.com/connector/oauth/reconnect-proof";
+const oauthPath = join(temp, "oauth.json");
+writeFileSync(oauthPath, JSON.stringify({
+  clients: {
+    [chatGptClientId]: {
+      client_id: chatGptClientId,
+      client_id_issued_at: Math.floor(Date.now() / 1000),
+      redirect_uris: [chatGptRedirect],
+      token_endpoint_auth_method: "none",
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      client_name: "ChatGPT",
+    },
+  },
+  access: {},
+  refresh: {},
+  codes: {},
+}, null, 2));
 const child = spawn(process.execPath, [resolve("dist/index.js")], {
   cwd: resolve("."), windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
   env: { ...process.env, PORT: String(port), HOST: "127.0.0.1", MCP_BACKEND_MODE: "1",
     MCP_TOOL_PROFILE: "process", MCP_PUBLIC_ORIGIN: publicOrigin, MCP_OWNER_AUTH_ORIGIN: "",
     MCP_OWNER_AUTH_MODE: "local-edge", TAILSCALE_OWNER_LOGIN: "owner@example.com",
-    MCP_OAUTH_STORE_PATH: join(temp,"oauth.json"), MCP_TRANSPORT_LOG_PATH: join(temp,"transport.jsonl"),
+    MCP_OAUTH_STORE_PATH: oauthPath, MCP_TRANSPORT_LOG_PATH: join(temp,"transport.jsonl"),
     MCP_PROCESS_RECEIPT_DIR: join(temp,"receipts"), MCP_RUNTIME_INSTANCE_ID: "", MCP_RUNTIME_SOURCE_COMMIT: "",
     MCP_RUNTIME_DIST_SHA256: "", MCP_RUNTIME_SOURCE_DIRTY: "" }
 });
@@ -58,7 +77,26 @@ try {
   const privateForwarded = await request(loopback, "/authorize", publicHost, { "x-forwarded-for": "192.168.1.50" });
   assert.equal(privateForwarded.status, 400, privateForwarded.text);
   assert.doesNotMatch(privateForwarded.text, /Owner authorization required/);
-  console.log("PASS local_edge_auth direct_public_host_blocked=true direct_loopback_allowed=true public_forwarded_blocked=true private_forwarded_allowed=true wrong_host_blocked=true");
+  const reconnectParams = new URLSearchParams({
+    client_id: chatGptClientId,
+    redirect_uri: chatGptRedirect,
+    response_type: "code",
+    code_challenge: "A".repeat(43),
+    code_challenge_method: "S256",
+    scope: "mcp offline_access",
+    resource: `${publicOrigin}/mcp`,
+    state: "reconnect-proof",
+  });
+  const reconnectPath = `/authorize?${reconnectParams}`;
+  const publicChatGptReconnect = await request(loopback, reconnectPath, publicHost, { "x-forwarded-for": "203.0.113.10" });
+  assert.equal(publicChatGptReconnect.status, 302, publicChatGptReconnect.text);
+  assert.match(publicChatGptReconnect.location, /^https:\/\/chatgpt\.com\/connector\/oauth\/reconnect-proof\?/);
+  assert.match(publicChatGptReconnect.location, /[?&]code=/);
+  assert.doesNotMatch(publicChatGptReconnect.text, /Owner authorization required/);
+  const unknownChatGptReconnect = await request(loopback, reconnectPath.replace(chatGptClientId, "22222222-2222-4222-8222-222222222222"), publicHost, { "x-forwarded-for": "203.0.113.10" });
+  assert.equal(unknownChatGptReconnect.status, 403, unknownChatGptReconnect.text);
+  assert.match(unknownChatGptReconnect.text, /Owner authorization required/);
+  console.log("PASS local_edge_auth direct_public_host_blocked=true direct_loopback_allowed=true public_forwarded_blocked=true private_forwarded_allowed=true known_chatgpt_public_reconnect_allowed=true unknown_chatgpt_public_reconnect_blocked=true wrong_host_blocked=true");
 } finally {
   if (child.exitCode === null) child.kill();
   await new Promise(r => child.exitCode !== null ? r() : child.once("exit", r));
