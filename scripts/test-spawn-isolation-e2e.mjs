@@ -119,3 +119,4 @@ try {
   await sleep(100);
   rmSync(temporary, { recursive: true, force: true });
 }
+await import("./test-launcher-spawn-error-isolation.mjs");
