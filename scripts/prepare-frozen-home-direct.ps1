@@ -10,6 +10,7 @@ param(
     [string]$OAuthStoreRelative = 'home-direct-test\\oauth.json',
     [string]$ReceiptStoreRelative = 'shared-process-receipts',
     [ValidateSet('local','omen')][string]$DefaultExecutionTarget = 'local',
+    [string]$OwnerLoginSourcePath = '',
     [string]$CurrentTopologyPath = (Join-Path $env:USERPROFILE 'Desktop\vault\04 Operating Contracts\mcp-current-topology.json'),
     [switch]$ExplicitUserAuthorization,
     [switch]$Plan
@@ -73,8 +74,8 @@ $stableRollback=Resolve-StableRollback $topology
 $rollbackPort=[int]$stableRollback.port
 $rollbackInstance=[string]$stableRollback.instance
 $currentFrozen=[Environment]::ExpandEnvironmentVariables([string]$topology.serving.backend.durable_runtime_root)
-$ownerLoginSource=Join-Path $currentFrozen 'owner-login.txt'
-if(-not (Test-Path -LiteralPath $ownerLoginSource -PathType Leaf)){ Fail "current frozen owner identity missing: $ownerLoginSource" }
+$ownerLoginSource=if([string]::IsNullOrWhiteSpace($OwnerLoginSourcePath)){ Join-Path $currentFrozen 'owner-login.txt' }else{ [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($OwnerLoginSourcePath)) }
+if(-not (Test-Path -LiteralPath $ownerLoginSource -PathType Leaf)){ Fail "owner identity source missing: $ownerLoginSource" }
 $ownerLogin=(Get-Content -LiteralPath $ownerLoginSource -Raw).Trim()
 if([string]::IsNullOrWhiteSpace($ownerLogin)){ Fail 'current frozen owner identity is empty' }
 $listener=Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -eq $Port } | Select-Object -First 1
@@ -83,7 +84,7 @@ if(Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue){ Fail "c
 if(Test-Path -LiteralPath $DeploymentRoot){ Fail "deployment root already exists: $DeploymentRoot" }
 $planResult=[ordered]@{
     status='PLAN'; commit=$commit; source_root=$root; deployment_root=$DeploymentRoot; runtime_root=(Join-Path $DeploymentRoot 'runtime');
-    task_name=$TaskName; port=$Port; instance_id=$InstanceId; public_origin=$PublicOrigin; oauth_store_relative=$OAuthStoreRelative; receipt_store_relative=$ReceiptStoreRelative; default_execution_target=$DefaultExecutionTarget;
+    task_name=$TaskName; port=$Port; instance_id=$InstanceId; public_origin=$PublicOrigin; oauth_store_relative=$OAuthStoreRelative; receipt_store_relative=$ReceiptStoreRelative; default_execution_target=$DefaultExecutionTarget; owner_login_source=$ownerLoginSource;
     current_serving_listen=[string]$topology.serving.backend.listen; current_frozen_root=$currentFrozen; rollback_port=$rollbackPort; rollback_instance=$rollbackInstance; route_mutation=$false
 }
 if($Plan){ $planResult | ConvertTo-Json -Depth 5 -Compress; exit 0 }

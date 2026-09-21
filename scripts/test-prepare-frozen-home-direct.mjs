@@ -9,6 +9,8 @@ for(const required of [
   "RequireExistingOAuthState",
   "ReceiptStoreRelative",
   "DefaultExecutionTarget",
+  "OwnerLoginSourcePath",
+  "owner identity source missing",
   "MCP_DEFAULT_EXECUTION_TARGET",
   "default_execution_target=$DefaultExecutionTarget",
   "shared-process-receipts",
