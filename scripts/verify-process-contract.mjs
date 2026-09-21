@@ -15,6 +15,7 @@ mkdirSync(resolve(".state"), { recursive: true });
 writeFileSync(omenFixture, [
   "import subprocess, sys",
   "argv = sys.argv[1:]",
+  "assert argv[:2] == ['--invocation-source', 'mcp'], argv",
   "idx = argv.index('--')",
   "raise SystemExit(subprocess.run(argv[idx + 1:]).returncode)",
   "",

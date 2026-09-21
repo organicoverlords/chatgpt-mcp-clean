@@ -269,7 +269,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
         if (!omenExecPath) throw new Error("omen_execution_unavailable: MCP_OMEN_EXEC_PATH is not configured and no Windows default is available");
         value = await processManager.startStructuredWithWait(
           omenPython,
-          [omenExecPath, "--cwd", working_directory ?? "/home/aatuska", "--", input.executable!, ...(input.args ?? [])],
+          [omenExecPath, "--invocation-source", "mcp", "--cwd", working_directory ?? "/home/aatuska", "--", input.executable!, ...(input.args ?? [])],
           undefined,
           callerId,
           wait_ms ?? 240_000,

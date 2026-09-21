@@ -5,7 +5,7 @@ param(
     [Parameter(Mandatory=$true)][string]$Actor,
     [Parameter(Mandatory=$true)][string]$BusyScope,
     [Nullable[int]]$ExpectedCurrentPort = $null,
-    [ValidateRange(1024,65535)][int]$IndependentRollbackPort = 3022,
+    [Parameter(Mandatory=$true)][ValidateRange(1024,65535)][int]$IndependentRollbackPort,
     [string]$StableHost = '91-159-12-133.sslip.io',
     [string]$PublicOrigin = 'https://91-159-12-133.sslip.io',
     [string]$CaddyConfigPath = (Join-Path $env:LOCALAPPDATA 'Caddy\mcp-home-test\Caddyfile'),

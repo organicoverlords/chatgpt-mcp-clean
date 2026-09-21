@@ -21,7 +21,7 @@ writeFileSync(topologyPath, JSON.stringify({
 function run(extra = [], candidatePort = topologyPort) {
   return spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", wrapper,
     "-CandidatePort", String(candidatePort), "-CandidateGeneration", "candidate-test", "-Actor", "test", "-BusyScope", "test-scope",
-    "-CurrentTopologyPath", topologyPath, "-CaddyConfigPath", caddyPath, ...extra], { encoding: "utf8", windowsHide: true });
+    "-CurrentTopologyPath", topologyPath, "-CaddyConfigPath", caddyPath, "-IndependentRollbackPort", String(topologyPort + 100), ...extra], { encoding: "utf8", windowsHide: true });
 }
 
 try {
