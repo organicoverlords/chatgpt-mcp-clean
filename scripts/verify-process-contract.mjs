@@ -93,11 +93,15 @@ async function assertStructuredProcessResult(name, args) {
   return result.structuredContent;
 }
 
-const startStructured = await assertStructuredProcessResult("start_process", { language: "powershell", script: "Write-Output process-contract-structured", wait_ms: 10_000 });
+const nativeOmenProxy = Boolean(String(process.env.MCP_OMEN_MCP_URL || "").trim());
+const contractNodeExecutable = nativeOmenProxy ? "node" : process.execPath;
+const startStructured = await assertStructuredProcessResult("start_process", nativeOmenProxy
+  ? { language: "node", script: "console.log(\"process-contract-structured\")", wait_ms: 10_000 }
+  : { language: "powershell", script: "Write-Output process-contract-structured", wait_ms: 10_000 });
 assert.match(startStructured.stdout || "", /process-contract-structured/, "start_process structured output should preserve stdout");
 const trickyArg = String.raw`space ; $dollar \"quote\" ` + "`tick";
 const argvStructured = await assertStructuredProcessResult("start_process", {
-  executable: process.execPath,
+  executable: contractNodeExecutable,
   args: ["-e", "console.log(JSON.stringify(process.argv.slice(1)))", trickyArg],
   wait_ms: 10_000,
 });
@@ -106,16 +110,18 @@ assert.equal(argvStructured.execution_reason, "structured_argv", "structured exe
 assert.deepEqual(JSON.parse(String(argvStructured.stdout || "").trim()), [trickyArg], "structured argv must survive without shell reinterpretation");
 const omenStructured = await assertStructuredProcessResult("start_process", {
   execution_target: "omen",
-  executable: process.execPath,
+  executable: contractNodeExecutable,
   args: ["-e", "console.log('omen-target-contract')"],
   working_directory: "/tmp",
   wait_ms: 10_000,
 });
 assert.equal(omenStructured.execution_target, "omen", "OMEN execution must identify the selected target");
-assert.equal(omenStructured.execution_transport, "ssh-adapter", "Windows legacy OMEN adapter must identify SSH transport explicitly");
+assert.equal(omenStructured.execution_transport, nativeOmenProxy ? "native-mcp" : "ssh-adapter", nativeOmenProxy
+  ? "native OMEN MCP proxy must identify native MCP transport explicitly"
+  : "Windows legacy OMEN adapter must identify SSH transport explicitly");
 assert.match(String(omenStructured.stdout || ""), /omen-target-contract/, "OMEN target wrapper must execute the requested argv");
 const stdinStructured = await assertStructuredProcessResult("start_process", {
-  executable: process.execPath,
+  executable: contractNodeExecutable,
   args: ["-e", "process.stdin.pipe(process.stdout)"],
   stdin: "contract-stdin\n",
   wait_ms: 10_000,
