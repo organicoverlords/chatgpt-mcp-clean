@@ -11,7 +11,7 @@ const wrapper = fileURLToPath(new URL("./replace-home-direct-production.ps1", im
 const topologyPort = 43210;
 const caddyPath = join(temporary, "Caddyfile");
 const peerPort = 43211;
-writeFileSync(caddyPath, `91-159-12-133.sslip.io {\n\thandle {\n\t\treverse_proxy 127.0.0.1:${topologyPort}\n\t}\n\thandle /x {\n\t\treverse_proxy 127.0.0.1:${topologyPort}\n\t}\n}\n\npr237.91-159-12-133.sslip.io {\n\thandle {\n\t\treverse_proxy 127.0.0.1:${peerPort}\n\t}\n\thandle /x {\n\t\treverse_proxy 127.0.0.1:${peerPort}\n\t}\n}\n`);
+writeFileSync(caddyPath, `91-159-12-133.sslip.io {\n\thandle {\n\t\treverse_proxy 127.0.0.1:${topologyPort}\n\t}\n\thandle /x {\n\t\treverse_proxy 127.0.0.1:${topologyPort}\n\t}\n}\n\npr237.91-159-12-133.sslip.io {\n\t@local_authorize {\n\t\tpath /authorize\n\t\tremote_ip private_ranges\n\t}\n\thandle @local_authorize {\n\t\treverse_proxy 127.0.0.1:${peerPort}\n\t}\n\t@authorize path /authorize\n\trespond @authorize "Owner authorization required" 403\n\thandle {\n\t\treverse_proxy 127.0.0.1:${peerPort}\n\t}\n}\n`);
 writeFileSync(topologyPath, JSON.stringify({
   schema: "mcp-current-topology.v1",
   authority: "current_serving_topology",
@@ -42,6 +42,16 @@ try {
   assert.notEqual(peerMismatch.status, 0);
   assert.match(`${peerMismatch.stdout}\n${peerMismatch.stderr}`, /ExpectedCurrentPort disagrees with target host route/);
 
+  const peerPlan = run(["-StableHost", "pr237.91-159-12-133.sslip.io", "-CurrentPortFromTargetHost", "-Plan"], peerPort + 1);
+  assert.equal(peerPlan.status, 0, `${peerPlan.stdout}\n${peerPlan.stderr}`);
+  const peerReplacement = JSON.parse(peerPlan.stdout.trim());
+  assert.equal(peerReplacement.operation, "REPLACE_ROUTE");
+  assert.doesNotMatch(peerReplacement.candidate_config, /remote_ip private_ranges/);
+  assert.doesNotMatch(peerReplacement.candidate_config, /respond @authorize "Owner authorization required" 403/);
+  assert.match(peerReplacement.candidate_config, /@authorize path \/authorize/);
+  assert.equal((peerReplacement.candidate_config.match(new RegExp(`reverse_proxy 127\\.0\\.0\\.1:${peerPort + 1}`, "g")) || []).length, 2);
+
+
   const isolatedHost = "supertest9000.91-159-12-133.sslip.io";
   const createPlan = run(["-StableHost", isolatedHost, "-PublicOrigin", `https://${isolatedHost}`, "-CreateTargetHost", "-Plan"], peerPort + 5);
   assert.equal(createPlan.status, 0, `${createPlan.stdout}\n${createPlan.stderr}`);
@@ -51,9 +61,7 @@ try {
   assert.equal(plan.target_host, isolatedHost);
   assert.match(plan.candidate_config, new RegExp(`${isolatedHost.replaceAll(".", "\\.")} \\{`));
   assert.equal((plan.candidate_config.match(new RegExp(`reverse_proxy 127\\.0\\.0\\.1:${peerPort + 5}`, "g")) || []).length, 2);
-  assert.doesNotMatch(plan.candidate_config, /remote_ip private_ranges/);
-  assert.doesNotMatch(plan.candidate_config, /respond @authorize "Owner authorization required" 403/);
-  assert.match(plan.candidate_config, /@authorize path \/authorize/);
+  assert.match(plan.candidate_config, /supertest9000\.91-159-12-133\.sslip\.io \{[\s\S]*@authorize path \/authorize[\s\S]*reverse_proxy 127\.0\.0\.1:43216/);
   assert.match(plan.candidate_config, /91-159-12-133\.sslip\.io/);
   assert.match(plan.candidate_config, /pr237\.91-159-12-133\.sslip\.io/);
 
@@ -81,7 +89,7 @@ try {
   assert.match(wrapperSource, /Wait-CandidateLocalRoute/);
   assert.match(wrapperSource, /Wait-CandidatePublicRoute/);
   assert.match(wrapperSource, /for\(\$i=0;\$i -lt 40;\$i\+\+\)/, "new-host readiness must retry with a finite bound");
-  assert.doesNotMatch(wrapperSource, /remote_ip private_ranges/, "Caddy must delegate owner authorization to the backend");
+  assert.match(wrapperSource, /partial legacy owner-authorization gate/, "replacement owner must migrate only the complete legacy owner gate");
   assert.match(wrapperSource, /@authorize path \/authorize/, "Caddy must route authorize requests to the backend gate");
   assert.match(wrapperSource, /curl\.exe -fsS --max-time 5 .*--data-binary/, "Caddy admin load must use curl exact-body POST instead of Windows PowerShell Invoke-WebRequest");
   assert.match(wrapperSource, /\$curlExit -ne 28/, "Caddy admin load timeout must remain indeterminate until exact route verification");
