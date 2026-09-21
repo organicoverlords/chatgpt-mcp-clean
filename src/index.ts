@@ -3,7 +3,7 @@ import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import { resolve } from "node:path";
-import express, { type Request, type Response } from "express";
+import express, { type NextFunction, type Request, type Response } from "express";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -54,11 +54,13 @@ const wireGuardCandidate = process.env.MCP_WIREGUARD_CANDIDATE === "1";
 const wireGuardHost = "10.203.0.2";
 const wireGuardPeer = "10.203.0.1";
 const forceConnectionClose = process.env.MCP_FORCE_CONNECTION_CLOSE === "1";
+const internalLoopbackTrust = process.env.MCP_INTERNAL_LOOPBACK_TRUST === "1";
 const frontDoorHost = (process.env.MCP_FRONT_DOOR_HOST || "127.0.0.1:3003").toLowerCase();
 const backendGeneration = backendMode ? (process.env.MCP_BACKEND_GENERATION || `backend-${PORT}-${process.pid}-${Date.now()}`) : undefined;
 const loopbackBind = HOST === "127.0.0.1";
 const approvedWireGuardCandidateBind = backendMode && wireGuardCandidate && HOST === wireGuardHost && PORT !== 3011;
 if (!loopbackBind && !approvedWireGuardCandidateBind) throw new Error("Server bind must be loopback or an explicit alternate-port WireGuard candidate");
+if (internalLoopbackTrust && !loopbackBind) throw new Error("MCP_INTERNAL_LOOPBACK_TRUST requires loopback bind");
 if (wireGuardCandidate && !approvedWireGuardCandidateBind) throw new Error("MCP_WIREGUARD_CANDIDATE requires backend mode, host 10.203.0.2, and a non-3011 port");
 if (!Number.isInteger(PORT) || PORT < 1024 || PORT > 65535) throw new Error("PORT must be a non-privileged TCP port");
 if (PORT !== 3000 && !backendMode) throw new Error("Alternate ports require MCP_BACKEND_MODE=1");
@@ -110,6 +112,17 @@ function isPrivateOrLocalClientAddress(raw: string | undefined): boolean {
   if (version === 6) return address.startsWith("fc") || address.startsWith("fd") || /^fe[89ab]/.test(address);
   return false;
 }
+
+function isLoopbackClientAddress(raw: string | undefined): boolean {
+  let address = (raw || "").trim().toLowerCase();
+  if (address.startsWith("::ffff:")) address = address.slice(7);
+  return address === "::1" || address.startsWith("127.");
+}
+
+const mcpBearer = (req: Request, res: Response, next: NextFunction) => {
+  if (internalLoopbackTrust && isLoopbackClientAddress(req.socket.remoteAddress)) { next(); return; }
+  return bearer(req, res, next);
+};
 
 const transportLogPath = resolve(process.env.MCP_TRANSPORT_LOG_PATH || ".state/transport.jsonl");
 const transportLogWriter = new BoundedJsonlWriter(transportLogPath, {
@@ -310,9 +323,9 @@ app.get(fileTransferPath, (req, res) => { void serveLocalFileTransfer(req, res).
   if (!res.headersSent) res.status(500).send("File transfer failed");
   else res.destroy();
 }); });
-app.post("/mcp", bearer, handleMcp);
-app.get("/mcp", bearer, (_req, res) => res.status(405).set("Allow", "POST").send("Method not allowed."));
-app.delete("/mcp", bearer, (_req, res) => res.status(405).set("Allow", "POST").send("Method not allowed."));
+app.post("/mcp", mcpBearer, handleMcp);
+app.get("/mcp", mcpBearer, (_req, res) => res.status(405).set("Allow", "POST").send("Method not allowed."));
+app.delete("/mcp", mcpBearer, (_req, res) => res.status(405).set("Allow", "POST").send("Method not allowed."));
 app.get("/health", (_req, res) => res.json({ status: "ok", name: "shell-mcp", role: backendMode ? "backend" : "direct", ...(backendGeneration ? { backend_generation: backendGeneration } : {}), runtime_identity: runtimeIdentity, host: HOST, port: PORT, pid: process.pid, active_requests: activeRequests, total_requests: totalRequests, ...processRuntimeStatus(), wireguard_candidate: wireGuardCandidate, force_connection_close: forceConnectionClose }));
 
 const httpServer = app.listen(PORT, HOST, () => console.error(`shell-mcp listening on http://${HOST}:${PORT}/mcp`));

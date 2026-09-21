@@ -85,10 +85,24 @@ function requestKill(requestId: string): void {
   if (!owned?.size) return;
   for (const child of owned) {
     if (!child.pid) continue;
-    const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
-    const timer = setTimeout(() => killer.kill(), 2_000);
+    if (process.platform === "win32") {
+      const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+      const timer = setTimeout(() => killer.kill(), 2_000);
+      timer.unref();
+      killer.once("close", () => clearTimeout(timer));
+      continue;
+    }
+    try { process.kill(-child.pid, "SIGTERM"); }
+    catch {
+      try { child.kill("SIGTERM"); } catch {}
+    }
+    const timer = setTimeout(() => {
+      try { process.kill(-child.pid!, "SIGKILL"); }
+      catch {
+        try { child.kill("SIGKILL"); } catch {}
+      }
+    }, 2_000);
     timer.unref();
-    killer.once("close", () => clearTimeout(timer));
   }
 }
 
@@ -122,6 +136,7 @@ function runStep(
     const child = crossSpawn(step.executable, step.args, {
       cwd,
       windowsHide: true,
+      detached: process.platform !== "win32",
       stdio: [step.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
       env,
     });
@@ -175,7 +190,7 @@ async function runNativePipeline(
   try {
     for (let index = 0; index < steps.length; index += 1) {
       const step = steps[index]!;
-      const child = crossSpawn(step.executable, step.args, { cwd, windowsHide: true, stdio: [index === 0 && step.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"], env });
+      const child = crossSpawn(step.executable, step.args, { cwd, windowsHide: true, detached: process.platform !== "win32", stdio: [index === 0 && step.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"], env });
       if (!child.pid) throw new Error(`Background pipeline process did not receive a PID: ${step.executable}`);
       addChild(requestId, child);
       spawned.push(child);
