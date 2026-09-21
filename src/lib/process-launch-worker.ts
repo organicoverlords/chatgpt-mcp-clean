@@ -140,10 +140,16 @@ function runStep(
       stdio: [step.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
       env,
     });
-    if (!child.pid) {
-      reject(new Error(`Background process did not receive a PID: ${step.executable}`));
-      return;
-    }
+    let settled = false;
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      flushOutput(requestId);
+      removeChild(requestId, child);
+      reject(error);
+    });
+    if (!child.pid) return;
+
     addChild(requestId, child);
     const startMessage = stepIndex === 0 ? "started" : "step_started";
     send(requestId, {
@@ -160,14 +166,6 @@ function runStep(
     child.stderr?.on("data", (chunk) => queueOutput(requestId, "stderr", chunk));
     if (step.stdin !== undefined) child.stdin?.end(step.stdin);
 
-    let settled = false;
-    child.once("error", (error) => {
-      if (settled) return;
-      settled = true;
-      flushOutput(requestId);
-      removeChild(requestId, child);
-      reject(error);
-    });
     child.once("exit", (code, signal) => {
       if (settled) return;
       settled = true;
@@ -191,7 +189,15 @@ async function runNativePipeline(
     for (let index = 0; index < steps.length; index += 1) {
       const step = steps[index]!;
       const child = crossSpawn(step.executable, step.args, { cwd, windowsHide: true, detached: process.platform !== "win32", stdio: [index === 0 && step.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"], env });
-      if (!child.pid) throw new Error(`Background pipeline process did not receive a PID: ${step.executable}`);
+      const result = new Promise<StepResult>((resolve, reject) => {
+        let settled = false;
+        child.once("error", (error) => { if (settled) return; settled = true; removeChild(requestId, child); reject(error); });
+        child.once("close", (code, signal) => { if (settled) return; settled = true; removeChild(requestId, child); resolve({ code: code ?? -1, signal }); });
+      });
+      if (!child.pid) {
+        await result;
+        throw new Error(`Background pipeline process did not receive a PID: ${step.executable}`);
+      }
       addChild(requestId, child);
       spawned.push(child);
       send(requestId, { type: index === 0 ? "started" : "step_started", pid: child.pid, executionMode: plan.mode, executionReason: plan.reason, stepIndex: index, stepCount: steps.length, stepReason: step.reason });
@@ -200,11 +206,7 @@ async function runNativePipeline(
       if (index > 0) spawned[index - 1]!.stdout?.pipe(child.stdin!);
       if (index === steps.length - 1) child.stdout?.on("data", (chunk) => queueOutput(requestId, "stdout", chunk));
       if (index === 0 && step.stdin !== undefined) child.stdin?.end(step.stdin);
-      results.push(new Promise<StepResult>((resolve, reject) => {
-        let settled = false;
-        child.once("error", (error) => { if (settled) return; settled = true; removeChild(requestId, child); reject(error); });
-        child.once("close", (code, signal) => { if (settled) return; settled = true; removeChild(requestId, child); resolve({ code: code ?? -1, signal }); });
-      }));
+      results.push(result);
     }
     if (pendingKills.has(requestId)) requestKill(requestId);
     const completed = await Promise.all(results);
