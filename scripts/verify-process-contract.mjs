@@ -112,6 +112,7 @@ const omenStructured = await assertStructuredProcessResult("start_process", {
   wait_ms: 10_000,
 });
 assert.equal(omenStructured.execution_target, "omen", "OMEN execution must identify the selected target");
+assert.equal(omenStructured.execution_transport, "ssh-adapter", "Windows legacy OMEN adapter must identify SSH transport explicitly");
 assert.match(String(omenStructured.stdout || ""), /omen-target-contract/, "OMEN target wrapper must execute the requested argv");
 const stdinStructured = await assertStructuredProcessResult("start_process", {
   executable: process.execPath,
@@ -135,7 +136,7 @@ const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "0746bb7fcfbbff1dcfd7705b526304470b884dde7ae67c2c49da16e1ec161f18";
+const acceptedContractSha256 = "fb9569c0e2797abd08a577f61319e648856c63554e4eb175cf4d4586860f5ee6";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 const expectedTools = [...baseExpectedTools].sort((a, b) => a.name.localeCompare(b.name));

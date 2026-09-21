@@ -1,4 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { resolve } from "node:path";
 import { isBootstrapSnapshot, readBootstrapSnapshot } from "./lib/bootstrap-snapshot.js";
 import { z } from "zod";
@@ -19,6 +21,52 @@ if (configuredDefaultExecutionTarget !== "local" && configuredDefaultExecutionTa
   throw new Error("MCP_DEFAULT_EXECUTION_TARGET must be local or omen");
 }
 const defaultExecutionTarget = configuredDefaultExecutionTarget as "local" | "omen";
+const nativeOmenHost = process.env.MCP_NATIVE_OMEN_HOST === "1";
+const omenMcpUrl = process.env.MCP_OMEN_MCP_URL?.trim() || undefined;
+const OMEN_MCP_PROCESS_PREFIX = "omen-mcp:";
+let omenMcpClientPromise: Promise<Client> | undefined;
+
+async function remoteOmenClient(): Promise<Client> {
+  if (!omenMcpUrl) throw new Error("omen_mcp_unavailable: MCP_OMEN_MCP_URL is not configured");
+  if (!omenMcpClientPromise) {
+    omenMcpClientPromise = (async () => {
+      const client = new Client({ name: "shell-mcp-omen-proxy", version: "1" });
+      const transport = new StreamableHTTPClientTransport(new URL(omenMcpUrl));
+      await client.connect(transport);
+      return client;
+    })().catch((error) => { omenMcpClientPromise = undefined; throw error; });
+  }
+  return omenMcpClientPromise;
+}
+
+async function callRemoteOmenTool(name: "start_process" | "read_output" | "kill_process", args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const client = await remoteOmenClient();
+  try {
+    const reply = await client.callTool({ name, arguments: args });
+    if (reply.isError) throw new Error(`omen_mcp_tool_error:${name}`);
+    const value = reply.structuredContent;
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`omen_mcp_invalid_structured_result:${name}`);
+    return value as Record<string, unknown>;
+  } catch (error) {
+    omenMcpClientPromise = undefined;
+    throw error;
+  }
+}
+
+function remoteProcessId(processId: string): string { return `${OMEN_MCP_PROCESS_PREFIX}${processId}`; }
+function localRemoteProcessId(processId: string): string | undefined { return processId.startsWith(OMEN_MCP_PROCESS_PREFIX) ? processId.slice(OMEN_MCP_PROCESS_PREFIX.length) : undefined; }
+function remoteProcessResult(value: Record<string, unknown>): Record<string, unknown> {
+  const rawId = typeof value.process_id === "string" ? value.process_id : undefined;
+  const executionIdentity = value.serving_identity;
+  return {
+    ...value,
+    ...(rawId ? { process_id: remoteProcessId(rawId) } : {}),
+    execution_target: "omen",
+    execution_transport: "native-mcp",
+    ...(executionIdentity && typeof executionIdentity === "object" && !Array.isArray(executionIdentity) ? { execution_serving_identity: executionIdentity } : {}),
+  };
+}
+
 const processManager = new ProcessManager({
   receiptDirectory: resolve(process.env.MCP_PROCESS_RECEIPT_DIR || ".state/process-receipts"),
   ...(configuredMaxLiveProcesses !== undefined ? { maxLiveTotal: configuredMaxLiveProcesses } : {}),
@@ -44,7 +92,7 @@ const processEnvironmentSchema = z.record(
 
 const startProcessCommonShape = {
   working_directory: z.string().describe("Working directory on the selected execution target.").optional(),
-  execution_target: z.enum(["local", "omen"]).describe("Execution target; local by default, or OMEN through the canonical private-LAN owner.").optional(),
+  execution_target: z.enum(["local", "omen"]).describe("Execution target; local by default, or OMEN. On a native OMEN MCP host, OMEN executes locally without SSH.").optional(),
   wait_ms: z.number().int().min(0).max(240_000).optional(),
   activity_target: activityTargetSchema.optional(),
   action_class: actionClassSchema.optional(),
@@ -136,6 +184,7 @@ const processServingIdentitySchema = z.object({
 const processOutputSchema = z.object({
   caller_id: z.string(),
   serving_identity: processServingIdentitySchema,
+  execution_serving_identity: processServingIdentitySchema.optional(),
   mcp_status: z.enum(["OK", "STALE"]),
   process_state: z.enum(["RUNNING", "COMPLETED", "SNAPSHOT"]),
   elapsed_ms: z.number().nonnegative(),
@@ -148,6 +197,7 @@ const processOutputSchema = z.object({
   activity_target: activityTargetSchema.optional(),
   action_class: actionClassSchema.optional(),
   execution_target: z.enum(["local", "omen"]).optional(),
+  execution_transport: z.enum(["native-mcp", "ssh-adapter"]).optional(),
   execution_mode: z.enum(["powershell", "native", "explicit_shell", "native_sequence", "native_pipeline"]).optional(),
   execution_reason: z.string().optional(),
   repair_attempts: z.array(repairAttemptSchema).optional(),
@@ -191,6 +241,9 @@ const processOutputSchema = z.object({
 const killProcessOutputSchema = z.object({
   caller_id: z.string(),
   serving_identity: processServingIdentitySchema,
+  execution_serving_identity: processServingIdentitySchema.optional(),
+  execution_target: z.enum(["local", "omen"]).optional(),
+  execution_transport: z.enum(["native-mcp", "ssh-adapter"]).optional(),
   process_id: z.string(),
   pid: z.number().int().nonnegative(),
   killed: z.boolean(),
@@ -266,17 +319,41 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       const target = execution_target ?? defaultExecutionTarget;
       let value: Record<string, unknown>;
       if (target === "omen") {
-        if (!omenExecPath) throw new Error("omen_execution_unavailable: MCP_OMEN_EXEC_PATH is not configured and no Windows default is available");
-        value = await processManager.startStructuredWithWait(
-          omenPython,
-          [omenExecPath, "--invocation-source", "mcp", "--cwd", working_directory ?? "/home/aatuska", "--", input.executable!, ...(input.args ?? [])],
-          undefined,
-          callerId,
-          wait_ms ?? 240_000,
-          activity_target,
-          action_class,
-        );
-        value = { ...value, execution_target: "omen" };
+        if (nativeOmenHost) {
+          if (process.platform === "win32") throw new Error("native_omen_host_misconfigured: MCP_NATIVE_OMEN_HOST requires a non-Windows host");
+          value = await processManager.startStructuredWithWait(
+            input.executable!,
+            input.args ?? [],
+            working_directory ?? process.env.HOME ?? process.cwd(),
+            callerId,
+            wait_ms ?? 240_000,
+            activity_target,
+            action_class,
+          );
+          value = { ...value, execution_target: "omen", execution_transport: "native-mcp" };
+        } else if (omenMcpUrl) {
+          value = remoteProcessResult(await callRemoteOmenTool("start_process", {
+            executable: input.executable!,
+            args: input.args ?? [],
+            ...(working_directory ? { working_directory } : {}),
+            execution_target: "omen",
+            ...(wait_ms !== undefined ? { wait_ms } : {}),
+            ...(activity_target ? { activity_target } : {}),
+            ...(action_class ? { action_class } : {}),
+          }));
+        } else {
+          if (!omenExecPath) throw new Error("omen_execution_unavailable: MCP_OMEN_EXEC_PATH is not configured and no Windows default is available");
+          value = await processManager.startStructuredWithWait(
+            omenPython,
+            [omenExecPath, "--invocation-source", "mcp", "--cwd", working_directory ?? "/home/aatuska", "--", input.executable!, ...(input.args ?? [])],
+            undefined,
+            callerId,
+            wait_ms ?? 240_000,
+            activity_target,
+            action_class,
+          );
+          value = { ...value, execution_target: "omen", execution_transport: "ssh-adapter" };
+        }
       } else {
         value = input.executable !== undefined
           ? await processManager.startStructuredWithWait(input.executable, input.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, input.stdin, input.env)
@@ -300,9 +377,13 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
     },
     async ({ process_id, max_chars, wait_ms }) => {
       const boundedMaxChars = Math.max(1, Math.min(max_chars ?? 100_000, 100_000));
-      return structuredTextResult(isBootstrapSnapshot(process_id)
-        ? await readBootstrapSnapshot(boundedMaxChars, process_id, callerId)
-        : await processManager.readOutput(process_id, boundedMaxChars, wait_ms), callerId, servingIdentity);
+      const remoteId = localRemoteProcessId(process_id);
+      const value = remoteId !== undefined
+        ? remoteProcessResult(await callRemoteOmenTool("read_output", { process_id: remoteId, max_chars: boundedMaxChars, ...(wait_ms !== undefined ? { wait_ms } : {}) }))
+        : (isBootstrapSnapshot(process_id)
+          ? await readBootstrapSnapshot(boundedMaxChars, process_id, callerId)
+          : await processManager.readOutput(process_id, boundedMaxChars, wait_ms));
+      return structuredTextResult(value, callerId, servingIdentity);
     },
   );
 
@@ -315,7 +396,13 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       inputSchema: z.object({ process_id: z.string().min(1) }),
       outputSchema: killProcessOutputSchema,
     },
-    async ({ process_id }) => structuredTextResult(await processManager.kill(process_id), callerId, servingIdentity),
+    async ({ process_id }) => {
+      const remoteId = localRemoteProcessId(process_id);
+      const value = remoteId !== undefined
+        ? remoteProcessResult(await callRemoteOmenTool("kill_process", { process_id: remoteId }))
+        : await processManager.kill(process_id);
+      return structuredTextResult(value, callerId, servingIdentity);
+    },
   );
 
   if (fullToolProfile) {

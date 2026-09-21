@@ -311,10 +311,15 @@ type ProcessState = {
   executionReason?: string;
 };
 
-// PowerShell 7 is the single supported shell runtime. Keep an absolute deterministic
-// path and fail closed if it disappears; never silently fall back to Windows PowerShell 5.1.
-const POWERSHELL_EXE = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
-if (!existsSync(POWERSHELL_EXE)) throw new Error(`Required PowerShell 7 runtime is missing: ${POWERSHELL_EXE}`);
+// Windows keeps the deterministic PowerShell 7 requirement. Native Linux MCP hosts
+// execute structured argv directly and only need pwsh when a caller explicitly asks
+// for PowerShell syntax.
+const POWERSHELL_EXE = process.platform === "win32"
+  ? "C:\\Program Files\\PowerShell\\7\\pwsh.exe"
+  : (process.env.MCP_POWERSHELL_EXE?.trim() || "pwsh");
+if (process.platform === "win32" && !existsSync(POWERSHELL_EXE)) {
+  throw new Error(`Required PowerShell 7 runtime is missing: ${POWERSHELL_EXE}`);
+}
 
 // spawn() reports ENOENT when the *cwd* does not exist, and node attributes it to the
 // executable -- "spawn powershell.exe ENOENT" for a bad working_directory sends callers

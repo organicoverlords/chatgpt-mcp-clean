@@ -44,6 +44,41 @@
           ],
           "additionalProperties": false
         },
+        "execution_serving_identity": {
+          "type": "object",
+          "properties": {
+            "tool_contract_version": {
+              "type": "string",
+              "const": "process-tools.v4"
+            },
+            "backend_generation": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          },
+          "required": [
+            "tool_contract_version"
+          ],
+          "additionalProperties": false
+        },
+        "execution_target": {
+          "type": "string",
+          "enum": [
+            "local",
+            "omen"
+          ]
+        },
+        "execution_transport": {
+          "type": "string",
+          "enum": [
+            "native-mcp",
+            "ssh-adapter"
+          ]
+        },
         "process_id": {
           "type": "string"
         },
@@ -161,6 +196,27 @@
           ],
           "additionalProperties": false
         },
+        "execution_serving_identity": {
+          "type": "object",
+          "properties": {
+            "tool_contract_version": {
+              "type": "string",
+              "const": "process-tools.v4"
+            },
+            "backend_generation": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          },
+          "required": [
+            "tool_contract_version"
+          ],
+          "additionalProperties": false
+        },
         "mcp_status": {
           "type": "string",
           "enum": [
@@ -246,6 +302,13 @@
           "enum": [
             "local",
             "omen"
+          ]
+        },
+        "execution_transport": {
+          "type": "string",
+          "enum": [
+            "native-mcp",
+            "ssh-adapter"
           ]
         },
         "execution_mode": {
@@ -727,7 +790,7 @@
             "local",
             "omen"
           ],
-          "description": "Execution target; local by default, or OMEN through the canonical private-LAN owner."
+          "description": "Execution target; local by default, or OMEN. On a native OMEN MCP host, OMEN executes locally without SSH."
         },
         "wait_ms": {
           "type": "integer",
@@ -781,6 +844,27 @@
           "type": "string"
         },
         "serving_identity": {
+          "type": "object",
+          "properties": {
+            "tool_contract_version": {
+              "type": "string",
+              "const": "process-tools.v4"
+            },
+            "backend_generation": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          },
+          "required": [
+            "tool_contract_version"
+          ],
+          "additionalProperties": false
+        },
+        "execution_serving_identity": {
           "type": "object",
           "properties": {
             "tool_contract_version": {
@@ -886,6 +970,13 @@
           "enum": [
             "local",
             "omen"
+          ]
+        },
+        "execution_transport": {
+          "type": "string",
+          "enum": [
+            "native-mcp",
+            "ssh-adapter"
           ]
         },
         "execution_mode": {

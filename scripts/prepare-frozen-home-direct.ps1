@@ -11,6 +11,7 @@ param(
     [string]$ReceiptStoreRelative = 'shared-process-receipts',
     [ValidateSet('local','omen')][string]$DefaultExecutionTarget = 'local',
     [string]$OmenExecPath = (Join-Path $env:USERPROFILE 'Desktop\vault\tools\omen_exec.py'),
+    [string]$OmenMcpUrl = '',
     [string]$OwnerLoginSourcePath = '',
     [string]$CurrentTopologyPath = (Join-Path $env:USERPROFILE 'Desktop\vault\04 Operating Contracts\mcp-current-topology.json'),
     [switch]$ExplicitUserAuthorization,
@@ -71,7 +72,12 @@ if(-not $DeploymentRoot){ $DeploymentRoot=Join-Path $env:LOCALAPPDATA ("ChatGPTM
 $DeploymentRoot=[IO.Path]::GetFullPath($DeploymentRoot)
 $root=Assert-Candidate $CandidateRoot $commit
 $omenExecPath=[IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($OmenExecPath))
-if($DefaultExecutionTarget -eq 'omen' -and -not (Test-Path -LiteralPath $omenExecPath -PathType Leaf)){ Fail "canonical OMEN execution owner missing: $omenExecPath" }
+$omenMcpUrl=$OmenMcpUrl.Trim()
+if($omenMcpUrl){
+    try{ $omenMcpUri=[Uri]$omenMcpUrl }catch{ Fail "OMEN MCP URL is invalid: $omenMcpUrl" }
+    if($omenMcpUri.Scheme -ne 'http' -or $omenMcpUri.Host -notin @('127.0.0.1','localhost') -or $omenMcpUri.AbsolutePath -ne '/mcp'){ Fail "OMEN MCP URL must be loopback http://127.0.0.1:<port>/mcp: $omenMcpUrl" }
+}
+if($DefaultExecutionTarget -eq 'omen' -and -not $omenMcpUrl -and -not (Test-Path -LiteralPath $omenExecPath -PathType Leaf)){ Fail "canonical OMEN execution owner missing: $omenExecPath" }
 $topology=Read-Topology $CurrentTopologyPath
 $stableRollback=Resolve-StableRollback $topology
 $rollbackPort=[int]$stableRollback.port
@@ -87,7 +93,7 @@ if(Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue){ Fail "c
 if(Test-Path -LiteralPath $DeploymentRoot){ Fail "deployment root already exists: $DeploymentRoot" }
 $planResult=[ordered]@{
     status='PLAN'; commit=$commit; source_root=$root; deployment_root=$DeploymentRoot; runtime_root=(Join-Path $DeploymentRoot 'runtime');
-    task_name=$TaskName; port=$Port; instance_id=$InstanceId; public_origin=$PublicOrigin; oauth_store_relative=$OAuthStoreRelative; receipt_store_relative=$ReceiptStoreRelative; default_execution_target=$DefaultExecutionTarget; omen_exec_path=$omenExecPath; owner_login_source=$ownerLoginSource;
+    task_name=$TaskName; port=$Port; instance_id=$InstanceId; public_origin=$PublicOrigin; oauth_store_relative=$OAuthStoreRelative; receipt_store_relative=$ReceiptStoreRelative; default_execution_target=$DefaultExecutionTarget; omen_exec_path=$(if($omenMcpUrl){$null}else{$omenExecPath}); omen_mcp_url=$omenMcpUrl; owner_login_source=$ownerLoginSource;
     current_serving_listen=[string]$topology.serving.backend.listen; current_frozen_root=$currentFrozen; rollback_port=$rollbackPort; rollback_instance=$rollbackInstance; route_mutation=$false
 }
 if($Plan){ $planResult | ConvertTo-Json -Depth 5 -Compress; exit 0 }
@@ -125,7 +131,7 @@ try {
         schema='mcp-frozen-deployment.v1'; frozen_at=[DateTimeOffset]::UtcNow.ToString('o'); source_repo='organicoverlords/chatgpt-mcp-clean'; canonical_branch='master'; merge_commit=$commit;
         runtime_root=(Join-Path $DeploymentRoot 'runtime'); runtime_tracked_clean=$true; hashes=[ordered]@{dist_index_sha256=$hashes.dist_index_sha256;dist_server_sha256=$hashes.dist_server_sha256};
         routes=[ordered]@{stable=[ordered]@{public_origin=$PublicOrigin;port=$Port;instance=$InstanceId;oauth_store=(Join-Path $env:LOCALAPPDATA ("ChatGPTMcpClean\\minimal-connectors\\$OAuthStoreRelative"));rollback_port=$rollbackPort;rollback_instance=$rollbackInstance}};
-        tool_contract=$toolContract; self_contained_runtime=(Join-Path $DeploymentRoot 'runtime'); runtime_commit=$commit; default_execution_target=$DefaultExecutionTarget; omen_exec_path=$omenExecPath;
+        tool_contract=$toolContract; self_contained_runtime=(Join-Path $DeploymentRoot 'runtime'); runtime_commit=$commit; default_execution_target=$DefaultExecutionTarget; omen_exec_path=$(if($omenMcpUrl){$null}else{$omenExecPath}); omen_mcp_url=$omenMcpUrl;
         process_manager_sha256=$hashes.process_manager_sha256; package_lock_sha256=$hashes.package_lock_sha256
     }
     $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $staging 'deployment.json') -Encoding utf8
@@ -145,7 +151,7 @@ Assert-Hash 'dist\\server.js' ([string]`$m.hashes.dist_server_sha256)
 Assert-Hash 'dist\\lib\\process-manager.js' ([string]`$m.process_manager_sha256)
 Assert-Hash 'package-lock.json' ([string]`$m.package_lock_sha256)
 `$owner=(Get-Content -LiteralPath (Join-Path `$root 'owner-login.txt') -Raw).Trim();if([string]::IsNullOrWhiteSpace(`$owner)){throw 'protected owner-login identity empty'}
-`$env:TAILSCALE_OWNER_LOGIN=`$owner;`$env:MCP_OWNER_AUTH_ORIGIN='';`$env:MCP_OWNER_AUTH_MODE='local-edge';`$env:MCP_DEFAULT_EXECUTION_TARGET='$DefaultExecutionTarget';`$env:MCP_OMEN_EXEC_PATH='$($omenExecPath.Replace("'","''"))'
+`$env:TAILSCALE_OWNER_LOGIN=`$owner;`$env:MCP_OWNER_AUTH_ORIGIN='';`$env:MCP_OWNER_AUTH_MODE='local-edge';`$env:MCP_DEFAULT_EXECUTION_TARGET='$DefaultExecutionTarget';`$env:MCP_OMEN_MCP_URL='$($omenMcpUrl.Replace("'","''"))';`$env:MCP_OMEN_EXEC_PATH=$(if($omenMcpUrl){"''"}else{"'$($omenExecPath.Replace("'","''"))'"})
 `$stateRoot=Join-Path `$env:LOCALAPPDATA 'ChatGPTMcpClean\\minimal-connectors';`$oauth=Join-Path `$stateRoot '$OAuthStoreRelative';`$receipts=Join-Path `$stateRoot '$ReceiptStoreRelative'
 & (Join-Path `$runtime 'scripts\\start-minimal-clone.ps1') -InstanceId '$InstanceId' -Port $Port -PublicOrigin '$PublicOrigin' -StateRoot `$stateRoot -OAuthStorePath `$oauth -RequireExistingOAuthState -SharedReceiptDirectory `$receipts -SkipBuild -RestartOnUnexpectedExit -RestartBackoffSeconds 2 -RestartLimit 0
 exit `$LASTEXITCODE
