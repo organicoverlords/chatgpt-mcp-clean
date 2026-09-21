@@ -14,6 +14,11 @@ if (toolProfile !== "full" && toolProfile !== "process") throw new Error("MCP_TO
 const fullToolProfile = toolProfile === "full";
 const configuredMaxLiveProcessesRaw = process.env.MCP_MAX_LIVE_PROCESSES?.trim();
 const configuredMaxLiveProcesses = configuredMaxLiveProcessesRaw ? Number(configuredMaxLiveProcessesRaw) : undefined;
+const configuredDefaultExecutionTarget = (process.env.MCP_DEFAULT_EXECUTION_TARGET || "local").trim().toLowerCase();
+if (configuredDefaultExecutionTarget !== "local" && configuredDefaultExecutionTarget !== "omen") {
+  throw new Error("MCP_DEFAULT_EXECUTION_TARGET must be local or omen");
+}
+const defaultExecutionTarget = configuredDefaultExecutionTarget as "local" | "omen";
 const processManager = new ProcessManager({
   receiptDirectory: resolve(process.env.MCP_PROCESS_RECEIPT_DIR || ".state/process-receipts"),
   ...(configuredMaxLiveProcesses !== undefined ? { maxLiveTotal: configuredMaxLiveProcesses } : {}),
@@ -258,7 +263,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
     },
     async (input) => {
       const { working_directory, execution_target, wait_ms, activity_target, action_class } = input;
-      const target = execution_target ?? "local";
+      const target = execution_target ?? defaultExecutionTarget;
       let value: Record<string, unknown>;
       if (target === "omen") {
         if (!omenExecPath) throw new Error("omen_execution_unavailable: MCP_OMEN_EXEC_PATH is not configured and no Windows default is available");
