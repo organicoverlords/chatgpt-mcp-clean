@@ -8,6 +8,7 @@ import { z } from "zod";
 // explicitly, but the default must remain production-safe so audits/tests that omit
 // deployment env cannot accidentally inspect the internal full profile.
 delete process.env.MCP_TOOL_PROFILE;
+process.env.MCP_DEFAULT_EXECUTION_TARGET = "local";
 process.env.MCP_PROCESS_RECEIPT_DIR = resolve(".state/process-contract-verifier-receipts");
 const omenFixture = resolve(".state/process-contract-omen-exec.py");
 mkdirSync(resolve(".state"), { recursive: true });
