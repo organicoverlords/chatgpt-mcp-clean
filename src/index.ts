@@ -237,6 +237,8 @@ app.use((req, res, next) => {
 
 app.use("/authorize", (req, res, next) => {
   const host = (req.header("host") || "").toLowerCase();
+  const clientId = typeof req.query.client_id === "string" ? req.query.client_id : "";
+  const redirectUri = typeof req.query.redirect_uri === "string" ? req.query.redirect_uri : "";
   if (OWNER_AUTH_MODE === "tailscale") {
     const login = (req.header("tailscale-user-login") || "").trim().toLowerCase();
     if ((authorizationHost && host !== authorizationHost) || req.header("tailscale-funnel-request") || login !== OWNER) {
@@ -249,16 +251,16 @@ app.use("/authorize", (req, res, next) => {
     const forwardedPrivate = Boolean(req.header("x-forwarded-for"))
       && authorizationHost === host
       && isPrivateOrLocalClientAddress(req.ip);
-    if (!directLocal && !forwardedPrivate) {
+    const forwardedChatGptReconnect = Boolean(req.header("x-forwarded-for"))
+      && authorizationHost === host
+      && isPrivateOrLocalClientAddress(req.socket.remoteAddress)
+      && oauth.isChatGptAuthorizationReconnect(clientId, redirectUri);
+    if (!directLocal && !forwardedPrivate && !forwardedChatGptReconnect) {
       res.status(403).send("Owner authorization required");
       return;
     }
   }
-  if (req.method === "GET") {
-    const clientId = typeof req.query.client_id === "string" ? req.query.client_id : "";
-    const redirectUri = typeof req.query.redirect_uri === "string" ? req.query.redirect_uri : "";
-    if (clientId && redirectUri) oauth.recoverLegacyChatGptClient(clientId, redirectUri);
-  }
+  if (req.method === "GET" && clientId && redirectUri) oauth.recoverLegacyChatGptClient(clientId, redirectUri);
   next();
 });
 const oauthMetadata = {

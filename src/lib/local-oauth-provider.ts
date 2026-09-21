@@ -266,6 +266,17 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     return true;
   }
 
+  isChatGptAuthorizationReconnect(clientId: string, redirectUri: string): boolean {
+    this.load();
+    this.prune();
+    if (!UUID_CLIENT_ID.test(clientId) || !isChatGptRedirect(redirectUri)) return false;
+    const registered = this.clients.get(clientId);
+    if (!registered) return this.isClientReferenced(clientId);
+    const name = (registered.client_name || "").trim().toLowerCase();
+    return (name === "chatgpt" || name === "recovered-chatgpt-client")
+      && (registered.redirect_uris ?? []).includes(redirectUri);
+  }
+
   private getClient(clientId: string): OAuthClientInformationFull | undefined {
     this.load();
     this.prune();

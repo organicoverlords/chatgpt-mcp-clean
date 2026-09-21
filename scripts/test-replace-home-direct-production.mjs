@@ -51,8 +51,9 @@ try {
   assert.equal(plan.target_host, isolatedHost);
   assert.match(plan.candidate_config, new RegExp(`${isolatedHost.replaceAll(".", "\\.")} \\{`));
   assert.equal((plan.candidate_config.match(new RegExp(`reverse_proxy 127\\.0\\.0\\.1:${peerPort + 5}`, "g")) || []).length, 2);
-  assert.match(plan.candidate_config, /remote_ip private_ranges/);
-  assert.match(plan.candidate_config, /respond @authorize "Owner authorization required" 403/);
+  assert.doesNotMatch(plan.candidate_config, /remote_ip private_ranges/);
+  assert.doesNotMatch(plan.candidate_config, /respond @authorize "Owner authorization required" 403/);
+  assert.match(plan.candidate_config, /@authorize path \/authorize/);
   assert.match(plan.candidate_config, /91-159-12-133\.sslip\.io/);
   assert.match(plan.candidate_config, /pr237\.91-159-12-133\.sslip\.io/);
 
@@ -80,7 +81,8 @@ try {
   assert.match(wrapperSource, /Wait-CandidateLocalRoute/);
   assert.match(wrapperSource, /Wait-CandidatePublicRoute/);
   assert.match(wrapperSource, /for\(\$i=0;\$i -lt 40;\$i\+\+\)/, "new-host readiness must retry with a finite bound");
-  assert.match(wrapperSource, /remote_ip private_ranges/, "new isolated host must preserve the owner authorization boundary");
+  assert.doesNotMatch(wrapperSource, /remote_ip private_ranges/, "Caddy must delegate owner authorization to the backend");
+  assert.match(wrapperSource, /@authorize path \/authorize/, "Caddy must route authorize requests to the backend gate");
   assert.match(wrapperSource, /curl\.exe -fsS --max-time 5 .*--data-binary/, "Caddy admin load must use curl exact-body POST instead of Windows PowerShell Invoke-WebRequest");
   assert.match(wrapperSource, /\$curlExit -ne 28/, "Caddy admin load timeout must remain indeterminate until exact route verification");
   assert.match(wrapperSource, /Text\.UTF8Encoding\(\$false\)/, "adapted Caddy JSON must be written explicitly as UTF-8 without BOM for Windows PowerShell compatibility");

@@ -101,15 +101,10 @@ function Add-CaddyTargetHost([string]$ConfigText,[string]$HostName,[int]$Candida
     $block=@"
 
 $HostName {
-	@local_authorize {
-		path /authorize
-		remote_ip private_ranges
-	}
-	handle @local_authorize {
+	@authorize path /authorize
+	handle @authorize {
 		reverse_proxy 127.0.0.1:$CandidatePort
 	}
-	@authorize path /authorize
-	respond @authorize "Owner authorization required" 403
 	handle {
 		reverse_proxy 127.0.0.1:$CandidatePort
 	}

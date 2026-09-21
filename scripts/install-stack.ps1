@@ -87,15 +87,10 @@ function Write-LocalCaddyfile([string]$Path,[string]$HostName,[int]$HttpsPort,[i
 }
 
 $HostName {
-    @local_authorize {
-        path /authorize
-        remote_ip private_ranges
-    }
-    handle @local_authorize {
+    @authorize path /authorize
+    handle @authorize {
         reverse_proxy 127.0.0.1:$BackendPort
     }
-    @authorize path /authorize
-    respond @authorize "Owner authorization required" 403
     handle {
         reverse_proxy 127.0.0.1:$BackendPort
     }
