@@ -8,6 +8,11 @@ for(const required of [
   "RestartOnUnexpectedExit",
   "RequireExistingOAuthState",
   "ReceiptStoreRelative",
+  "DefaultExecutionTarget",
+  "OwnerLoginSourcePath",
+  "owner identity source missing",
+  "MCP_DEFAULT_EXECUTION_TARGET",
+  "default_execution_target=$DefaultExecutionTarget",
   "shared-process-receipts",
   "receipt_store_relative",
   "runtime_identity.source_commit",
@@ -38,4 +43,4 @@ for(const forbidden of [
 assert.match(script,/if\(\$Plan\).*route_mutation/s);
 assert.match(script,/if\(-not \$ExplicitUserAuthorization\)/);
 assert.match(script,/Push-Location -LiteralPath \$runtime[\s\S]*verify-process-contract\.mjs[\s\S]*finally \{[^}]*Pop-Location/,"frozen verifier must run with cwd bound to the frozen runtime even when prepare is launched elsewhere");
-console.log("PASS prepare_frozen_home_direct exact_commit=true self_contained=true persistent_task=true shared_state=true oauth_existing_required=true route_unchanged=true explicit_auth=true verifier_runtime_cwd=true fixed_three_tool_surface=true");
+console.log("PASS prepare_frozen_home_direct exact_commit=true self_contained=true persistent_task=true shared_state=true oauth_existing_required=true route_unchanged=true explicit_auth=true verifier_runtime_cwd=true fixed_three_tool_surface=true per_binding_execution_target=true");
