@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
 
@@ -9,6 +9,16 @@ import { z } from "zod";
 // deployment env cannot accidentally inspect the internal full profile.
 delete process.env.MCP_TOOL_PROFILE;
 process.env.MCP_PROCESS_RECEIPT_DIR = resolve(".state/process-contract-verifier-receipts");
+const omenFixture = resolve(".state/process-contract-omen-exec.py");
+mkdirSync(resolve(".state"), { recursive: true });
+writeFileSync(omenFixture, [
+  "import subprocess, sys",
+  "argv = sys.argv[1:]",
+  "idx = argv.index('--')",
+  "raise SystemExit(subprocess.run(argv[idx + 1:]).returncode)",
+  "",
+].join("\n"), "utf8");
+process.env.MCP_OMEN_EXEC_PATH = omenFixture;
 const { createServer } = await import("../dist/server.js");
 const contractSourceCommit = "0123456789abcdef0123456789abcdef01234567";
 const server = createServer("contract-verifier", { backend_generation: "backend-contract-test", source_commit: contractSourceCommit });
@@ -50,6 +60,11 @@ const startInputSchema = server._registeredTools.start_process?.inputSchema;
 assert.ok(startInputSchema, "start_process input schema missing");
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output LEGACY" })).success, false, "legacy command input must be rejected");
 assert.equal((await startInputSchema.safeParseAsync({ executable: "node", args: ["--version"], stdin: "" })).success, true, "structured executable+args+stdin input must be valid");
+assert.equal((await startInputSchema.safeParseAsync({ execution_target: "omen", executable: "node", args: ["--version"], working_directory: "/tmp" })).success, true, "OMEN executable+args input must be valid");
+assert.equal((await startInputSchema.safeParseAsync({ execution_target: "omen", language: "bash", script: "pwd" })).success, false, "OMEN script input must be rejected");
+assert.equal((await startInputSchema.safeParseAsync({ execution_target: "omen", executable: "node", stdin: "x" })).success, false, "OMEN stdin must be rejected");
+assert.equal((await startInputSchema.safeParseAsync({ execution_target: "omen", executable: "node", env: { X: "1" } })).success, false, "OMEN env overrides must be rejected");
+assert.equal((await startInputSchema.safeParseAsync({ execution_target: "mars", executable: "node" })).success, false, "unknown execution targets must be rejected");
 
 const readInputSchema = server._registeredTools.read_output?.inputSchema;
 assert.ok(readInputSchema, "read_output input schema missing");
@@ -87,6 +102,15 @@ const argvStructured = await assertStructuredProcessResult("start_process", {
 assert.equal(argvStructured.execution_mode, "native", "structured executable mode must bypass PowerShell");
 assert.equal(argvStructured.execution_reason, "structured_argv", "structured executable mode must expose its routing reason");
 assert.deepEqual(JSON.parse(String(argvStructured.stdout || "").trim()), [trickyArg], "structured argv must survive without shell reinterpretation");
+const omenStructured = await assertStructuredProcessResult("start_process", {
+  execution_target: "omen",
+  executable: process.execPath,
+  args: ["-e", "console.log('omen-target-contract')"],
+  working_directory: "/tmp",
+  wait_ms: 10_000,
+});
+assert.equal(omenStructured.execution_target, "omen", "OMEN execution must identify the selected target");
+assert.match(String(omenStructured.stdout || ""), /omen-target-contract/, "OMEN target wrapper must execute the requested argv");
 const stdinStructured = await assertStructuredProcessResult("start_process", {
   executable: process.execPath,
   args: ["-e", "process.stdin.pipe(process.stdout)"],
@@ -109,7 +133,7 @@ const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "716c18f9c120b241fc58d0e301f6454069e16bc19db6f954050f8c54b62abdc1";
+const acceptedContractSha256 = "0746bb7fcfbbff1dcfd7705b526304470b884dde7ae67c2c49da16e1ec161f18";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 const expectedTools = [...baseExpectedTools].sort((a, b) => a.name.localeCompare(b.name));

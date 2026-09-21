@@ -241,6 +241,13 @@
           "maxLength": 64,
           "pattern": "^[A-Za-z0-9._/:_-]+$"
         },
+        "execution_target": {
+          "type": "string",
+          "enum": [
+            "local",
+            "omen"
+          ]
+        },
         "execution_mode": {
           "type": "string",
           "enum": [
@@ -657,7 +664,7 @@
   },
   {
     "name": "start_process",
-    "description": "Execute a local process and return structured process output.",
+    "description": "Execute a process locally or on the configured OMEN target and return structured process output.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -711,7 +718,16 @@
           "description": "Runtime for script."
         },
         "working_directory": {
-          "type": "string"
+          "type": "string",
+          "description": "Working directory on the selected execution target."
+        },
+        "execution_target": {
+          "type": "string",
+          "enum": [
+            "local",
+            "omen"
+          ],
+          "description": "Execution target; local by default, or OMEN through the canonical private-LAN owner."
         },
         "wait_ms": {
           "type": "integer",
@@ -864,6 +880,13 @@
           "minLength": 1,
           "maxLength": 64,
           "pattern": "^[A-Za-z0-9._/:_-]+$"
+        },
+        "execution_target": {
+          "type": "string",
+          "enum": [
+            "local",
+            "omen"
+          ]
         },
         "execution_mode": {
           "type": "string",

@@ -18,6 +18,11 @@ const processManager = new ProcessManager({
   receiptDirectory: resolve(process.env.MCP_PROCESS_RECEIPT_DIR || ".state/process-receipts"),
   ...(configuredMaxLiveProcesses !== undefined ? { maxLiveTotal: configuredMaxLiveProcesses } : {}),
 });
+const defaultOmenExecPath = process.platform === "win32" && process.env.USERPROFILE
+  ? resolve(process.env.USERPROFILE, "Desktop", "vault", "tools", "omen_exec.py")
+  : undefined;
+const omenExecPath = process.env.MCP_OMEN_EXEC_PATH?.trim() || defaultOmenExecPath;
+const omenPython = process.env.MCP_OMEN_PYTHON?.trim() || "python";
 const activityToken = /^[A-Za-z0-9._/:_-]+$/;
 const activityTargetSchema = z.object({
   type: z.enum(["card", "node", "project"]),
@@ -33,7 +38,8 @@ const processEnvironmentSchema = z.record(
   .refine((value) => Object.entries(value).reduce((sum, [key, item]) => sum + key.length + item.length, 0) <= 1_000_000, "env payload exceeds 1000000 characters");
 
 const startProcessCommonShape = {
-  working_directory: z.string().optional(),
+  working_directory: z.string().describe("Working directory on the selected execution target.").optional(),
+  execution_target: z.enum(["local", "omen"]).describe("Execution target; local by default, or OMEN through the canonical private-LAN owner.").optional(),
   wait_ms: z.number().int().min(0).max(240_000).optional(),
   activity_target: activityTargetSchema.optional(),
   action_class: actionClassSchema.optional(),
@@ -54,6 +60,11 @@ const startProcessInputSchema = z.object({
   if (!structured && input.args !== undefined) ctx.addIssue({ code: "custom", path: ["args"], message: "args is only valid with executable" });
   if (!structured && input.stdin !== undefined) ctx.addIssue({ code: "custom", path: ["stdin"], message: "stdin is only valid with executable" });
   if (scripted !== (input.language !== undefined)) ctx.addIssue({ code: "custom", path: ["language"], message: "language is required exactly when script is provided" });
+  if (input.execution_target === "omen") {
+    if (!structured) ctx.addIssue({ code: "custom", path: ["execution_target"], message: "OMEN execution requires executable+args" });
+    if (input.stdin !== undefined) ctx.addIssue({ code: "custom", path: ["stdin"], message: "stdin is not supported for OMEN execution" });
+    if (input.env !== undefined) ctx.addIssue({ code: "custom", path: ["env"], message: "env is not supported for OMEN execution" });
+  }
 });
 
 const repairAttemptSchema = z.object({
@@ -131,6 +142,7 @@ const processOutputSchema = z.object({
   launching: z.literal(true).optional(),
   activity_target: activityTargetSchema.optional(),
   action_class: actionClassSchema.optional(),
+  execution_target: z.enum(["local", "omen"]).optional(),
   execution_mode: z.enum(["powershell", "native", "explicit_shell", "native_sequence", "native_pipeline"]).optional(),
   execution_reason: z.string().optional(),
   repair_attempts: z.array(repairAttemptSchema).optional(),
@@ -239,16 +251,32 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
   server.registerTool(
     "start_process",
     {
-      description: "Execute a local process and return structured process output.",
+      description: "Execute a process locally or on the configured OMEN target and return structured process output.",
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
       inputSchema: startProcessInputSchema,
       outputSchema: processOutputSchema,
     },
     async (input) => {
-      const { working_directory, wait_ms, activity_target, action_class } = input;
-      const value = input.executable !== undefined
-        ? await processManager.startStructuredWithWait(input.executable, input.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, input.stdin, input.env)
-        : await processManager.startScriptWithWait(input.language!, input.script!, working_directory, callerId, wait_ms ?? 750, activity_target, action_class, input.env);
+      const { working_directory, execution_target, wait_ms, activity_target, action_class } = input;
+      const target = execution_target ?? "local";
+      let value: Record<string, unknown>;
+      if (target === "omen") {
+        if (!omenExecPath) throw new Error("omen_execution_unavailable: MCP_OMEN_EXEC_PATH is not configured and no Windows default is available");
+        value = await processManager.startStructuredWithWait(
+          omenPython,
+          [omenExecPath, "--cwd", working_directory ?? "/home/aatuska", "--", input.executable!, ...(input.args ?? [])],
+          undefined,
+          callerId,
+          wait_ms ?? 240_000,
+          activity_target,
+          action_class,
+        );
+        value = { ...value, execution_target: "omen" };
+      } else {
+        value = input.executable !== undefined
+          ? await processManager.startStructuredWithWait(input.executable, input.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, input.stdin, input.env)
+          : await processManager.startScriptWithWait(input.language!, input.script!, working_directory, callerId, wait_ms ?? 750, activity_target, action_class, input.env);
+      }
       return structuredTextResult(value, callerId, servingIdentity);
     },
   );
