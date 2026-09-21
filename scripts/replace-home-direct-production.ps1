@@ -118,7 +118,25 @@ function Replace-CaddyTargetUpstream([string]$ConfigText,[string]$HostName,[int]
     $needle="127.0.0.1:$CurrentPort";$replacement="127.0.0.1:$CandidatePort"
     $count=([regex]::Matches($block,[regex]::Escape($needle))).Count
     if($count -ne 2){ throw "expected exactly two target-host upstream references to $needle; found $count" }
-    $next=$block.Replace($needle,$replacement)
+    $legacyOwnerGate=$block -match 'remote_ip\s+private_ranges' -or $block -match 'respond\s+@authorize\s+"Owner authorization required"\s+403'
+    if($legacyOwnerGate){
+        if($block -notmatch 'remote_ip\s+private_ranges' -or $block -notmatch 'respond\s+@authorize\s+"Owner authorization required"\s+403'){
+            throw "target host contains a partial legacy owner-authorization gate; refusing to rewrite an ambiguous block"
+        }
+        $next=@"
+$HostName {
+	@authorize path /authorize
+	handle @authorize {
+		reverse_proxy 127.0.0.1:$CandidatePort
+	}
+	handle {
+		reverse_proxy 127.0.0.1:$CandidatePort
+	}
+}
+"@.Trim()
+    }else{
+        $next=$block.Replace($needle,$replacement)
+    }
     return $ConfigText.Substring(0,[int]$range.Start)+$next+$ConfigText.Substring([int]$range.Start+[int]$range.Length)
 }
 if(-not (Test-Path -LiteralPath $CaddyConfigPath -PathType Leaf)){ throw "Caddy config missing: $CaddyConfigPath" }
