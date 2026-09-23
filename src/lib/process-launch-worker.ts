@@ -8,8 +8,21 @@ import { planCommandExecution, type CommandExecutionPlan, type CommandExecutionS
 
 type LaunchData = { powershellExe: string };
 
-function launchEnvironment(command: string, requestId: string, cwd: string, overrides?: Record<string, string>): { env: NodeJS.ProcessEnv; pytestTempRoot?: string } {
+function launchEnvironment(
+  command: string,
+  requestId: string,
+  cwd: string,
+  overrides?: Record<string, string>,
+  ownerCallerId?: string,
+  ownerSessionId?: string | null,
+): { env: NodeJS.ProcessEnv; pytestTempRoot?: string } {
   const env = processChildEnvironment({ ...process.env, ...(overrides ?? {}) }, undefined, cwd);
+  delete env.MCP_PROCESS_OWNER_CALLER_ID;
+  delete env.MCP_PROCESS_OWNER_SESSION_ID;
+  const trustedCallerId = ownerCallerId?.trim();
+  const trustedSessionId = ownerSessionId?.trim();
+  if (trustedCallerId) env.MCP_PROCESS_OWNER_CALLER_ID = trustedCallerId;
+  if (trustedSessionId) env.MCP_PROCESS_OWNER_SESSION_ID = trustedSessionId;
   const invokesPytest = /(?:^|[;&|\s])(?:(?:python|python\.exe|py|py\.exe)\s+(?:-[^\s]+\s+)*-m\s+pytest\b|pytest(?:\.exe)?\b)/i.test(command);
   if (!invokesPytest || /--basetemp(?:=|\s)/i.test(command) || env.PYTEST_DEBUG_TEMPROOT) return { env };
   const systemTemp = (env.TEMP || env.TMP || "").trim();
@@ -20,7 +33,15 @@ function launchEnvironment(command: string, requestId: string, cwd: string, over
   return { env, pytestTempRoot };
 }
 
-type LaunchMessage = { type: "launch"; requestId: string; command: string; cwd: string; plan?: CommandExecutionPlan };
+type LaunchMessage = {
+  type: "launch";
+  requestId: string;
+  command: string;
+  cwd: string;
+  plan?: CommandExecutionPlan;
+  ownerCallerId?: string;
+  ownerSessionId?: string | null;
+};
 type KillMessage = { type: "kill"; requestId: string };
 type LauncherMessage = LaunchMessage | KillMessage;
 type OutputKind = "stdout" | "stderr";
@@ -218,9 +239,16 @@ async function runNativePipeline(
   }
 }
 
-async function executePlan(requestId: string, command: string, cwd: string, suppliedPlan?: CommandExecutionPlan): Promise<void> {
+async function executePlan(
+  requestId: string,
+  command: string,
+  cwd: string,
+  suppliedPlan?: CommandExecutionPlan,
+  ownerCallerId?: string,
+  ownerSessionId?: string | null,
+): Promise<void> {
   const plan = suppliedPlan ?? planCommandExecution(command, data.powershellExe);
-  const launchEnv = launchEnvironment(command, requestId, cwd, plan.env);
+  const launchEnv = launchEnvironment(command, requestId, cwd, plan.env, ownerCallerId, ownerSessionId);
   const steps = planSteps(plan);
   let previousCode: number | undefined;
   let finalSignal: NodeJS.Signals | null = null;
@@ -256,10 +284,17 @@ async function executePlan(requestId: string, command: string, cwd: string, supp
   }
 }
 
-function launch(requestId: string, command: string, cwd: string, suppliedPlan?: CommandExecutionPlan): void {
+function launch(
+  requestId: string,
+  command: string,
+  cwd: string,
+  suppliedPlan?: CommandExecutionPlan,
+  ownerCallerId?: string,
+  ownerSessionId?: string | null,
+): void {
   const testDelay = Math.max(0, Number(process.env.MCP_TEST_LAUNCH_DELAY_MS || 0));
   if (testDelay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, testDelay);
-  void executePlan(requestId, command, cwd, suppliedPlan);
+  void executePlan(requestId, command, cwd, suppliedPlan, ownerCallerId, ownerSessionId);
 }
 
 port.on("message", (message: LauncherMessage) => {
@@ -268,5 +303,7 @@ port.on("message", (message: LauncherMessage) => {
     requestKill(message.requestId);
     return;
   }
-  if (message.type === "launch") launch(message.requestId, message.command, message.cwd, message.plan);
+  if (message.type === "launch") {
+    launch(message.requestId, message.command, message.cwd, message.plan, message.ownerCallerId, message.ownerSessionId);
+  }
 });

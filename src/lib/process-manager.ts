@@ -1834,7 +1834,14 @@ export class ProcessManager {
     emitTelemetry({ event: "process_command_retried", process_id: state.id, owner_caller_id: state.callerId, repair_reason: repair.reason, prior_exit_code: exitCode }, state.ownerContext);
     this.markProcessChanged(state);
     try {
-      this.launcherWorker.postMessage({ type: "launch", requestId: state.id, command: state.command, cwd: state.cwd });
+      this.launcherWorker.postMessage({
+        type: "launch",
+        requestId: state.id,
+        command: state.command,
+        cwd: state.cwd,
+        ownerCallerId: state.callerId,
+        ownerSessionId: state.ownerContext.session_id ?? undefined,
+      });
       return true;
     } catch (error) {
       state.error = error instanceof Error ? error.message : String(error);
@@ -2656,7 +2663,15 @@ export class ProcessManager {
     this.processes.set(state.id, state);
     sharedLauncherHandlers.set(state.id, (message) => this.handleLauncherMessage(message));
     try {
-      this.launcherWorker.postMessage({ type: "launch", requestId: state.id, command: effectiveCommand, cwd, plan: executionPlan });
+      this.launcherWorker.postMessage({
+        type: "launch",
+        requestId: state.id,
+        command: effectiveCommand,
+        cwd,
+        plan: executionPlan,
+        ownerCallerId: state.callerId,
+        ownerSessionId: state.ownerContext.session_id ?? undefined,
+      });
     } catch (error) {
       sharedLauncherHandlers.delete(state.id);
       this.processes.delete(state.id);
