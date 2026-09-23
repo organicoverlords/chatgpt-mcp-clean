@@ -34,7 +34,7 @@ const rawBearer = "Bearer secret-bearer-value-that-must-not-be-logged";
 telemetry.sessionFingerprint(rawBearer);
 
 const manager = new ProcessManager();
-const rawCommand = "Write-Output 'TELEMETRY_OK'";
+const rawCommand = 'Write-Output "TELEMETRY_OK|$env:MCP_PROCESS_OWNER_CALLER_ID|$env:MCP_PROCESS_OWNER_SESSION_ID"';
 let started;
 await telemetry.withTelemetryContext({
   request_id: "request_start",
@@ -61,7 +61,32 @@ do {
 } while (Date.now() < deadline);
 
 assert.equal(state.running, false, "telemetry test process must finish");
-assert.match(state.stdout, /TELEMETRY_OK/);
+assert.match(state.stdout, new RegExp(`TELEMETRY_OK\\|caller_owner\\|${sessionId}`), "child must receive trusted request owner identity without transport-log polling");
+
+let structuredState;
+await telemetry.withTelemetryContext({
+  request_id: "request_structured_identity",
+  caller_id: "caller_owner",
+  connection_id: connectionId,
+  session_id: sessionId,
+}, async () => {
+  structuredState = await manager.startStructuredWithWait(
+    process.execPath,
+    ["-e", "process.stdout.write(`${process.env.MCP_PROCESS_OWNER_CALLER_ID}|${process.env.MCP_PROCESS_OWNER_SESSION_ID}`)"],
+    undefined,
+    "caller_owner",
+    2_000,
+    undefined,
+    undefined,
+    undefined,
+    {
+      MCP_PROCESS_OWNER_CALLER_ID: "caller_spoofed",
+      MCP_PROCESS_OWNER_SESSION_ID: "session_spoofed",
+    },
+  );
+});
+assert.equal(structuredState.running, false, "structured identity test process must finish");
+assert.equal(structuredState.stdout, `caller_owner|${sessionId}`, "trusted request identity must override caller-supplied reserved env values");
 
 const opened = events.find((event) => event.event === "connection_open");
 const closed = events.find((event) => event.event === "connection_close");
