@@ -162,10 +162,16 @@ export async function readBootstrapSnapshot(
   } finally { await file.close(); }
   const generatedAt = Date.parse(payload?.generated_at);
   const bootstrapEnd = timeline ? undefined : bootstrapRoot(payload, "bootstrap_end");
-  const acceptedBootstrapSchema = payload?.schema === "bootstrap.v1" || payload?.schema === "bootstrap.v2" || payload?.schema === "bootstrap.v4";
+  const v3Bootstrap = payload?.schema === "v3-rust.bootstrap.v1";
+  const acceptedBootstrapSchema = payload?.schema === "bootstrap.v1"
+    || payload?.schema === "bootstrap.v2"
+    || payload?.schema === "bootstrap.v4"
+    || v3Bootstrap;
+  const v3Coverage = v3Bootstrap && isRecord(payload?.coverage) ? payload.coverage : undefined;
   if ((timeline ? payload?.schema !== "vault.timeline.bootstrap.v1" : !acceptedBootstrapSchema)
       || !Number.isFinite(generatedAt) || generatedAt > Date.now() + 5_000
-      || (!timeline && (!isRecord(bootstrapEnd) || bootstrapEnd.status !== "COMPLETE" || bootstrapEnd.schema !== payload.schema))) {
+      || (!timeline && (!isRecord(bootstrapEnd) || bootstrapEnd.status !== "COMPLETE" || bootstrapEnd.schema !== payload.schema))
+      || (v3Bootstrap && (!v3Coverage || v3Coverage.status !== "COMPLETE" || v3Coverage.exact_user_text !== true || v3Coverage.age_stripping !== false))) {
     throw new Error("Snapshot producer returned incomplete or invalid payload");
   }
   const ageSeconds = Math.max(0, (Date.now() - generatedAt) / 1000);
