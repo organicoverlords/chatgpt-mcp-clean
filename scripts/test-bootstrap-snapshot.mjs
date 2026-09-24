@@ -93,6 +93,19 @@ try {
   writeBootstrap({ schema: "bootstrap.v4", bootstrap_end: { status: "COMPLETE", schema: "bootstrap.v4" }, padding: "x".repeat(80_000) });
   const v4Page = await readBootstrapSnapshot(100_000, "bootstrap", "v4-caller");
   assert.equal(JSON.parse(v4Page.stdout).schema, "bootstrap.v4");
+  writeBootstrap({
+    schema: "v3-rust.bootstrap.v1",
+    coverage: { status: "COMPLETE", exact_user_text: true, age_stripping: false, retained_turns: 300 },
+    bootstrap_end: { status: "COMPLETE", schema: "v3-rust.bootstrap.v1" },
+  });
+  const v3RustPage = await readBootstrapSnapshot(100_000, "bootstrap", "v3-rust-caller");
+  assert.equal(JSON.parse(v3RustPage.stdout).schema, "v3-rust.bootstrap.v1");
+  writeBootstrap({
+    schema: "v3-rust.bootstrap.v1",
+    coverage: { status: "PARTIAL", exact_user_text: true, age_stripping: false },
+    bootstrap_end: { status: "COMPLETE", schema: "v3-rust.bootstrap.v1" },
+  });
+  await assert.rejects(readBootstrapSnapshot(100_000, "bootstrap", "v3-rust-partial-caller"), /incomplete or invalid/);
   writeBootstrap({ schema: "bootstrap.v3", bootstrap_end: { status: "COMPLETE", schema: "bootstrap.v3" } });
   await assert.rejects(readBootstrapSnapshot(100_000, "bootstrap", "unknown-schema-caller"), /incomplete or invalid/);
   writeFileSync(process.env.MCP_BOOTSTRAP_SNAPSHOT_PATH, " ".repeat(96 * 1024 + 1));
