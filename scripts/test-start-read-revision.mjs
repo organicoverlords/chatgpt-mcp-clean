@@ -5,7 +5,7 @@ const manager = new ProcessManager();
 let started;
 try {
   started = await manager.startWithWait(
-    "Write-Output 'START_PACKET_VISIBLE'; Start-Sleep -Seconds 6",
+    "Write-Output 'START_PACKET_VISIBLE'; $gate=[System.Threading.ManualResetEventSlim]::new($false); $gate.Wait()",
     undefined,
     "caller_start_read_revision_test",
     2_500,

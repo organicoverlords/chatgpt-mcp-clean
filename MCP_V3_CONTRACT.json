@@ -1,0 +1,10 @@
+{
+  "schema": "mcp.transport.v3",
+  "public_tools": [
+    "start_process",
+    "read_output",
+    "kill_process"
+  ],
+  "history_owner": "vault-memory",
+  "consumer": "v3-stack"
+}

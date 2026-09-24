@@ -1,5 +1,5 @@
-# MCP North Star moved
+# MCP V3 north star
 
-Canonical document: [NORTH_STAR.md](https://github.com/organicoverlords/agents/blob/main/docs/repos/chatgpt-mcp-clean/NORTH_STAR.md).
+Keep the connector small, deterministic, and transport-focused.
 
-This repository path is a compatibility pointer only. Edit human-facing product direction in `organicoverlords/agents`; machine-parsed README/CHANGELOG, runtime code/config, incident contracts, and evidence remain repo-owned.
+MCP makes V3 stack actions executable and observable without becoming a second scheduler, memory system, deployment registry, or application platform. Three process tools are enough; everything else integrates through the owning V3 service.

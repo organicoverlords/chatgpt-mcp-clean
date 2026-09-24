@@ -4,16 +4,12 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { resolve } from "node:path";
 import { isBootstrapSnapshot, readBootstrapSnapshot } from "./lib/bootstrap-snapshot.js";
 import { z } from "zod";
-import { BusyStore } from "./lib/busy-store.js";
 import { ProcessManager } from "./lib/process-manager.js";
 import { prepareMarkedArtifactHandoffs, registerArtifactFileResource } from "./lib/file-transfer.js";
 
-// The deployed ChatGPT connector surface is the process profile. Keep the broader
-// full profile explicit-only for internal/local tests so repo inspection without a
-// deployment-specific environment cannot silently advertise non-plugin tools.
+// V3 MCP is transport/process only. Scheduling and coordination live in the V3 stack.
 const toolProfile = (process.env.MCP_TOOL_PROFILE || "process").trim().toLowerCase();
-if (toolProfile !== "full" && toolProfile !== "process") throw new Error("MCP_TOOL_PROFILE must be full or process");
-const fullToolProfile = toolProfile === "full";
+if (toolProfile !== "process") throw new Error("MCP_TOOL_PROFILE must be process");
 const configuredMaxLiveProcessesRaw = process.env.MCP_MAX_LIVE_PROCESSES?.trim();
 const configuredMaxLiveProcesses = configuredMaxLiveProcessesRaw ? Number(configuredMaxLiveProcessesRaw) : undefined;
 const configuredDefaultExecutionTarget = (process.env.MCP_DEFAULT_EXECUTION_TARGET || "local").trim().toLowerCase();
@@ -256,12 +252,6 @@ const killProcessOutputSchema = z.object({
   signal: z.string().nullable().optional(),
 }).strict();
 
-const liveSessions = new Set<string>();
-const busyStore = fullToolProfile ? new BusyStore((scope) => {
-  const sessionId = scope.startsWith("session:") ? scope.slice("session:".length) : scope;
-  return liveSessions.has(sessionId) || processManager.hasLiveScope(scope);
-}) : undefined;
-
 function resultData(value: unknown, id: string, servingIdentity?: Record<string, unknown>): Record<string, unknown> {
   const base = value && typeof value === "object" && !Array.isArray(value)
     ? { ...(value as Record<string, unknown>), caller_id: id }
@@ -289,11 +279,6 @@ async function structuredTextResult(value: unknown, id: string, servingIdentity:
 
 export function processRuntimeStatus(): { live_process_count: number } {
   return { live_process_count: processManager.liveProcessCount() };
-}
-
-export function markSessionLive(sessionId: string, live: boolean): void {
-  if (live) liveSessions.add(sessionId);
-  else liveSessions.delete(sessionId);
 }
 
 export function createServer(callerId: string, runtimeIdentity: ProcessServingIdentity = {}): McpServer {
@@ -405,37 +390,6 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
     },
   );
 
-  if (fullToolProfile) {
-  server.registerTool(
-      "busy_list",
-    {
-      description: "List current exact-scope BUSY claims.",
-      // Explicit empty shape, not an omitted inputSchema. Omitting it makes the SDK
-      // advertise {"type":"object","properties":{}} with no $schema dialect, unlike
-      // every other tool here; strict clients reject that tool on first call.
-      inputSchema: z.object({}),
-    },
-    async () => textResult({ claims: await busyStore!.list() }, callerId),
-  );
-
-  server.registerTool(
-    "busy_claim",
-    {
-      description: "Claim one exact scope for an actor, or report the existing claim without changing it.",
-      inputSchema: z.object({ actor: z.string().min(1), scope: z.string().min(1) }),
-    },
-    async ({ actor, scope }) => textResult(await busyStore!.claim(actor, scope), callerId),
-  );
-
-  server.registerTool(
-    "busy_release",
-    {
-      description: "Release only the named actor's claim for one exact scope.",
-      inputSchema: z.object({ actor: z.string().min(1), scope: z.string().min(1) }),
-    },
-    async ({ actor, scope }) => textResult(await busyStore!.release(actor, scope), callerId),
-  );
-  }
 
   return server;
 }
