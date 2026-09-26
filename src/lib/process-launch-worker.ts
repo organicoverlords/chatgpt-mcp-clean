@@ -214,7 +214,7 @@ function runStep(
     child.stderr?.on("data", (chunk) => queueOutput(requestId, "stderr", chunk));
     if (step.stdin !== undefined) child.stdin?.end(step.stdin);
 
-    child.once("exit", (code, signal) => {
+    child.once("close", (code, signal) => {
       if (settled) return;
       settled = true;
       flushOutput(requestId);
@@ -297,6 +297,9 @@ async function executePlan(
       finalSignal = result.signal;
       if (result.signal) break;
     }
+    // Publish terminal state only after every pending stdout/stderr batch is sent.
+    // This keeps fast-process completion from racing ahead of its final output.
+    flushOutput(requestId);
     send(requestId, { type: "exit", code: previousCode ?? 0, signal: finalSignal });
   } catch (error) {
     const errorCode = typeof (error as NodeJS.ErrnoException)?.code === "string" ? (error as NodeJS.ErrnoException).code : undefined;

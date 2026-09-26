@@ -47,6 +47,7 @@ await telemetry.withTelemetryContext({
 
 const deadline = Date.now() + 10_000;
 let state;
+let observedStdout = "";
 do {
   await telemetry.withTelemetryContext({
     request_id: "request_read",
@@ -56,12 +57,13 @@ do {
   }, async () => {
     state = await manager.readWithWait(started.process_id, undefined, 23);
   });
+  observedStdout += String(state.stdout || "");
   if (!state.running) break;
   await new Promise((resolve) => setTimeout(resolve, 10));
 } while (Date.now() < deadline);
 
 assert.equal(state.running, false, "telemetry test process must finish");
-assert.match(state.stdout, new RegExp(`TELEMETRY_OK\\|caller_owner\\|${sessionId}`), "child must receive trusted request owner identity without transport-log polling");
+assert.match(observedStdout, new RegExp(`TELEMETRY_OK\\|caller_owner\\|${sessionId}`), "child must receive trusted request owner identity without transport-log polling");
 
 let structuredState;
 await telemetry.withTelemetryContext({
