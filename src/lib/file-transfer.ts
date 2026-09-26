@@ -205,7 +205,7 @@ function markedArtifactPaths(value: unknown): string[] {
   return paths;
 }
 
-type ArtifactDeliveryState = { marker_count: number; dropped_from_start: number; touched_at: number };
+type ArtifactDeliveryState = { marker_count: number; dropped_from_start: number; touched_at: number; stdout_end?: number };
 const artifactDeliveryState = new Map<string, ArtifactDeliveryState>();
 
 function newlyMarkedArtifactPaths(value: unknown): string[] {
@@ -214,6 +214,27 @@ function newlyMarkedArtifactPaths(value: unknown): string[] {
   const record = value as Record<string, unknown>;
   const processId = typeof record.process_id === "string" ? record.process_id : "";
   if (!processId) return paths;
+  const page = record.output_page;
+  if (page && typeof page === "object" && !Array.isArray(page)) {
+    const stdoutStart = Number((page as Record<string, unknown>).stdout_start);
+    const stdoutEnd = Number((page as Record<string, unknown>).stdout_end);
+    if (Number.isFinite(stdoutStart) && Number.isFinite(stdoutEnd)) {
+      const prior = artifactDeliveryState.get(processId);
+      const priorEnd = prior?.stdout_end ?? 0;
+      const freshPage = stdoutEnd > priorEnd && stdoutStart >= priorEnd;
+      artifactDeliveryState.set(processId, {
+        marker_count: 0,
+        dropped_from_start: 0,
+        touched_at: Date.now(),
+        stdout_end: Math.max(priorEnd, stdoutEnd),
+      });
+      if (artifactDeliveryState.size > 512) {
+        const oldest = [...artifactDeliveryState.entries()].sort((a, b) => a[1].touched_at - b[1].touched_at).slice(0, artifactDeliveryState.size - 512);
+        for (const [key] of oldest) artifactDeliveryState.delete(key);
+      }
+      return freshPage ? paths : [];
+    }
+  }
   const dropped = typeof record.stdout_dropped_from_start === "number" ? record.stdout_dropped_from_start : 0;
   const prior = artifactDeliveryState.get(processId);
   const reset = !prior || prior.dropped_from_start !== dropped || paths.length < prior.marker_count;
