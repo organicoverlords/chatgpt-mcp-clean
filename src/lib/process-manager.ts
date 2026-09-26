@@ -1,15 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { mkdir as mkdirAsync, readFile as readFileAsync, readdir as readdirAsync, rename as renameAsync, stat as statAsync, unlink as unlinkAsync, writeFile as writeFileAsync } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { Worker } from "node:worker_threads";
 import { currentTelemetryContext, emitTelemetry, withTelemetryContext, type TelemetryContext } from "./transport-telemetry.js";
 import { planCommandExecution, planStructuredExecution, planStructuredScript, type CommandExecutionMode, type CommandExecutionPlan, type StructuredScriptLanguage } from "./command-execution-plan.js";
 
-const MAX_CAPTURE_CHARS = 100_000;
-// The read_output contract allows up to 100,000 characters per stream/page.
-// Completed output still pages losslessly through the same process_id when retained output exceeds that limit.
-const MAX_READ_CHARS = 100_000;
+const MAX_CAPTURE_CHARS = 256_000;
+// The in-memory capture is only a diagnostic tail. Complete output is spooled to disk.
+const MAX_READ_CHARS = 256_000;
 export const MAX_READ_WAIT_MS = 240_000;
 export const ADAPTIVE_READ_WAIT_MS = [2_000, 5_000, 10_000, 30_000, 60_000] as const;
 
@@ -144,6 +144,10 @@ type CompletedProcessReceipt = {
   cwd: string;
   stdout: string;
   stderr: string;
+  stdout_spool_path?: string;
+  stderr_spool_path?: string;
+  stdout_chars?: number;
+  stderr_chars?: number;
   stdout_truncated?: true;
   stderr_truncated?: true;
   exit_code: number | null;
@@ -294,6 +298,16 @@ type ProcessState = {
   killRequested: boolean;
   stdout: BoundedCapture;
   stderr: BoundedCapture;
+  stdoutSpoolPath: string;
+  stderrSpoolPath: string;
+  stdoutChars: number;
+  stderrChars: number;
+  stdoutBytes: number;
+  stderrBytes: number;
+  stdoutHash: ReturnType<typeof createHash>;
+  stderrHash: ReturnType<typeof createHash>;
+  stdoutSha256?: string;
+  stderrSha256?: string;
   startedAt: string;
   finishedAt?: string;
   exitCode: number | null;
@@ -1777,6 +1791,7 @@ export class ProcessManager {
   private readonly maxLiveTotal?: number;
   private readonly maxCompletedProcesses: number;
   private readonly receiptDirectory?: string;
+  private readonly outputSpoolDirectory: string;
   private readonly hostAdmissionDirectory?: string;
   private readonly hostAdmissionSlots = new Map<string, string>();
   private readonly receiptArchiveDirectory?: string;
@@ -1801,6 +1816,11 @@ export class ProcessManager {
     this.maxCompletedProcesses = options.maxCompletedProcesses ?? MAX_COMPLETED_PROCESSES;
     this.launcherWorker = sharedPowerShellWorker();
     this.receiptDirectory = options.receiptDirectory ? resolve(options.receiptDirectory) : undefined;
+    this.outputSpoolDirectory = this.receiptDirectory
+      ? join(this.receiptDirectory, ".output")
+      : join(tmpdir(), "chatgpt-mcp-process-output", String(process.pid));
+    mkdirSync(this.outputSpoolDirectory, { recursive: true });
+    this.pruneOutputSpools();
     if (this.receiptDirectory) {
       mkdirSync(this.receiptDirectory, { recursive: true });
       if (this.maxLiveTotal !== undefined) {
@@ -1955,6 +1975,7 @@ export class ProcessManager {
     state.command = normalized;
     state.stdout.reset();
     state.stderr.reset();
+    this.resetOutputSpools(state);
     state.pid = 0;
     state.launching = true;
     state.attemptStartedAt = finishedAt;
@@ -1968,6 +1989,8 @@ export class ProcessManager {
         cwd: state.cwd,
         ownerCallerId: state.callerId,
         ownerSessionId: state.ownerContext.session_id ?? undefined,
+        stdoutSpoolPath: state.stdoutSpoolPath,
+        stderrSpoolPath: state.stderrSpoolPath,
       });
       return true;
     } catch (error) {
@@ -2100,8 +2123,24 @@ export class ProcessManager {
       if (state.killRequested) this.launcherWorker.postMessage({ type: "kill", requestId: state.id });
       return;
     }
-    if (message.type === "stdout") { state.stdout.append(String(message.data ?? "")); this.markProcessChanged(state); return; }
-    if (message.type === "stderr") { state.stderr.append(String(message.data ?? "")); this.markProcessChanged(state); return; }
+    if (message.type === "stdout") {
+      const output = String(message.data ?? "");
+      state.stdout.append(output);
+      state.stdoutChars += output.length;
+      state.stdoutBytes += Buffer.byteLength(output, "utf8");
+      state.stdoutHash.update(output, "utf8");
+      this.markProcessChanged(state);
+      return;
+    }
+    if (message.type === "stderr") {
+      const output = String(message.data ?? "");
+      state.stderr.append(output);
+      state.stderrChars += output.length;
+      state.stderrBytes += Buffer.byteLength(output, "utf8");
+      state.stderrHash.update(output, "utf8");
+      this.markProcessChanged(state);
+      return;
+    }
     if (message.type === "error") {
       state.error = String(message.error ?? "process launcher worker failed");
       state.errorCode = boundedFailureCode(typeof message.errorCode === "string" ? message.errorCode : undefined);
@@ -2113,6 +2152,161 @@ export class ProcessManager {
       const code = typeof message.code === "number" ? message.code : -1;
       const signal = message.signal ?? null;
       if (!this.tryRuntimeRepair(state, code, signal)) this.observeTerminal(state, code, signal);
+    }
+  }
+
+
+  private outputSpoolPaths(processId: string): { stdout: string; stderr: string } {
+    if (!PROCESS_ID_PATTERN.test(processId)) throw new Error(`Invalid process_id for output spool: ${processId}`);
+    return {
+      stdout: join(this.outputSpoolDirectory, `${processId}.stdout.utf16le`),
+      stderr: join(this.outputSpoolDirectory, `${processId}.stderr.utf16le`),
+    };
+  }
+
+  private initializeOutputSpools(processId: string): { stdout: string; stderr: string } {
+    const paths = this.outputSpoolPaths(processId);
+    writeFileSync(paths.stdout, Buffer.alloc(0));
+    writeFileSync(paths.stderr, Buffer.alloc(0));
+    return paths;
+  }
+
+  private resetOutputSpools(state: ProcessState): void {
+    writeFileSync(state.stdoutSpoolPath, Buffer.alloc(0));
+    writeFileSync(state.stderrSpoolPath, Buffer.alloc(0));
+    state.stdoutChars = 0;
+    state.stderrChars = 0;
+    state.stdoutBytes = 0;
+    state.stderrBytes = 0;
+    state.stdoutHash = createHash("sha256");
+    state.stderrHash = createHash("sha256");
+    state.stdoutSha256 = undefined;
+    state.stderrSha256 = undefined;
+    const prefix = `${state.id}:`;
+    for (const key of [...this.outputCursors.keys()]) if (key.startsWith(prefix)) this.outputCursors.delete(key);
+  }
+
+  private completeProcessAudit(
+    state: ProcessState,
+    exitCode: number | null,
+    signal: NodeJS.Signals | null,
+  ): Record<string, unknown> {
+    if (!state.stdoutSha256) state.stdoutSha256 = state.stdoutHash.digest("hex");
+    if (!state.stderrSha256) state.stderrSha256 = state.stderrHash.digest("hex");
+    const executionOutcome = state.error
+      ? "error"
+      : signal
+        ? "signaled"
+        : exitCode === 0
+          ? "success"
+          : exitCode === null
+            ? "unknown"
+            : "nonzero_exit";
+    return {
+      ...(state.ownerContext.request_id ? { request_id: state.ownerContext.request_id } : {}),
+      audit_schema: "process-output-evidence.v1",
+      retained_stdout_chars: state.stdoutChars,
+      retained_stderr_chars: state.stderrChars,
+      retained_output_chars: state.stdoutChars + state.stderrChars,
+      retained_stdout_bytes: state.stdoutBytes,
+      retained_stderr_bytes: state.stderrBytes,
+      retained_output_bytes: state.stdoutBytes + state.stderrBytes,
+      stdout_sha256: state.stdoutSha256,
+      stderr_sha256: state.stderrSha256,
+      evidence_completeness: "complete",
+      execution_outcome: executionOutcome,
+    };
+  }
+
+  private spoolCharLength(path: string): number {
+    try {
+      const bytes = statSync(path).size;
+      if (bytes % 2 !== 0) throw new Error(`Output spool has odd UTF-16LE byte length: ${path}`);
+      return bytes / 2;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+      throw error;
+    }
+  }
+
+  private readSpoolSlice(path: string, startChar: number, maxChars: number): string {
+    if (maxChars <= 0) return "";
+    const fd = openSync(path, "r");
+    try {
+      const buffer = Buffer.allocUnsafe(maxChars * 2);
+      const bytesRead = readSync(fd, buffer, 0, buffer.length, startChar * 2);
+      const evenBytes = bytesRead - (bytesRead % 2);
+      return buffer.subarray(0, evenBytes).toString("utf16le");
+    } finally {
+      closeSync(fd);
+    }
+  }
+
+  private pageSpoolOutput(
+    legacy: Record<string, unknown>,
+    stdoutPath: string,
+    stderrPath: string,
+    callerId: string,
+    requestedChars: number,
+  ): Record<string, unknown> {
+    const processId = String(legacy.process_id);
+    const cursorKey = this.cursorKey(processId, callerId);
+    const stdoutTotal = this.spoolCharLength(stdoutPath);
+    const stderrTotal = this.spoolCharLength(stderrPath);
+    const prior = this.outputCursors.get(cursorKey) ?? { stdout: 0, stderr: 0 };
+    const cursor = {
+      stdout: Math.min(prior.stdout, stdoutTotal),
+      stderr: Math.min(prior.stderr, stderrTotal),
+    };
+    const limit = Math.max(1, Math.min(requestedChars, MAX_READ_CHARS));
+    const stdoutCount = Math.min(limit, Math.max(0, stdoutTotal - cursor.stdout));
+    const stderrCount = Math.min(Math.max(0, limit - stdoutCount), Math.max(0, stderrTotal - cursor.stderr));
+    const nextStdout = cursor.stdout + stdoutCount;
+    const nextStderr = cursor.stderr + stderrCount;
+    const moreCaptured = nextStdout < stdoutTotal || nextStderr < stderrTotal;
+    const running = legacy.running === true;
+    const base: Record<string, unknown> = { ...legacy, stdout: "", stderr: "" };
+    delete base.stdout_dropped_from_start;
+    delete base.stderr_dropped_from_start;
+    delete base.stdout_truncated;
+    delete base.stderr_truncated;
+    const result = {
+      ...base,
+      next_action: moreCaptured || running ? "READ_SAME_PROCESS_ID" : "STOP_READING",
+      stdout: stdoutCount > 0 ? this.readSpoolSlice(stdoutPath, cursor.stdout, stdoutCount) : "",
+      stderr: stderrCount > 0 ? this.readSpoolSlice(stderrPath, cursor.stderr, stderrCount) : "",
+      output_page: {
+        stdout_start: cursor.stdout,
+        stdout_end: nextStdout,
+        stdout_total: stdoutTotal,
+        stderr_start: cursor.stderr,
+        stderr_end: nextStderr,
+        stderr_total: stderrTotal,
+        page_chars: stdoutCount + stderrCount,
+        page_limit: limit,
+        more: moreCaptured,
+      },
+    };
+    if (moreCaptured || running) this.outputCursors.set(cursorKey, { stdout: nextStdout, stderr: nextStderr });
+    else this.outputCursors.delete(cursorKey);
+    return result;
+  }
+
+  private pruneOutputSpools(now = Date.now()): void {
+    let entries;
+    try {
+      entries = readdirSync(this.outputSpoolDirectory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !/^[0-9a-f-]{36}\.(?:stdout|stderr)\.utf16le$/i.test(entry.name)) continue;
+      const path = join(this.outputSpoolDirectory, entry.name);
+      try {
+        if (now - statSync(path).mtimeMs > RECEIPT_ARCHIVE_RETENTION_MS) unlinkSync(path);
+      } catch {
+        // best-effort retention cleanup
+      }
     }
   }
 
@@ -2256,6 +2450,7 @@ export class ProcessManager {
         try { unlinkSync(path); } catch { /* another clone may already have pruned it */ }
       }
     }
+    this.pruneOutputSpools(now);
     this.pruneReceiptArchive(now);
   }
 
@@ -2510,7 +2705,7 @@ export class ProcessManager {
     // transport ceiling and destroy the only proof that a blocked read's process ran.
     const stdout = state.stdout.tail(MAX_CAPTURE_CHARS, MAX_CAPTURE_CHARS);
     const stderr = state.stderr.tail(MAX_CAPTURE_CHARS, MAX_CAPTURE_CHARS);
-    const audit = processOutputAudit(stdout.text, stderr.text, stdout.truncated, stderr.truncated, state.exitCode, state.signal ?? null, state.error, state.ownerContext.request_id);
+    const audit = this.completeProcessAudit(state, state.exitCode, state.signal ?? null);
     const receipt: CompletedProcessReceipt = {
       version: 1,
       process_id: state.id,
@@ -2527,6 +2722,10 @@ export class ProcessManager {
       cwd: state.cwd,
       stdout: stdout.text,
       stderr: stderr.text,
+      stdout_spool_path: state.stdoutSpoolPath,
+      stderr_spool_path: state.stderrSpoolPath,
+      stdout_chars: this.spoolCharLength(state.stdoutSpoolPath),
+      stderr_chars: this.spoolCharLength(state.stderrSpoolPath),
       ...(stdout.truncated ? { stdout_truncated: true as const } : {}),
       ...(stderr.truncated ? { stderr_truncated: true as const } : {}),
       exit_code: state.exitCode,
@@ -2584,8 +2783,8 @@ export class ProcessManager {
     const command = state.command.slice(0, MAX_COMMAND_REPORT_CHARS);
     const stdout = state.stdout.tail(MAX_CAPTURE_CHARS, MAX_CAPTURE_CHARS);
     const stderr = state.stderr.tail(MAX_CAPTURE_CHARS, MAX_CAPTURE_CHARS);
-    const audit = processOutputAudit(stdout.text, stderr.text, stdout.truncated, stderr.truncated, exitCode, signal, state.error, state.ownerContext.request_id);
-    const receipt: CompletedProcessReceipt = { version: 1, process_id: state.id, pid: state.pid, caller_id: state.callerId, ...(state.activityTarget ? { activity_target: state.activityTarget } : {}), ...(state.actionClass ? { action_class: state.actionClass } : {}), ...(state.executionMode ? { execution_mode: state.executionMode } : {}), ...(state.executionReason ? { execution_reason: state.executionReason } : {}), ...audit, command, ...(state.command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}), ...(state.submittedCommand !== undefined ? { submitted_command: state.submittedCommand.slice(0, MAX_COMMAND_REPORT_CHARS), ...(state.submittedCommand.length > MAX_COMMAND_REPORT_CHARS ? { submitted_command_truncated: true as const } : {}) } : {}), cwd: state.cwd, stdout: stdout.text, stderr: stderr.text, ...(stdout.truncated ? { stdout_truncated: true as const } : {}), ...(stderr.truncated ? { stderr_truncated: true as const } : {}), exit_code: exitCode, signal, started_at: state.startedAt, finished_at: finishedAt, ...(state.error ? { error: state.error } : {}), ...(state.errorCode ? { error_code: state.errorCode } : {}), ...(state.repairAttempts.length > 0 ? { repair_attempts: state.repairAttempts } : {}) };
+    const audit = this.completeProcessAudit(state, exitCode, signal);
+    const receipt: CompletedProcessReceipt = { version: 1, process_id: state.id, pid: state.pid, caller_id: state.callerId, ...(state.activityTarget ? { activity_target: state.activityTarget } : {}), ...(state.actionClass ? { action_class: state.actionClass } : {}), ...(state.executionMode ? { execution_mode: state.executionMode } : {}), ...(state.executionReason ? { execution_reason: state.executionReason } : {}), ...audit, command, ...(state.command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}), ...(state.submittedCommand !== undefined ? { submitted_command: state.submittedCommand.slice(0, MAX_COMMAND_REPORT_CHARS), ...(state.submittedCommand.length > MAX_COMMAND_REPORT_CHARS ? { submitted_command_truncated: true as const } : {}) } : {}), cwd: state.cwd, stdout: stdout.text, stderr: stderr.text, stdout_spool_path: state.stdoutSpoolPath, stderr_spool_path: state.stderrSpoolPath, stdout_chars: this.spoolCharLength(state.stdoutSpoolPath), stderr_chars: this.spoolCharLength(state.stderrSpoolPath), ...(stdout.truncated ? { stdout_truncated: true as const } : {}), ...(stderr.truncated ? { stderr_truncated: true as const } : {}), exit_code: exitCode, signal, started_at: state.startedAt, finished_at: finishedAt, ...(state.error ? { error: state.error } : {}), ...(state.errorCode ? { error_code: state.errorCode } : {}), ...(state.repairAttempts.length > 0 ? { repair_attempts: state.repairAttempts } : {}) };
     const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
     try {
       await writeFileAsync(temporaryPath, JSON.stringify(receipt), { encoding: "utf8", flag: "wx" });
@@ -2614,9 +2813,44 @@ export class ProcessManager {
     const observer = currentTelemetryContext();
     const observerCallerId = observer.caller_id ?? "caller_unknown";
     emitTelemetry({ event: "process_receipt_read", process_id: receipt.process_id, pid: receipt.pid, owner_caller_id: receipt.caller_id, caller_id: observerCallerId }, observer);
-    const audit = processOutputAudit(receipt.stdout, receipt.stderr, Boolean(receipt.stdout_truncated), Boolean(receipt.stderr_truncated), receipt.exit_code, receipt.signal, receipt.error, receipt.request_id);
+    const audit = receipt.audit_schema === "process-output-evidence.v1"
+      ? {
+          ...(receipt.request_id ? { request_id: receipt.request_id } : {}),
+          audit_schema: receipt.audit_schema,
+          retained_stdout_chars: receipt.retained_stdout_chars,
+          retained_stderr_chars: receipt.retained_stderr_chars,
+          retained_output_chars: receipt.retained_output_chars,
+          retained_stdout_bytes: receipt.retained_stdout_bytes,
+          retained_stderr_bytes: receipt.retained_stderr_bytes,
+          retained_output_bytes: receipt.retained_output_bytes,
+          stdout_sha256: receipt.stdout_sha256,
+          stderr_sha256: receipt.stderr_sha256,
+          evidence_completeness: receipt.evidence_completeness,
+          execution_outcome: receipt.execution_outcome,
+        }
+      : processOutputAudit(receipt.stdout, receipt.stderr, Boolean(receipt.stdout_truncated), Boolean(receipt.stderr_truncated), receipt.exit_code, receipt.signal, receipt.error, receipt.request_id);
     const failureDiagnostic = processFailureDiagnostic(receipt.command, receipt.stdout, receipt.stderr, receipt.exit_code, receipt.error, receipt.execution_reason, receipt.error_code);
     const legacy = { ...processResponseState(receipt.started_at, false, receipt.finished_at), process_id: receipt.process_id, pid: receipt.pid, ...audit, ...(failureDiagnostic ? { failure_diagnostic: failureDiagnostic } : {}), ...(receipt.activity_target ? { activity_target: receipt.activity_target } : {}), ...(receipt.action_class ? { action_class: receipt.action_class } : {}), ...(receipt.execution_mode ? { execution_mode: receipt.execution_mode } : {}), ...(receipt.execution_reason ? { execution_reason: receipt.execution_reason } : {}), command: receipt.command, ...(receipt.command_truncated ? { command_truncated: true } : {}), ...(receipt.submitted_command !== undefined ? { submitted_command: receipt.submitted_command, ...(receipt.submitted_command_truncated ? { submitted_command_truncated: true } : {}) } : {}), cwd: receipt.cwd, running: false, stdout: receipt.stdout.slice(-limit), stderr: receipt.stderr.slice(-limit), exit_code: receipt.exit_code, signal: receipt.signal, started_at: receipt.started_at, finished_at: receipt.finished_at, ...(receipt.stdout_truncated || receipt.stdout.length > limit ? { stdout_truncated: true } : {}), ...(receipt.stderr_truncated || receipt.stderr.length > limit ? { stderr_truncated: true } : {}), ...(receipt.error ? { error: receipt.error } : {}), ...(receipt.error_code ? { error_code: receipt.error_code } : {}), ...(receipt.repair_attempts?.length ? { repair_attempts: receipt.repair_attempts } : {}) };
+    const spoolReady = typeof receipt.stdout_spool_path === "string"
+      && typeof receipt.stderr_spool_path === "string"
+      && existsSync(receipt.stdout_spool_path)
+      && existsSync(receipt.stderr_spool_path);
+    if (spoolReady) {
+      const cursorExists = this.outputCursors.has(this.cursorKey(receipt.process_id, observerCallerId));
+      const stdoutTotal = this.spoolCharLength(receipt.stdout_spool_path!);
+      const stderrTotal = this.spoolCharLength(receipt.stderr_spool_path!);
+      if (cursorExists || stdoutTotal + stderrTotal > limit) {
+        return this.pageSpoolOutput(legacy, receipt.stdout_spool_path!, receipt.stderr_spool_path!, observerCallerId, limit);
+      }
+      const complete = {
+        ...legacy,
+        stdout: this.readSpoolSlice(receipt.stdout_spool_path!, 0, stdoutTotal),
+        stderr: this.readSpoolSlice(receipt.stderr_spool_path!, 0, stderrTotal),
+      };
+      delete complete.stdout_truncated;
+      delete complete.stderr_truncated;
+      return complete;
+    }
     const cursorExists = this.outputCursors.has(this.cursorKey(receipt.process_id, observerCallerId));
     const needsPaging = cursorExists || receipt.stdout.length + receipt.stderr.length > limit;
     return needsPaging ? this.pageOutput(legacy, receipt.stdout, receipt.stderr, observerCallerId, Boolean(receipt.stdout_truncated), Boolean(receipt.stderr_truncated), limit) : legacy;
@@ -2778,12 +3012,17 @@ export class ProcessManager {
     const processId = randomUUID();
     const startedAt = new Date().toISOString();
     this.claimHostAdmissionSlot(processId, callerId, startedAt, ownerContext);
+    const outputSpools = this.initializeOutputSpools(processId);
     let resolveDone!: () => void;
     const done = new Promise<void>((resolve) => { resolveDone = resolve; });
     const state: ProcessState = {
       id: processId, pid: 0, callerId, ownerContext, command: effectiveCommand, dedupeIdentity, ...(submittedCommand !== undefined ? { submittedCommand } : {}), ...(activityTarget ? { activityTarget } : {}), ...(actionClass ? { actionClass } : {}), cwd,
       launching: true, terminalObserved: false, resolveDone, killRequested: false,
-      stdout: new BoundedCapture(), stderr: new BoundedCapture(), startedAt, exitCode: null,
+      stdout: new BoundedCapture(), stderr: new BoundedCapture(),
+      stdoutSpoolPath: outputSpools.stdout, stderrSpoolPath: outputSpools.stderr,
+      stdoutChars: 0, stderrChars: 0, stdoutBytes: 0, stderrBytes: 0,
+      stdoutHash: createHash("sha256"), stderrHash: createHash("sha256"),
+      startedAt, exitCode: null,
       done, revision: 0, lastReadRevisionByCaller: new Map<string, number>(), waiters: new Set<() => void>(),
       attemptStartedAt: startedAt, repairAttempts: [], runtimeRepairAllowed,
     };
@@ -2798,11 +3037,15 @@ export class ProcessManager {
         plan: executionPlan,
         ownerCallerId: state.callerId,
         ownerSessionId: state.ownerContext.session_id ?? undefined,
+        stdoutSpoolPath: state.stdoutSpoolPath,
+        stderrSpoolPath: state.stderrSpoolPath,
       });
     } catch (error) {
       sharedLauncherHandlers.delete(state.id);
       this.processes.delete(state.id);
       this.releaseHostAdmissionSlot(state.id);
+      try { unlinkSync(state.stdoutSpoolPath); } catch {}
+      try { unlinkSync(state.stderrSpoolPath); } catch {}
       throw error;
     }
     for (const rewrite of normalizationRewrites) emitTelemetry({ event: "process_command_normalized", process_id: state.id, rewrite }, state.ownerContext);
@@ -2943,7 +3186,7 @@ export class ProcessManager {
       ...(state.launching ? { launching: true } : {}),
       stdout: stdout.text,
       stderr: stderr.text,
-      ...(state.exitCode !== null ? processOutputAudit(fullStdout.text, fullStderr.text, fullStdout.truncated, fullStderr.truncated, state.exitCode, state.signal ?? null, state.error, state.ownerContext.request_id) : {}),
+      ...(state.exitCode !== null ? this.completeProcessAudit(state, state.exitCode, state.signal ?? null) : {}),
       ...(state.exitCode !== null ? (() => {
         const diagnostic = processFailureDiagnostic(state.command, fullStdout.text, fullStderr.text, state.exitCode, state.error, state.executionReason, state.errorCode);
         return diagnostic ? { failure_diagnostic: diagnostic } : {};
@@ -2958,14 +3201,11 @@ export class ProcessManager {
       ...(state.errorCode ? { error_code: state.errorCode } : {}),
       ...(state.repairAttempts.length > 0 ? { repair_attempts: state.repairAttempts } : {}),
     };
-    // A running process owns a moving bounded capture. Keep live reads as ordinary bounded
-    // tail snapshots; starting a cursor against that moving window can skip the eventual
-    // retained tail as old bytes roll out. Lossless paging begins only after completion,
-    // when the retained 100k snapshot is stable.
     const cursorExists = this.outputCursors.has(this.cursorKey(state.id, observerCallerId));
-    const needsPaging = state.exitCode !== null && (cursorExists || fullStdout.text.length + fullStderr.text.length > limit);
+    const spooledTotal = this.spoolCharLength(state.stdoutSpoolPath) + this.spoolCharLength(state.stderrSpoolPath);
+    const needsPaging = state.exitCode === null || cursorExists || spooledTotal > limit;
     return needsPaging
-      ? this.pageOutput(legacy, fullStdout.text, fullStderr.text, observerCallerId, fullStdout.truncated, fullStderr.truncated, limit)
+      ? this.pageSpoolOutput(legacy, state.stdoutSpoolPath, state.stderrSpoolPath, observerCallerId, limit)
       : legacy;
   }
 

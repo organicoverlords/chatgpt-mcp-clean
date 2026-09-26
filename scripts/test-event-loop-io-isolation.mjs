@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { ProcessManager } from "../dist/lib/process-manager.js";
 
 const source = readFileSync(new URL("../src/lib/process-manager.ts", import.meta.url), "utf8");
@@ -32,14 +32,18 @@ assert.ok(completionMs < 2_000, `process completion remained coupled to receipt 
 console.log("PASS event-loop I/O isolation guard");
 
 // A high-output child must not fan every pipe chunk across the Worker boundary.
-// The manager only retains the last 100k characters per stream, so the worker may
-// coalesce more aggressively as long as that exact retained tail and terminal order survive.
+// The launcher may batch worker messages, but it must spool every character losslessly.
+// The parent keeps only a 256k diagnostic tail while read_output pages the complete spool.
 const { Worker } = await import("node:worker_threads");
-const { resolve } = await import("node:path");
+const { join, resolve } = await import("node:path");
+const { tmpdir } = await import("node:os");
 const outputWorker = new Worker(new URL("../dist/lib/process-launch-worker.js", import.meta.url), {
   workerData: { powershellExe: "C:\\Program Files\\PowerShell\\7\\pwsh.exe" },
 });
 const floodRequestId = "output-backpressure-regression";
+const outputSpoolRoot = mkdtempSync(join(tmpdir(), "mcp-worker-spool-"));
+const stdoutSpoolPath = join(outputSpoolRoot, "stdout.utf16le");
+const stderrSpoolPath = join(outputSpoolRoot, "stderr.utf16le");
 let stdoutMessages = 0;
 let retainedTail = "";
 let lastTick = performance.now();
@@ -56,7 +60,7 @@ const floodExit = await new Promise((resolveExit, rejectExit) => {
     if (message?.requestId !== floodRequestId) return;
     if (message.type === "stdout") {
       stdoutMessages += 1;
-      retainedTail = (retainedTail + String(message.data ?? "")).slice(-100_000);
+      retainedTail = (retainedTail + String(message.data ?? "")).slice(-256_000);
     }
     if (message.type === "error") {
       clearTimeout(timeout);
@@ -72,13 +76,17 @@ const floodExit = await new Promise((resolveExit, rejectExit) => {
     requestId: floodRequestId,
     cwd: resolve("."),
     command: "$x = 'X' * 33554432; [Console]::Out.Write($x); [Console]::Out.Write(('Y' * 100000))",
+    stdoutSpoolPath,
+    stderrSpoolPath,
   });
 });
 clearInterval(timerProbe);
 await outputWorker.terminate();
 assert.equal(floodExit.code, 0, JSON.stringify(floodExit));
-assert.equal(retainedTail.length, 100_000, `retained tail length=${retainedTail.length}`);
-assert.equal(retainedTail, "Y".repeat(100_000), "worker batching changed the retained 100k tail");
-assert.ok(stdoutMessages <= 128, `stdout fanout remained unbounded: ${stdoutMessages} worker messages`);
+assert.equal(retainedTail.length, 256_000, `retained tail length=${retainedTail.length}`);
+assert.ok(retainedTail.endsWith("Y".repeat(100_000)), "worker batching changed the diagnostic tail suffix");
+assert.equal(statSync(stdoutSpoolPath).size / 2, 33_654_432, "worker spool lost output characters");
+assert.ok(stdoutMessages <= 140, `stdout fanout remained unbounded: ${stdoutMessages} worker messages`);
 assert.ok(maxTimerLagMs < 500, `event loop starved ${maxTimerLagMs.toFixed(1)}ms during output flood`);
-console.log(`PASS output backpressure messages=${stdoutMessages} max_timer_lag_ms=${maxTimerLagMs.toFixed(1)}`);
+rmSync(outputSpoolRoot, { recursive: true, force: true });
+console.log(`PASS output backpressure lossless_spool=true messages=${stdoutMessages} max_timer_lag_ms=${maxTimerLagMs.toFixed(1)}`);

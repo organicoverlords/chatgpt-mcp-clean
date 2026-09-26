@@ -152,7 +152,7 @@ async function readAllUntilExit(sessionId, first, timeoutMs = 20_000) {
     if (!output.running && output.next_action !== "READ_SAME_PROCESS_ID") {
       return { pages, stdout, stderr, last: output };
     }
-    output = await callTool(sessionId, "read_output", { process_id: processId, max_chars: 32_000 });
+    output = await callTool(sessionId, "read_output", { process_id: processId, max_chars: 256_000 });
   } while (Date.now() < deadline);
   throw new Error(`process ${processId} did not reach a terminal output page within ${timeoutMs}ms`);
 }
@@ -599,9 +599,12 @@ try {
   assert.ok(Date.now() - healthStarted < 5_000, "health probe stalled during high-output process");
   const floodOutput = await readAllUntilExit(sessionA, floodJob);
   assert.equal(floodOutput.last.running, false);
-  assert.ok(floodOutput.pages[0].stdout.length > 30_000 && floodOutput.pages[0].stdout.length <= 32_000, `first paged read_output returned ${floodOutput.pages[0].stdout.length} characters`);
-  assert.equal(floodOutput.pages.at(-1).stdout_truncated, true);
-  assert.equal(floodOutput.stdout.length, 100_000, `lossless retained output returned ${floodOutput.stdout.length} characters`);
+  const floodPages = floodOutput.pages.filter((page) => page.output_page);
+  assert.ok(floodPages.length >= 2, "high-output process must exercise paging");
+  assert.ok(floodPages.every((page) => page.output_page.page_chars <= 256_000), "paged read_output exceeded 256k");
+  assert.ok(floodPages.some((page) => page.output_page.page_chars > 200_000), "high-output paging never used a substantial 256k page");
+  assert.equal(floodOutput.pages.at(-1).stdout_truncated, undefined);
+  assert.ok(floodOutput.stdout.length > 2_000_000, 'lossless output should exceed 2M characters');
   assert.match(floodOutput.stdout, /FLOOD_10000_/);
 
   if (toolProfile === "full") {

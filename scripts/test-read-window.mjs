@@ -25,14 +25,14 @@ try {
   assert.match(windowOutput.stdout, /_WINDOW_END\r?\n?$/);
   assert.ok(windowOutput.stdout.length > 24_000);
 
-  const floodJob = await manager.startWithWait("$payload = 'X' * 200; 1..500 | ForEach-Object { Write-Output (('FLOOD_{0}_{1}' -f $_,$payload)) }", undefined, "window-test", 10_000);
+  const floodJob = await manager.startWithWait("$payload = 'X' * 200; 1..3500 | ForEach-Object { Write-Output (('FLOOD_{0}_{1}' -f $_,$payload)) }", undefined, "window-test", 10_000);
   started.push(floodJob.process_id);
   const floodOutput = readAll(manager, floodJob);
-  assert.equal(floodOutput.pages.at(-1).stdout_truncated, true);
-  assert.ok(floodOutput.stdout.length <= 100_000);
-  assert.ok(floodOutput.stdout.length > 60_000);
-  assert.match(floodOutput.stdout, /FLOOD_500_/);
-  console.log(`PASS read_window whole=${windowOutput.stdout.length} retained=${floodOutput.stdout.length} pages=${floodOutput.pages.length}`);
+  assert.equal(floodOutput.pages.at(-1).stdout_truncated, undefined);
+  assert.ok(floodOutput.stdout.length > 700_000);
+  assert.match(floodOutput.stdout, /FLOOD_1_/);
+  assert.match(floodOutput.stdout, /FLOOD_3500_/);
+  console.log(`PASS read_window whole=${windowOutput.stdout.length} lossless=${floodOutput.stdout.length} pages=${floodOutput.pages.length}`);
 } finally {
   for (const processId of started) await manager.kill(processId).catch(() => undefined);
 }

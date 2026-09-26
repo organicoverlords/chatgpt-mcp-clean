@@ -1,10 +1,9 @@
-import { open } from "node:fs/promises";
+import { open, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export const BOOTSTRAP_PROCESS_ALIAS = "bootstrap";
 const LEGACY_BOOTSTRAP_PROCESS_ID = "231b7e74-4cc8-43d0-9702-fd6dfa2215b3";
-const SNAPSHOT_PAGE_MAX_CHARS = 32_000;
-const BOOTSTRAP_SNAPSHOT_MAX_BYTES = 512 * 1024;
+const SNAPSHOT_PAGE_MAX_CHARS = 256_000;
 const TIMELINE_SNAPSHOT_MAX_BYTES = 64 * 1024;
 const SNAPSHOT_PAGE_SESSION_TTL_MS = 30 * 60 * 1000;
 const SNAPSHOT_PAGE_MAX_SESSIONS = 128;
@@ -133,7 +132,7 @@ function pageSnapshot(
 }
 
 export async function readBootstrapSnapshot(
-  maxChars = 100_000,
+  maxChars = 256_000,
   processId = BOOTSTRAP_PROCESS_ALIAS,
   callerId = "caller_unknown",
 ): Promise<Record<string, unknown>> {
@@ -146,20 +145,25 @@ export async function readBootstrapSnapshot(
 
   const timeline = alias === "timeline";
   let payload;
-  // Bounded asynchronous file read: no subprocess, network probe, or refresh on reads.
-  const file = await open(snapshotPath(timeline), "r");
-  try {
-    const maxSnapshotBytes = timeline ? TIMELINE_SNAPSHOT_MAX_BYTES : BOOTSTRAP_SNAPSHOT_MAX_BYTES;
-    const buffer = Buffer.alloc(maxSnapshotBytes + 1);
-    let bytes = 0;
-    while (bytes < buffer.length) {
-      const read = await file.read(buffer, bytes, buffer.length - bytes, null);
-      if (!read.bytesRead) break;
-      bytes += read.bytesRead;
-    }
-    if (bytes > maxSnapshotBytes) throw new Error(`Snapshot exceeds ${maxSnapshotBytes / 1024} KiB producer limit`);
-    payload = JSON.parse(buffer.subarray(0, bytes).toString("utf8").replace(/^\uFEFF/, ""));
-  } finally { await file.close(); }
+  if (!timeline) {
+    // Bootstrap is a trusted materializer-owned file. Delivery is bounded by 256k pages,
+    // not by a separate total-size rejection that can truncate retained context.
+    payload = JSON.parse((await readFile(snapshotPath(false), "utf8")).replace(/^\uFEFF/, ""));
+  } else {
+    // Timeline remains independently bounded because it is a different materialized product.
+    const file = await open(snapshotPath(true), "r");
+    try {
+      const buffer = Buffer.alloc(TIMELINE_SNAPSHOT_MAX_BYTES + 1);
+      let bytes = 0;
+      while (bytes < buffer.length) {
+        const read = await file.read(buffer, bytes, buffer.length - bytes, null);
+        if (!read.bytesRead) break;
+        bytes += read.bytesRead;
+      }
+      if (bytes > TIMELINE_SNAPSHOT_MAX_BYTES) throw new Error(`Timeline snapshot exceeds ${TIMELINE_SNAPSHOT_MAX_BYTES / 1024} KiB producer limit`);
+      payload = JSON.parse(buffer.subarray(0, bytes).toString("utf8").replace(/^\uFEFF/, ""));
+    } finally { await file.close(); }
+  }
   const generatedAt = Date.parse(payload?.generated_at);
   const bootstrapEnd = timeline ? undefined : bootstrapRoot(payload, "bootstrap_end");
   const v3Bootstrap = payload?.schema === "v3-rust.bootstrap.v1";
@@ -185,7 +189,7 @@ export async function readBootstrapSnapshot(
     Object.assign(payload.overview.timeline_materialized, freshness);
     if (stale) payload.overview.timeline_materialized.absence_semantics = "NO_MATCH_IS_NOT_PROOF_OF_ABSENCE";
   }
-  const stdout = JSON.stringify(payload);
+  const stdout = JSON.stringify(payload, null, 2);
   const base: SnapshotPageBase = {
     mcp_status: stale ? "STALE" : "OK",
     process_state: "SNAPSHOT",
