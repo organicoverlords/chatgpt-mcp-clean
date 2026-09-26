@@ -80,9 +80,10 @@ try {
   writeBootstrap({ schema: "bootstrap.v2", bootstrap_end: { status: "COMPLETE", schema: "bootstrap.v2" }, padding: "x".repeat(90_000) });
   const v2Pieces = [];
   let v2Page = await readBootstrapSnapshot(100_000, "bootstrap", "v2-large-caller");
-  assert.equal(v2Page.next_action, "STOP_READING");
-  assert.ok(v2Page.stdout.length > 90_000 && v2Page.stdout.length <= 100_000, "near-max V2 snapshot should complete in one 100k read");
+  assert.equal(v2Page.next_action, "READ_SAME_PROCESS_ID");
+  assert.equal(v2Page.output_page.page_limit, 32_000);
   while (true) {
+    assert.ok(v2Page.stdout.length <= 32_000, "bootstrap transport page must stay inside the 32k envelope");
     v2Pieces.push(v2Page.stdout);
     if (v2Page.next_action === "STOP_READING") break;
     v2Page = await readBootstrapSnapshot(100_000, "bootstrap", "v2-large-caller");
@@ -91,8 +92,15 @@ try {
   assert.equal(v2Payload.schema, "bootstrap.v2");
   assert.equal(v2Payload.bootstrap_end.schema, "bootstrap.v2");
   writeBootstrap({ schema: "bootstrap.v4", bootstrap_end: { status: "COMPLETE", schema: "bootstrap.v4" }, padding: "x".repeat(80_000) });
-  const v4Page = await readBootstrapSnapshot(100_000, "bootstrap", "v4-caller");
-  assert.equal(JSON.parse(v4Page.stdout).schema, "bootstrap.v4");
+  const v4Pieces = [];
+  let v4Page = await readBootstrapSnapshot(100_000, "bootstrap", "v4-caller");
+  while (true) {
+    assert.ok(v4Page.stdout.length <= 32_000);
+    v4Pieces.push(v4Page.stdout);
+    if (v4Page.next_action === "STOP_READING") break;
+    v4Page = await readBootstrapSnapshot(100_000, "bootstrap", "v4-caller");
+  }
+  assert.equal(JSON.parse(v4Pieces.join("")).schema, "bootstrap.v4");
   writeBootstrap({
     schema: "v3-rust.bootstrap.v1",
     coverage: { status: "COMPLETE", exact_user_text: true, age_stripping: false, retained_turns: 300 },
@@ -108,8 +116,8 @@ try {
   await assert.rejects(readBootstrapSnapshot(100_000, "bootstrap", "v3-rust-partial-caller"), /incomplete or invalid/);
   writeBootstrap({ schema: "bootstrap.v3", bootstrap_end: { status: "COMPLETE", schema: "bootstrap.v3" } });
   await assert.rejects(readBootstrapSnapshot(100_000, "bootstrap", "unknown-schema-caller"), /incomplete or invalid/);
-  writeFileSync(process.env.MCP_BOOTSTRAP_SNAPSHOT_PATH, " ".repeat(96 * 1024 + 1));
-  await assert.rejects(readBootstrapSnapshot(100_000, "bootstrap", "oversize-v2-caller"), /96 KiB/);
+  writeFileSync(process.env.MCP_BOOTSTRAP_SNAPSHOT_PATH, " ".repeat(512 * 1024 + 1));
+  await assert.rejects(readBootstrapSnapshot(100_000, "bootstrap", "oversize-v2-caller"), /512 KiB/);
   writeBootstrap();
   const latencies = [];
   for (let batch = 0; batch < 16; batch++) {
