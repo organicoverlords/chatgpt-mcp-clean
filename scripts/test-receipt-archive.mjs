@@ -83,14 +83,15 @@ try {
 
   const boundedStarted = withTelemetryContext(
     { request_id: "request_receipt_bounded_test", caller_id: "caller_receipt_archive_test" },
-    () => manager.start("[Console]::Out.Write('X' * 100500)", undefined, "caller_receipt_archive_test"),
+    () => manager.start("[Console]::Out.Write('X' * 300500)", undefined, "caller_receipt_archive_test"),
   );
   const bounded = await waitForExit(manager, boundedStarted.process_id);
   assert.equal(bounded.exit_code, 0);
   assert.equal(bounded.request_id, "request_receipt_bounded_test");
-  assert.equal(bounded.evidence_completeness, "bounded", "truncated capture must never be presented as complete evidence");
-  assert.equal(bounded.retained_stdout_chars, 100000);
-  assert.equal(bounded.stdout_truncated, true);
+  assert.equal(bounded.evidence_completeness, "complete", "lossless spool must make full process evidence complete");
+  assert.equal(bounded.retained_stdout_chars, 300500);
+  assert.equal(bounded.stdout_truncated, undefined);
+  assert.equal(bounded.output_page.stdout_total, 300500);
   let boundedPersisted = telemetry.find((event) => event.event === "process_receipt_persisted" && event.process_id === boundedStarted.process_id);
   const boundedTelemetryDeadline = Date.now() + 5_000;
   while (!boundedPersisted && Date.now() < boundedTelemetryDeadline) {

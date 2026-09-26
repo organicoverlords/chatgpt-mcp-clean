@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import crossSpawn from "cross-spawn";
-import { mkdirSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { parentPort, workerData } from "node:worker_threads";
 import { processChildEnvironment } from "./process-child-environment.js";
@@ -41,6 +41,8 @@ type LaunchMessage = {
   plan?: CommandExecutionPlan;
   ownerCallerId?: string;
   ownerSessionId?: string | null;
+  stdoutSpoolPath: string;
+  stderrSpoolPath: string;
 };
 type KillMessage = { type: "kill"; requestId: string };
 type LauncherMessage = LaunchMessage | KillMessage;
@@ -49,7 +51,7 @@ type PendingOutput = { stdout: string; stderr: string; timer?: ReturnType<typeof
 type StepResult = { code: number; signal: NodeJS.Signals | null };
 
 const OUTPUT_FLUSH_INTERVAL_MS = 50;
-const OUTPUT_BATCH_MAX_CHARS = 100_000;
+const OUTPUT_BATCH_MAX_CHARS = 256_000;
 
 const data = workerData as LaunchData;
 const port = parentPort;
@@ -58,6 +60,7 @@ if (!port) throw new Error("process launcher worker requires a parent port");
 const children = new Map<string, Set<ChildProcess>>();
 const pendingKills = new Set<string>();
 const pendingOutput = new Map<string, PendingOutput>();
+const outputSpools = new Map<string, { stdout: string; stderr: string }>();
 const send = (requestId: string, message: Record<string, unknown>) => port.postMessage({ requestId, ...message });
 
 function flushOutput(requestId: string): void {
@@ -71,19 +74,43 @@ function flushOutput(requestId: string): void {
 
 function queueOutput(requestId: string, kind: OutputKind, chunk: Buffer | string): void {
   if (!children.has(requestId)) return;
-  let pending = pendingOutput.get(requestId);
-  if (!pending) {
-    pending = { stdout: "", stderr: "" };
-    pendingOutput.set(requestId, pending);
+  let text = chunk.toString();
+  if (!text) return;
+  const spool = outputSpools.get(requestId);
+  if (!spool) {
+    send(requestId, { type: "error", error: `output spool missing for process ${requestId}` });
+    requestKill(requestId);
+    return;
   }
-  const combined = pending[kind] + chunk.toString();
-  pending[kind] = combined.length > OUTPUT_BATCH_MAX_CHARS
-    ? combined.slice(-OUTPUT_BATCH_MAX_CHARS)
-    : combined;
-  if (!pending.timer) {
-    const timer = setTimeout(() => flushOutput(requestId), OUTPUT_FLUSH_INTERVAL_MS);
-    timer.unref();
-    pending.timer = timer;
+  try {
+    appendFileSync(spool[kind], Buffer.from(text, "utf16le"));
+  } catch (error) {
+    send(requestId, { type: "error", error: `process output spool failed: ${error instanceof Error ? error.message : String(error)}` });
+    requestKill(requestId);
+    return;
+  }
+  while (text.length > 0) {
+    let pending = pendingOutput.get(requestId);
+    if (!pending) {
+      pending = { stdout: "", stderr: "" };
+      pendingOutput.set(requestId, pending);
+    }
+    const room = OUTPUT_BATCH_MAX_CHARS - pending[kind].length;
+    if (room <= 0) {
+      flushOutput(requestId);
+      continue;
+    }
+    pending[kind] += text.slice(0, room);
+    text = text.slice(room);
+    if (pending[kind].length >= OUTPUT_BATCH_MAX_CHARS) {
+      flushOutput(requestId);
+      continue;
+    }
+    if (!pending.timer) {
+      const timer = setTimeout(() => flushOutput(requestId), OUTPUT_FLUSH_INTERVAL_MS);
+      timer.unref();
+      pending.timer = timer;
+    }
   }
 }
 
@@ -291,10 +318,15 @@ function launch(
   suppliedPlan?: CommandExecutionPlan,
   ownerCallerId?: string,
   ownerSessionId?: string | null,
+  stdoutSpoolPath?: string,
+  stderrSpoolPath?: string,
 ): void {
+  if (!stdoutSpoolPath || !stderrSpoolPath) throw new Error("process output spool paths are required");
+  outputSpools.set(requestId, { stdout: stdoutSpoolPath, stderr: stderrSpoolPath });
   const testDelay = Math.max(0, Number(process.env.MCP_TEST_LAUNCH_DELAY_MS || 0));
   if (testDelay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, testDelay);
-  void executePlan(requestId, command, cwd, suppliedPlan, ownerCallerId, ownerSessionId);
+  void executePlan(requestId, command, cwd, suppliedPlan, ownerCallerId, ownerSessionId)
+    .finally(() => outputSpools.delete(requestId));
 }
 
 port.on("message", (message: LauncherMessage) => {
@@ -304,6 +336,6 @@ port.on("message", (message: LauncherMessage) => {
     return;
   }
   if (message.type === "launch") {
-    launch(message.requestId, message.command, message.cwd, message.plan, message.ownerCallerId, message.ownerSessionId);
+    launch(message.requestId, message.command, message.cwd, message.plan, message.ownerCallerId, message.ownerSessionId, message.stdoutSpoolPath, message.stderrSpoolPath);
   }
 });

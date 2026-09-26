@@ -376,7 +376,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       outputSchema: processOutputSchema,
     },
     async ({ process_id, max_chars, wait_ms }) => {
-      const boundedMaxChars = Math.max(1, Math.min(max_chars ?? 100_000, 100_000));
+      const boundedMaxChars = Math.max(1, Math.min(max_chars ?? 256_000, 256_000));
       const remoteId = localRemoteProcessId(process_id);
       const value = remoteId !== undefined
         ? remoteProcessResult(await callRemoteOmenTool("read_output", { process_id: remoteId, max_chars: boundedMaxChars, ...(wait_ms !== undefined ? { wait_ms } : {}) }))
