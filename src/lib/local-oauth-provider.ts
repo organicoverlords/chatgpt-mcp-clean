@@ -214,7 +214,9 @@ export class LocalOAuthProvider implements OAuthServerProvider {
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
-    this.load();
+    // Access-token verification is the MCP request hot path. Durable state is
+    // loaded at construction and local mutations update memory before persist,
+    // so rereading oauth.json here only couples every tool call to disk latency.
     this.prune();
     const rec = this.access.get(digest(token));
     if (!rec || rec.expiresAt <= Date.now()) throw new InvalidTokenError("Invalid or expired access token");
