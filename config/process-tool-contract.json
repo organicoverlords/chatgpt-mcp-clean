@@ -161,6 +161,14 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 240000
+        },
+        "conversation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expected_room_head": {
+          "type": "string",
+          "minLength": 1
         }
       },
       "required": [
@@ -691,7 +699,10 @@
             },
             "read_mode": {
               "type": "string",
-              "const": "MATERIALIZED_ONLY"
+              "enum": [
+                "MATERIALIZED_ONLY",
+                "V3_ROOM_BOUND_READ"
+              ]
             }
           },
           "required": [
@@ -1359,7 +1370,10 @@
             },
             "read_mode": {
               "type": "string",
-              "const": "MATERIALIZED_ONLY"
+              "enum": [
+                "MATERIALIZED_ONLY",
+                "V3_ROOM_BOUND_READ"
+              ]
             }
           },
           "required": [

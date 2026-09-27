@@ -156,7 +156,7 @@ const snapshotFreshnessSchema = z.object({
   as_of: z.string(),
   age_seconds: z.number().nonnegative(),
   stale_after_seconds: z.number().nonnegative(),
-  read_mode: z.literal("MATERIALIZED_ONLY"),
+  read_mode: z.enum(["MATERIALIZED_ONLY", "V3_ROOM_BOUND_READ"]),
 }).strict();
 
 export const PROCESS_TOOL_CONTRACT_VERSION = "process-tools.v4" as const;
@@ -395,16 +395,26 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
         process_id: z.string().min(1),
         max_chars: z.number().int().optional(),
         wait_ms: z.number().int().min(0).max(240_000).optional(),
+        conversation_id: z.string().min(1).optional(),
+        expected_room_head: z.string().min(1).optional(),
+      }).strict().superRefine((value, ctx) => {
+        const roomFields = value.conversation_id !== undefined || value.expected_room_head !== undefined;
+        if (roomFields && value.process_id !== "bootstrap") {
+          ctx.addIssue({ code: "custom", path: ["process_id"], message: "conversation_id and expected_room_head are valid only for process_id=bootstrap" });
+        }
+        if ((value.conversation_id === undefined) !== (value.expected_room_head === undefined)) {
+          ctx.addIssue({ code: "custom", message: "conversation_id and expected_room_head must be provided together" });
+        }
       }),
       outputSchema: processOutputSchema,
     },
-    async ({ process_id, max_chars, wait_ms }) => {
+    async ({ process_id, max_chars, wait_ms, conversation_id, expected_room_head }) => {
       const boundedMaxChars = Math.max(1, Math.min(max_chars ?? 256_000, 256_000));
       const remoteId = localRemoteProcessId(process_id);
       const value = remoteId !== undefined
         ? remoteProcessResult(await callRemoteOmenTool("read_output", { process_id: remoteId, max_chars: boundedMaxChars, ...(wait_ms !== undefined ? { wait_ms } : {}) }))
         : (isBootstrapSnapshot(process_id)
-          ? await readBootstrapSnapshot(boundedMaxChars, process_id, callerId)
+          ? await readBootstrapSnapshot(boundedMaxChars, process_id, callerId, conversation_id, expected_room_head)
           : await processManager.readOutput(process_id, boundedMaxChars, wait_ms));
       return structuredTextResult(value, callerId, servingIdentity);
     },

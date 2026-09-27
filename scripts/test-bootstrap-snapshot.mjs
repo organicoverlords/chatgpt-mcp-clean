@@ -23,10 +23,40 @@ const root = mkdtempSync(join(tmpdir(), "mcp-bootstrap-snapshot-"));
 process.env.MCP_BOOTSTRAP_SNAPSHOT_PATH = join(root, "bootstrap.json");
 process.env.MCP_TIMELINE_SNAPSHOT_PATH = join(root, "timeline.json");
 process.env.MCP_PROCESS_RECEIPT_DIR = join(root, "receipts");
+process.env.MCP_V3_BOOTSTRAP_EXECUTABLE = process.execPath;
+process.env.MCP_V3_BOOTSTRAP_CWD = root;
+writeFileSync(join(root, "bootstrap"), [
+  'const args = process.argv.slice(2);',
+  'const value = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };',
+  'const conversationId = value("--conversation-id");',
+  'const roomHead = value("--expected-room-head");',
+  'if (!conversationId || !roomHead) { console.error("missing room identity"); process.exit(2); }',
+  'const paged = conversationId.includes("paged-");',
+  'const payload = {',
+  '  schema: "v3-rust.bootstrap.v1",',
+  '  generated_at: new Date().toISOString(),',
+  '  conversation: { current_conversation_id: conversationId, chats: [{ current: true, id: conversationId, messages: [] }] },',
+  '  coverage: { status: "WINDOWED", exact_user_text: true, user_message_age_stripping: false, retained_turns: 400 },',
+  '  source: { coverage_status: "COMPLETE", exact_user_text: true, user_message_age_stripping: false },',
+  '  bootstrap_end: { status: "COMPLETE", schema: "v3-rust.bootstrap.v1" },',
+  '  proof_expected_room_head: roomHead,',
+  '  ...(paged ? { padding: "x".repeat(300000) } : {}),',
+  '};',
+  'process.stdout.write(JSON.stringify(payload));',
+].join("\n"));
 const realSpawn = childProcess.spawn;
 const realExecFile = childProcess.execFile;
 childProcess.spawn = childProcess.execFile = () => { throw new Error("Snapshot read must not spawn a process"); };
 syncBuiltinESMExports();
+async function withRealExecFile(fn) {
+  childProcess.execFile = realExecFile;
+  syncBuiltinESMExports();
+  try { return await fn(); }
+  finally {
+    childProcess.execFile = () => { throw new Error("Snapshot read must not spawn a process"); };
+    syncBuiltinESMExports();
+  }
+}
 function writeBootstrap(overrides = {}) {
   writeFileSync(process.env.MCP_BOOTSTRAP_SNAPSHOT_PATH, JSON.stringify({
     schema: "bootstrap.v1", generated_at: new Date().toISOString(), nonce: randomUUID(),
@@ -119,6 +149,44 @@ try {
   const v3WindowedPayload = JSON.parse(v3WindowedPage.stdout);
   assert.equal(v3WindowedPayload.coverage.status, "WINDOWED");
   assert.equal(v3WindowedPayload.coverage.retained_turns, 400);
+
+  await withRealExecFile(async () => {
+    const room = await readBootstrapSnapshot(256_000, "bootstrap", "room-caller", "local-chat:alpha", "turn-alpha");
+    const roomPayload = JSON.parse(room.stdout);
+    assert.equal(room.freshness.read_mode, "V3_ROOM_BOUND_READ");
+    assert.equal(roomPayload.conversation.current_conversation_id, "local-chat:alpha");
+    assert.equal(roomPayload.conversation.chats[0].current, true);
+    assert.equal(roomPayload.proof_expected_room_head, "turn-alpha");
+
+    await assert.rejects(
+      readBootstrapSnapshot(256_000, "bootstrap", "room-missing-head", "local-chat:alpha"),
+      /requires both conversation_id and expected_room_head/,
+    );
+
+    const alphaPieces = [];
+    const betaPieces = [];
+    let alpha = await readBootstrapSnapshot(160_000, "bootstrap", "same-caller", "local-chat:paged-alpha", "turn-alpha");
+    let beta = await readBootstrapSnapshot(160_000, "bootstrap", "same-caller", "local-chat:paged-beta", "turn-beta");
+    assert.equal(alpha.next_action, "READ_SAME_PROCESS_ID");
+    assert.equal(beta.next_action, "READ_SAME_PROCESS_ID");
+    while (true) {
+      alphaPieces.push(alpha.stdout);
+      if (alpha.next_action === "STOP_READING") break;
+      alpha = await readBootstrapSnapshot(160_000, "bootstrap", "same-caller", "local-chat:paged-alpha", "turn-alpha");
+    }
+    while (true) {
+      betaPieces.push(beta.stdout);
+      if (beta.next_action === "STOP_READING") break;
+      beta = await readBootstrapSnapshot(160_000, "bootstrap", "same-caller", "local-chat:paged-beta", "turn-beta");
+    }
+    const alphaPayload = JSON.parse(alphaPieces.join(""));
+    const betaPayload = JSON.parse(betaPieces.join(""));
+    assert.equal(alphaPayload.conversation.current_conversation_id, "local-chat:paged-alpha");
+    assert.equal(alphaPayload.proof_expected_room_head, "turn-alpha");
+    assert.equal(betaPayload.conversation.current_conversation_id, "local-chat:paged-beta");
+    assert.equal(betaPayload.proof_expected_room_head, "turn-beta");
+  });
+
   writeBootstrap({
     schema: "v3-rust.bootstrap.v1",
     coverage: { status: "PARTIAL", exact_user_text: true, age_stripping: false },
@@ -232,6 +300,25 @@ try {
   await server.connect(serverTransport);
   await client.connect(clientTransport);
   try {
+    await withRealExecFile(async () => {
+      const roomReply = await client.callTool({
+        name: "read_output",
+        arguments: {
+          process_id: "bootstrap",
+          conversation_id: "local-chat:tool-room",
+          expected_room_head: "turn-tool-room",
+          max_chars: 256000,
+          wait_ms: 0,
+        },
+      });
+      assert.equal(roomReply.isError, undefined, JSON.stringify(roomReply));
+      assert.equal(roomReply.structuredContent.bootstrap_alias, true);
+      assert.equal(roomReply.structuredContent.freshness.read_mode, "V3_ROOM_BOUND_READ");
+      const roomPayload = JSON.parse(roomReply.structuredContent.stdout);
+      assert.equal(roomPayload.conversation.current_conversation_id, "local-chat:tool-room");
+      assert.equal(roomPayload.proof_expected_room_head, "turn-tool-room");
+    });
+
     for (const id of ["231b7e74-4cc8-43d0-9702-fd6dfa2215b3", "bootstrap", "timeline", "checkup"]) {
       const started = performance.now();
       const reply = await client.callTool({ name: "read_output", arguments: { process_id: id, max_chars: 256000, wait_ms: 0 } });
