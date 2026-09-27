@@ -112,6 +112,30 @@ export function replayStructuredArgvTransportError(executable: string, args: str
   return structuredArgvTransportError(executable, args);
 }
 
+function structuredHostPreflightError(
+  executable: string,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (platform === "win32") return undefined;
+  const trimmed = executable.trim();
+  const normalized = trimmed.replaceAll("\\", "/");
+  const base = normalized.split("/").at(-1)?.toLowerCase() ?? normalized.toLowerCase();
+  if (/^[A-Za-z]:[\\/]/.test(trimmed) || /^\\\\/.test(trimmed)) {
+    return "wrong_host_windows_executable_path_on_non_windows_target";
+  }
+  if (base === "powershell.exe" || base === "pwsh.exe" || base === "cmd.exe" || /\.(?:cmd|bat)$/i.test(base)) {
+    return "wrong_host_windows_executable_on_non_windows_target";
+  }
+  return undefined;
+}
+
+export function replayStructuredHostPreflightError(
+  executable: string,
+  platform: NodeJS.Platform,
+): string | undefined {
+  return structuredHostPreflightError(executable, platform);
+}
+
 function sameActivityTarget(left?: ActivityTarget, right?: ActivityTarget): boolean {
   return left?.type === right?.type && left?.id === right?.id && left?.project === right?.project;
 }
@@ -3086,7 +3110,9 @@ export class ProcessManager {
     const displayCommand = structuredCommandDisplay(executable, args);
     const inputText = stdin === undefined ? displayCommand : `${displayCommand}\n${stdin}`;
     const preflightCommand = structuredPolicyText(inputText, environment);
-    const transportPreflightError = structuredArgvTransportError(executable, args);
+    const transportPreflightError =
+      structuredArgvTransportError(executable, args)
+      ?? structuredHostPreflightError(executable);
     return this.startPrepared(displayCommand, executionPlan, workingDirectory, callerId, activityTarget, actionClass, undefined, ["structured_argv", ...(stdin !== undefined ? ["structured_stdin"] : [])], preflightCommand, "full", transportPreflightError, this.executionDedupeIdentity(executionPlan), false);
   }
 
