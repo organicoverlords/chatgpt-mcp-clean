@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { open, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -13,7 +14,7 @@ type SnapshotFreshness = {
   as_of: string;
   age_seconds: number;
   stale_after_seconds: number;
-  read_mode: "MATERIALIZED_ONLY";
+  read_mode: "MATERIALIZED_ONLY" | "V3_ROOM_BOUND_READ";
 };
 
 type SnapshotPageBase = {
@@ -46,8 +47,13 @@ function snapshotAlias(processId: string): string {
   return BOOTSTRAP_PROCESS_ALIAS;
 }
 
-function snapshotSessionKey(alias: string, callerId: string): string {
-  return alias + ":" + (callerId || "caller_unknown");
+function snapshotSessionKey(
+  alias: string,
+  callerId: string,
+  conversationId?: string,
+  expectedRoomHead?: string,
+): string {
+  return JSON.stringify([alias, callerId || "caller_unknown", conversationId || "", expectedRoomHead || ""]);
 }
 
 function pruneSnapshotPageSessions(now = Date.now()): void {
@@ -84,6 +90,42 @@ function bootstrapRoot(payload: unknown, key: string): unknown {
   }
   if (matches.length > 1) throw new Error(`Snapshot producer returned ambiguous bootstrap envelope root=${key}`);
   return matches[0];
+}
+
+function v3BootstrapCommand(): { executable: string; cwd?: string } {
+  const configuredExecutable = process.env.MCP_V3_BOOTSTRAP_EXECUTABLE?.trim();
+  const configuredCwd = process.env.MCP_V3_BOOTSTRAP_CWD?.trim();
+  if (configuredExecutable) return { executable: configuredExecutable, ...(configuredCwd ? { cwd: configuredCwd } : {}) };
+  const userProfile = process.env.USERPROFILE?.trim();
+  if (!userProfile) return { executable: "v3-rust" };
+  return {
+    executable: join(userProfile, ".local", "bin", process.platform === "win32" ? "v3-rust.exe" : "v3-rust"),
+    cwd: configuredCwd || join(userProfile, ".agents"),
+  };
+}
+
+async function roomBoundV3BootstrapPayload(conversationId: string, expectedRoomHead: string): Promise<Record<string, unknown>> {
+  const { executable, cwd } = v3BootstrapCommand();
+  const stdout = await new Promise<string>((resolve, reject) => {
+    const child = execFile(
+      executable,
+      ["bootstrap", "--view", "readable", "--conversation-id", conversationId, "--expected-room-head", expectedRoomHead],
+      { ...(cwd ? { cwd } : {}), windowsHide: true, timeout: 30_000, maxBuffer: 8 * 1024 * 1024, encoding: "utf8" },
+      (error, childStdout, childStderr) => {
+        if (error) {
+          reject(new Error("Room-bound V3 bootstrap producer failed: " + error.message + "; stderr=" + String(childStderr).slice(0, 4000)));
+          return;
+        }
+        resolve(String(childStdout));
+      },
+    );
+    // V3 reads stdin to EOF during command setup. This alias supplies no stdin, so close
+    // the child pipe immediately instead of leaving bootstrap blocked behind the MCP server.
+    child.stdin?.end();
+  });
+  const payload = JSON.parse(stdout.replace(/^\uFEFF/, ""));
+  if (!isRecord(payload)) throw new Error("Room-bound V3 bootstrap producer returned a non-object payload");
+  return payload;
 }
 
 // Producer-owned files, never client-supplied paths or commands.
@@ -135,10 +177,16 @@ export async function readBootstrapSnapshot(
   maxChars = 256_000,
   processId = BOOTSTRAP_PROCESS_ALIAS,
   callerId = "caller_unknown",
+  conversationId?: string,
+  expectedRoomHead?: string,
 ): Promise<Record<string, unknown>> {
   const startedAt = performance.now();
   const alias = snapshotAlias(processId);
-  const key = snapshotSessionKey(alias, callerId);
+  if ((conversationId && !expectedRoomHead) || (!conversationId && expectedRoomHead)) {
+    throw new Error("Room-bound bootstrap requires both conversation_id and expected_room_head");
+  }
+  const roomBound = alias === BOOTSTRAP_PROCESS_ALIAS && !!conversationId && !!expectedRoomHead;
+  const key = snapshotSessionKey(alias, callerId, conversationId, expectedRoomHead);
   pruneSnapshotPageSessions();
   const existing = snapshotPageSessions.get(key);
   if (existing) return pageSnapshot(existing, key, maxChars, startedAt);
@@ -146,9 +194,11 @@ export async function readBootstrapSnapshot(
   const timeline = alias === "timeline";
   let payload;
   if (!timeline) {
-    // Bootstrap is a trusted materializer-owned file. Delivery is bounded by 256k pages,
-    // not by a separate total-size rejection that can truncate retained context.
-    payload = JSON.parse((await readFile(snapshotPath(false), "utf8")).replace(/^\uFEFF/, ""));
+    // Generic alias reads stay materialized. Supplying proven room identity makes the
+    // same alias ask the current V3 owner for that room without changing bootstrap content.
+    payload = roomBound
+      ? await roomBoundV3BootstrapPayload(conversationId!, expectedRoomHead!)
+      : JSON.parse((await readFile(snapshotPath(false), "utf8")).replace(/^\uFEFF/, ""));
   } else {
     // Timeline remains independently bounded because it is a different materialized product.
     const file = await open(snapshotPath(true), "r");
@@ -194,7 +244,8 @@ export async function readBootstrapSnapshot(
   const staleAfterSeconds = timeline ? Math.max(900, refreshMinutes * 180) : 90;
   const stale = ageSeconds > staleAfterSeconds;
   const freshness: SnapshotFreshness = { status: stale ? "STALE" : "FRESH", as_of: payload.generated_at,
-    age_seconds: ageSeconds, stale_after_seconds: staleAfterSeconds, read_mode: "MATERIALIZED_ONLY" };
+    age_seconds: ageSeconds, stale_after_seconds: staleAfterSeconds,
+    read_mode: roomBound ? "V3_ROOM_BOUND_READ" : "MATERIALIZED_ONLY" };
   if (timeline && payload.overview?.timeline_materialized) {
     Object.assign(payload.overview.timeline_materialized, freshness);
     if (stale) payload.overview.timeline_materialized.absence_semantics = "NO_MATCH_IS_NOT_PROOF_OF_ABSENCE";
