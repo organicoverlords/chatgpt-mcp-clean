@@ -1,4 +1,5 @@
-import { open, readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { open } from "node:fs/promises";
 import { join } from "node:path";
 
 export const BOOTSTRAP_PROCESS_ALIAS = "bootstrap";
@@ -13,7 +14,7 @@ type SnapshotFreshness = {
   as_of: string;
   age_seconds: number;
   stale_after_seconds: number;
-  read_mode: "MATERIALIZED_ONLY";
+  read_mode: "MATERIALIZED_ONLY" | "V3_DIRECT_READ";
 };
 
 type SnapshotPageBase = {
@@ -86,15 +87,47 @@ function bootstrapRoot(payload: unknown, key: string): unknown {
   return matches[0];
 }
 
-// Producer-owned files, never client-supplied paths or commands.
-function snapshotPath(timeline: boolean): string {
-  const configured = process.env[timeline ? "MCP_TIMELINE_SNAPSHOT_PATH" : "MCP_BOOTSTRAP_SNAPSHOT_PATH"]?.trim();
+// Timeline remains a materialized read-only product. The bootstrap alias delegates
+// directly to the current V3 producer so one canonical bootstrap name has one truth.
+function timelineSnapshotPath(): string {
+  const configured = process.env.MCP_TIMELINE_SNAPSHOT_PATH?.trim();
   if (configured) return configured;
   const userProfile = process.env.USERPROFILE?.trim();
-  if (!userProfile) throw new Error("Snapshot path configuration is required when USERPROFILE is unavailable");
-  return timeline
-    ? join(userProfile, "Desktop", "vault", ".state", "timeline", "bootstrap-memory-overview.json")
-    : join(userProfile, "Desktop", "vault", ".state", "bootstrap", "latest.json");
+  if (!userProfile) throw new Error("Timeline snapshot path configuration is required when USERPROFILE is unavailable");
+  return join(userProfile, "Desktop", "vault", ".state", "timeline", "bootstrap-memory-overview.json");
+}
+
+function v3BootstrapCommand(): { executable: string; cwd?: string } {
+  const configuredExecutable = process.env.MCP_V3_BOOTSTRAP_EXECUTABLE?.trim();
+  const configuredCwd = process.env.MCP_V3_BOOTSTRAP_CWD?.trim();
+  if (configuredExecutable) return { executable: configuredExecutable, ...(configuredCwd ? { cwd: configuredCwd } : {}) };
+  const userProfile = process.env.USERPROFILE?.trim();
+  if (!userProfile) return { executable: "v3-rust" };
+  return {
+    executable: join(userProfile, ".local", "bin", process.platform === "win32" ? "v3-rust.exe" : "v3-rust"),
+    cwd: configuredCwd || join(userProfile, ".agents"),
+  };
+}
+
+async function currentV3BootstrapPayload(): Promise<Record<string, unknown>> {
+  const { executable, cwd } = v3BootstrapCommand();
+  const stdout = await new Promise<string>((resolve, reject) => {
+    execFile(
+      executable,
+      ["bootstrap", "--view", "readable"],
+      { ...(cwd ? { cwd } : {}), windowsHide: true, timeout: 30_000, maxBuffer: 8 * 1024 * 1024, encoding: "utf8" },
+      (error, childStdout, childStderr) => {
+        if (error) {
+          reject(new Error("V3 bootstrap producer failed: " + error.message + "; stderr=" + String(childStderr).slice(0, 4000)));
+          return;
+        }
+        resolve(String(childStdout));
+      },
+    );
+  });
+  const payload = JSON.parse(stdout.replace(/^\uFEFF/, ""));
+  if (!isRecord(payload)) throw new Error("V3 bootstrap producer returned a non-object payload");
+  return payload;
 }
 
 function pageSnapshot(
@@ -146,12 +179,10 @@ export async function readBootstrapSnapshot(
   const timeline = alias === "timeline";
   let payload;
   if (!timeline) {
-    // Bootstrap is a trusted materializer-owned file. Delivery is bounded by 256k pages,
-    // not by a separate total-size rejection that can truncate retained context.
-    payload = JSON.parse((await readFile(snapshotPath(false), "utf8")).replace(/^\uFEFF/, ""));
+    payload = await currentV3BootstrapPayload();
   } else {
     // Timeline remains independently bounded because it is a different materialized product.
-    const file = await open(snapshotPath(true), "r");
+    const file = await open(timelineSnapshotPath(), "r");
     try {
       const buffer = Buffer.alloc(TIMELINE_SNAPSHOT_MAX_BYTES + 1);
       let bytes = 0;
@@ -164,18 +195,15 @@ export async function readBootstrapSnapshot(
       payload = JSON.parse(buffer.subarray(0, bytes).toString("utf8").replace(/^\uFEFF/, ""));
     } finally { await file.close(); }
   }
-  const generatedAt = Date.parse(payload?.generated_at);
+  const generatedAt = Date.parse(String(payload.generated_at ?? ""));
   const bootstrapEnd = timeline ? undefined : bootstrapRoot(payload, "bootstrap_end");
-  const v3Bootstrap = payload?.schema === "v3-rust.bootstrap.v1";
-  const acceptedBootstrapSchema = payload?.schema === "bootstrap.v1"
-    || payload?.schema === "bootstrap.v2"
-    || payload?.schema === "bootstrap.v4"
-    || v3Bootstrap;
-  const v3Coverage = v3Bootstrap && isRecord(payload?.coverage) ? payload.coverage : undefined;
-  if ((timeline ? payload?.schema !== "vault.timeline.bootstrap.v1" : !acceptedBootstrapSchema)
+  const v3Bootstrap = payload.schema === "v3-rust.bootstrap.v1";
+  const v3Coverage = v3Bootstrap && isRecord(payload.coverage) ? payload.coverage : undefined;
+  if ((timeline ? payload.schema !== "vault.timeline.bootstrap.v1" : !v3Bootstrap)
       || !Number.isFinite(generatedAt) || generatedAt > Date.now() + 5_000
       || (!timeline && (!isRecord(bootstrapEnd) || bootstrapEnd.status !== "COMPLETE" || bootstrapEnd.schema !== payload.schema))
-      || (v3Bootstrap && (!v3Coverage || v3Coverage.status !== "COMPLETE" || v3Coverage.exact_user_text !== true || v3Coverage.age_stripping !== false))) {
+      || (v3Bootstrap && (!v3Coverage || v3Coverage.status !== "COMPLETE" || v3Coverage.exact_user_text !== true
+        || (v3Coverage.user_message_age_stripping !== false && v3Coverage.age_stripping !== false)))) {
     throw new Error("Snapshot producer returned incomplete or invalid payload");
   }
   const ageSeconds = Math.max(0, (Date.now() - generatedAt) / 1000);
@@ -183,8 +211,8 @@ export async function readBootstrapSnapshot(
   const refreshMinutes = Number.isFinite(configuredRefresh) && configuredRefresh >= 1 ? configuredRefresh : 5;
   const staleAfterSeconds = timeline ? Math.max(900, refreshMinutes * 180) : 90;
   const stale = ageSeconds > staleAfterSeconds;
-  const freshness: SnapshotFreshness = { status: stale ? "STALE" : "FRESH", as_of: payload.generated_at,
-    age_seconds: ageSeconds, stale_after_seconds: staleAfterSeconds, read_mode: "MATERIALIZED_ONLY" };
+  const freshness: SnapshotFreshness = { status: stale ? "STALE" : "FRESH", as_of: String(payload.generated_at),
+    age_seconds: ageSeconds, stale_after_seconds: staleAfterSeconds, read_mode: timeline ? "MATERIALIZED_ONLY" : "V3_DIRECT_READ" };
   if (timeline && payload.overview?.timeline_materialized) {
     Object.assign(payload.overview.timeline_materialized, freshness);
     if (stale) payload.overview.timeline_materialized.absence_semantics = "NO_MATCH_IS_NOT_PROOF_OF_ABSENCE";
@@ -195,7 +223,7 @@ export async function readBootstrapSnapshot(
     process_state: "SNAPSHOT",
     process_id: alias,
     running: false,
-    generated_at: payload.generated_at,
+    generated_at: String(payload.generated_at),
     freshness,
     snapshot_alias: true,
     ...(timeline ? {} : { bootstrap_alias: true }),

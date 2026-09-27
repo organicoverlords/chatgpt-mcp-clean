@@ -161,7 +161,7 @@ const snapshotFreshnessSchema = z.object({
   as_of: z.string(),
   age_seconds: z.number().nonnegative(),
   stale_after_seconds: z.number().nonnegative(),
-  read_mode: z.literal("MATERIALIZED_ONLY"),
+  read_mode: z.enum(["MATERIALIZED_ONLY", "V3_DIRECT_READ"]),
 }).strict();
 
 export const PROCESS_TOOL_CONTRACT_VERSION = "process-tools.v4" as const;
