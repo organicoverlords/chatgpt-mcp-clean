@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { planCommandExecution, planStructuredScript } from "../dist/lib/command-execution-plan.js";
-import { ProcessManager, replayStructuredArgvTransportError, replayWorkerExecArgv } from "../dist/lib/process-manager.js";
+import { ProcessManager, replayStructuredArgvTransportError, replayStructuredHostPreflightError, replayWorkerExecArgv } from "../dist/lib/process-manager.js";
 
 const pwsh = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
 assert.deepEqual(replayWorkerExecArgv(["--trace-warnings", "--input-type=module", "--max-old-space-size=2048"]), ["--trace-warnings", "--max-old-space-size=2048"]);
@@ -230,6 +230,15 @@ try {
   assert.match(invoked.stdout, /ARG=A B/);
   assert.equal(replayStructuredArgvTransportError(helper, ["line1\r\nline2"]), "windows_command_shim_multiline_argument_not_lossless");
   assert.equal(replayStructuredArgvTransportError("node.exe", ["line1\r\nline2"]), undefined);
+  assert.equal(replayStructuredHostPreflightError("powershell.exe", "linux"), "wrong_host_windows_executable_on_non_windows_target");
+  assert.equal(replayStructuredHostPreflightError("pwsh.exe", "linux"), "wrong_host_windows_executable_on_non_windows_target");
+  assert.equal(replayStructuredHostPreflightError("cmd.exe", "linux"), "wrong_host_windows_executable_on_non_windows_target");
+  assert.equal(replayStructuredHostPreflightError("deploy.cmd", "linux"), "wrong_host_windows_executable_on_non_windows_target");
+  assert.equal(replayStructuredHostPreflightError("C:\\Windows\\System32\\cmd.exe", "linux"), "wrong_host_windows_executable_path_on_non_windows_target");
+  assert.equal(replayStructuredHostPreflightError(String.raw`\\\\server\\share\\tool.exe`, "linux"), "wrong_host_windows_executable_path_on_non_windows_target");
+  assert.equal(replayStructuredHostPreflightError("powershell.exe", "win32"), undefined);
+  assert.equal(replayStructuredHostPreflightError("/usr/bin/powershell.exe", "linux"), "wrong_host_windows_executable_on_non_windows_target");
+  assert.equal(replayStructuredHostPreflightError("/mnt/ue/worker-tools/root/usr/bin/git", "linux"), undefined);
   await assert.rejects(
     manager.startStructuredWithWait(helper, ["line1\r\necho SECOND_COMMAND_MUST_NOT_RUN"], cmdDir, "caller_execution_plan_cmd_multiline_guard", waitMs),
     /windows_command_shim_multiline_argument_not_lossless/,
