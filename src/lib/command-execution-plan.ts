@@ -283,7 +283,7 @@ export function planStructuredScript(
       reason: "structured_script_powershell_stdin_scriptblock",
     };
   }
-  if (language === "python") return { mode: "native", executable: "python", args: ["-"], stdin: script, ...(childEnv ? { env: { ...childEnv } } : {}), reason: "structured_script_python_stdin" };
+  if (language === "python") return { mode: "native", executable: process.platform === "win32" ? "python" : "python3", args: ["-"], stdin: script, ...(childEnv ? { env: { ...childEnv } } : {}), reason: "structured_script_python_stdin" };
   if (language === "node") return { mode: "native", executable: process.execPath, args: ["-"], stdin: script, ...(childEnv ? { env: { ...childEnv } } : {}), reason: "structured_script_node_stdin" };
   return { mode: "explicit_shell", executable: "bash", args: ["-s"], stdin: script, ...(childEnv ? { env: { ...childEnv } } : {}), reason: "structured_script_bash_stdin" };
 }
