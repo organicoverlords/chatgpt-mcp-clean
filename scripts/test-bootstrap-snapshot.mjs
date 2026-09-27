@@ -111,6 +111,13 @@ try {
   assert.equal(JSON.parse(v3RustPage.stdout).schema, "v3-rust.bootstrap.v1");
   writeBootstrap({
     schema: "v3-rust.bootstrap.v1",
+    coverage: { status: "WINDOWED", exact_user_text: true, user_message_age_stripping: false, retained_turns: 400 },
+    bootstrap_end: { status: "COMPLETE", schema: "v3-rust.bootstrap.v1" },
+  });
+  const currentV3RustPage = await readBootstrapSnapshot(256_000, "bootstrap", "v3-rust-windowed-caller");
+  assert.equal(JSON.parse(currentV3RustPage.stdout).coverage.retained_turns, 400);
+  writeBootstrap({
+    schema: "v3-rust.bootstrap.v1",
     coverage: { status: "PARTIAL", exact_user_text: true, age_stripping: false },
     bootstrap_end: { status: "COMPLETE", schema: "v3-rust.bootstrap.v1" },
   });

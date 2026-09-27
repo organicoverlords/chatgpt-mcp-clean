@@ -175,7 +175,7 @@ export async function readBootstrapSnapshot(
   if ((timeline ? payload?.schema !== "vault.timeline.bootstrap.v1" : !acceptedBootstrapSchema)
       || !Number.isFinite(generatedAt) || generatedAt > Date.now() + 5_000
       || (!timeline && (!isRecord(bootstrapEnd) || bootstrapEnd.status !== "COMPLETE" || bootstrapEnd.schema !== payload.schema))
-      || (v3Bootstrap && (!v3Coverage || v3Coverage.status !== "COMPLETE" || v3Coverage.exact_user_text !== true || v3Coverage.age_stripping !== false))) {
+      || (v3Bootstrap && (!v3Coverage || !(v3Coverage.status === "COMPLETE" || v3Coverage.status === "WINDOWED") || v3Coverage.exact_user_text !== true || (v3Coverage.age_stripping !== false && v3Coverage.user_message_age_stripping !== false)))) {
     throw new Error("Snapshot producer returned incomplete or invalid payload");
   }
   const ageSeconds = Math.max(0, (Date.now() - generatedAt) / 1000);
