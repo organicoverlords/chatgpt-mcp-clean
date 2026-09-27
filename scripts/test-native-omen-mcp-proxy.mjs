@@ -39,9 +39,22 @@ await waitHealth(nativePort);
 launch("edge-test", edgePort, { commit: edgeCommit, env: { MCP_DEFAULT_EXECUTION_TARGET: "omen", MCP_OMEN_MCP_URL: `http://127.0.0.1:${nativePort}/mcp` } });
 await waitHealth(edgePort);
 
+const nativeClient = new Client({ name: "native-omen-direct-test", version: "1" });
+await nativeClient.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${nativePort}/mcp`)));
 const client = new Client({ name: "native-omen-proxy-test", version: "1" });
 await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${edgePort}/mcp`)));
 try {
+  const directScript = await nativeClient.callTool({
+    name: "start_process",
+    arguments: {
+      language: "python",
+      script: "print('NATIVE_DIRECT_STRUCTURED_SCRIPT_OK')",
+      wait_ms: 10000,
+    },
+  });
+  assert.equal(directScript.isError, undefined, JSON.stringify(directScript));
+  assert.match(String(directScript.structuredContent?.stdout || ""), /NATIVE_DIRECT_STRUCTURED_SCRIPT_OK/);
+
   const start = await client.callTool({ name: "start_process", arguments: { executable: "hostname", args: [], wait_ms: 10000 } });
   assert.equal(start.isError, undefined, JSON.stringify(start));
   const v = start.structuredContent;
@@ -52,6 +65,38 @@ try {
   assert.match(v.process_id, /^omen-mcp:/);
   assert.doesNotMatch(String(v.command || ""), /omen_exec|ssh/i);
   assert.ok(String(v.stdout || "").trim());
+
+  const scriptStart = await client.callTool({
+    name: "start_process",
+    arguments: {
+      language: "python",
+      script: `import os
+print('SUPERTEST_STRUCTURED_SCRIPT_OK:' + os.environ['OMEN_SCRIPT_ENV'])`,
+      env: { OMEN_SCRIPT_ENV: "native-mcp" },
+      wait_ms: 10000,
+    },
+  });
+  assert.equal(scriptStart.isError, undefined, JSON.stringify(scriptStart));
+  const scriptValue = scriptStart.structuredContent;
+  assert.equal(scriptValue.execution_target, "omen");
+  assert.equal(scriptValue.execution_transport, "native-mcp");
+  assert.equal(scriptValue.execution_serving_identity.source_commit, nativeCommit);
+  assert.match(String(scriptValue.stdout || ""), /SUPERTEST_STRUCTURED_SCRIPT_OK:native-mcp/);
+  assert.match(String(scriptValue.execution_reason || ""), /^structured_script_python_/);
+
+  const stdinStart = await client.callTool({
+    name: "start_process",
+    arguments: {
+      executable: "python",
+      args: ["-c", "import sys; print(sys.stdin.read())"],
+      stdin: "SUPERTEST_STDIN_OK",
+      wait_ms: 10000,
+    },
+  });
+  assert.equal(stdinStart.isError, undefined, JSON.stringify(stdinStart));
+  const stdinValue = stdinStart.structuredContent;
+  assert.equal(stdinValue.execution_transport, "native-mcp");
+  assert.match(String(stdinValue.stdout || ""), /SUPERTEST_STDIN_OK/);
 
   const sleeper = (await client.callTool({ name: "start_process", arguments: { executable: "bash", args: ["-lc", "printf READY; sleep 30"], wait_ms: 0 } })).structuredContent;
   assert.match(sleeper.process_id, /^omen-mcp:/);

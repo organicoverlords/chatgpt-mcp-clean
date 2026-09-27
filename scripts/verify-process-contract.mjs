@@ -63,9 +63,9 @@ assert.ok(startInputSchema, "start_process input schema missing");
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output LEGACY" })).success, false, "legacy command input must be rejected");
 assert.equal((await startInputSchema.safeParseAsync({ executable: "node", args: ["--version"], stdin: "" })).success, true, "structured executable+args+stdin input must be valid");
 assert.equal((await startInputSchema.safeParseAsync({ execution_target: "omen", executable: "node", args: ["--version"], working_directory: "/tmp" })).success, true, "OMEN executable+args input must be valid");
-assert.equal((await startInputSchema.safeParseAsync({ execution_target: "omen", language: "bash", script: "pwd" })).success, false, "OMEN script input must be rejected");
-assert.equal((await startInputSchema.safeParseAsync({ execution_target: "omen", executable: "node", stdin: "x" })).success, false, "OMEN stdin must be rejected");
-assert.equal((await startInputSchema.safeParseAsync({ execution_target: "omen", executable: "node", env: { X: "1" } })).success, false, "OMEN env overrides must be rejected");
+assert.equal((await startInputSchema.safeParseAsync({ execution_target: "omen", language: "bash", script: "pwd" })).success, true, "OMEN script input must match the structured script contract");
+assert.equal((await startInputSchema.safeParseAsync({ execution_target: "omen", executable: "node", stdin: "x" })).success, true, "OMEN stdin must match the structured executable contract");
+assert.equal((await startInputSchema.safeParseAsync({ execution_target: "omen", executable: "node", env: { X: "1" } })).success, true, "OMEN env overrides must match the structured execution contract");
 assert.equal((await startInputSchema.safeParseAsync({ execution_target: "mars", executable: "node" })).success, false, "unknown execution targets must be rejected");
 
 const readInputSchema = server._registeredTools.read_output?.inputSchema;

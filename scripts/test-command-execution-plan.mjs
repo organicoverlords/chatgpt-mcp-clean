@@ -254,6 +254,7 @@ assert.equal(scriptPs.stdin, `Write-Output "PS SCRIPT 'quote'"`);
 assert.ok(!scriptPs.args.some((value) => value.includes("PS SCRIPT")), "PowerShell script must not be serialized into argv");
 const scriptPy = planStructuredScript("python", `print("PY SCRIPT 'quote'")\n`, pwsh);
 assert.equal(scriptPy.mode, "native");
+assert.equal(scriptPy.executable, process.platform === "win32" ? "python" : "python3");
 assert.deepEqual(scriptPy.args, ["-"]);
 assert.equal(scriptPy.stdin, `print("PY SCRIPT 'quote'")\n`);
 const scriptNode = planStructuredScript("node", `process.stdout.write("NODE_SCRIPT")`, pwsh);

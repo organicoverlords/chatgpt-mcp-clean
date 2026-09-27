@@ -113,11 +113,6 @@ const startProcessInputSchema = z.object({
   if (!structured && input.args !== undefined) ctx.addIssue({ code: "custom", path: ["args"], message: "args is only valid with executable" });
   if (!structured && input.stdin !== undefined) ctx.addIssue({ code: "custom", path: ["stdin"], message: "stdin is only valid with executable" });
   if (scripted !== (input.language !== undefined)) ctx.addIssue({ code: "custom", path: ["language"], message: "language is required exactly when script is provided" });
-  if (input.execution_target === "omen") {
-    if (!structured) ctx.addIssue({ code: "custom", path: ["execution_target"], message: "OMEN execution requires executable+args" });
-    if (input.stdin !== undefined) ctx.addIssue({ code: "custom", path: ["stdin"], message: "stdin is not supported for OMEN execution" });
-    if (input.env !== undefined) ctx.addIssue({ code: "custom", path: ["env"], message: "env is not supported for OMEN execution" });
-  }
 });
 
 const repairAttemptSchema = z.object({
@@ -321,20 +316,45 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       if (target === "omen") {
         if (nativeOmenHost) {
           if (process.platform === "win32") throw new Error("native_omen_host_misconfigured: MCP_NATIVE_OMEN_HOST requires a non-Windows host");
-          value = await processManager.startStructuredWithWait(
-            input.executable!,
-            input.args ?? [],
-            working_directory ?? process.env.HOME ?? process.cwd(),
-            callerId,
-            wait_ms ?? 240_000,
-            activity_target,
-            action_class,
-          );
+          const nativeWorkingDirectory = working_directory ?? process.env.HOME ?? process.cwd();
+          value = input.executable !== undefined
+            ? await processManager.startStructuredWithWait(
+                input.executable,
+                input.args ?? [],
+                nativeWorkingDirectory,
+                callerId,
+                wait_ms ?? 240_000,
+                activity_target,
+                action_class,
+                input.stdin,
+                input.env,
+              )
+            : await processManager.startScriptWithWait(
+                input.language!,
+                input.script!,
+                nativeWorkingDirectory,
+                callerId,
+                wait_ms ?? 240_000,
+                activity_target,
+                action_class,
+                input.env,
+              );
           value = { ...value, execution_target: "omen", execution_transport: "native-mcp" };
         } else if (omenMcpUrl) {
+          const remoteInput: Record<string, unknown> = input.executable !== undefined
+            ? {
+                executable: input.executable,
+                args: input.args ?? [],
+                ...(input.stdin !== undefined ? { stdin: input.stdin } : {}),
+                ...(input.env !== undefined ? { env: input.env } : {}),
+              }
+            : {
+                script: input.script!,
+                language: input.language!,
+                ...(input.env !== undefined ? { env: input.env } : {}),
+              };
           value = remoteProcessResult(await callRemoteOmenTool("start_process", {
-            executable: input.executable!,
-            args: input.args ?? [],
+            ...remoteInput,
             ...(working_directory ? { working_directory } : {}),
             execution_target: "omen",
             ...(wait_ms !== undefined ? { wait_ms } : {}),
@@ -343,9 +363,12 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
           }));
         } else {
           if (!omenExecPath) throw new Error("omen_execution_unavailable: MCP_OMEN_EXEC_PATH is not configured and no Windows default is available");
+          if (input.executable === undefined || input.stdin !== undefined || input.env !== undefined) {
+            throw new Error("omen_ssh_adapter_structured_fields_unsupported: native OMEN MCP is required for script, stdin, or env transport");
+          }
           value = await processManager.startStructuredWithWait(
             omenPython,
-            [omenExecPath, "--invocation-source", "mcp", "--cwd", working_directory ?? "/home/aatuska", "--", input.executable!, ...(input.args ?? [])],
+            [omenExecPath, "--invocation-source", "mcp", "--cwd", working_directory ?? "/home/aatuska", "--", input.executable, ...(input.args ?? [])],
             undefined,
             callerId,
             wait_ms ?? 240_000,
