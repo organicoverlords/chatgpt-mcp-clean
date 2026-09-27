@@ -30,7 +30,6 @@ const MAX_COMPLETED_PROCESSES = 64;
 const TASKKILL_TIMEOUT_MS = 5_000;
 const KILL_SETTLE_MS = 1_000;
 const DEFAULT_MAX_LIVE_PER_CALLER = 4;
-const DEFAULT_MAX_BACKGROUND_LIVE_PER_CALLER = 4;
 // Shared-host concurrency is opt-in only; normal isolation is per caller/GPT.
 const MAX_CONFIGURED_LIVE_TOTAL = 80;
 const HOST_ADMISSION_DIRECTORY = ".host-admission";
@@ -48,7 +47,6 @@ const RETRIEVAL_NAVIGATION_PREFIXES = ["stack_", "memory_", "timeline_", "report
 
 type ProcessManagerOptions = {
   maxLivePerCaller?: number;
-  maxBackgroundLivePerCaller?: number;
   maxLiveTotal?: number;
   maxCompletedProcesses?: number;
   receiptDirectory?: string;
@@ -307,13 +305,10 @@ type HostAdmissionRecord = {
   claimed_at: string;
 };
 
-type ProcessSlotClass = "interactive" | "background";
-
 type ProcessState = {
   id: string;
   pid: number;
   callerId: string;
-  slotClass: ProcessSlotClass;
   ownerContext: TelemetryContext;
   command: string;
   dedupeIdentity: string;
@@ -1817,7 +1812,6 @@ export class ProcessManager {
   private readonly outputCursors = new Map<string, OutputCursor>();
   private readonly adaptiveReadQuietStreaks = new Map<string, number>();
   private readonly maxLivePerCaller: number;
-  private readonly maxBackgroundLivePerCaller: number;
   private readonly maxLiveTotal?: number;
   private readonly maxCompletedProcesses: number;
   private readonly receiptDirectory?: string;
@@ -1839,10 +1833,6 @@ export class ProcessManager {
 
   constructor(options: ProcessManagerOptions = {}) {
     this.maxLivePerCaller = options.maxLivePerCaller ?? DEFAULT_MAX_LIVE_PER_CALLER;
-    this.maxBackgroundLivePerCaller = options.maxBackgroundLivePerCaller ?? DEFAULT_MAX_BACKGROUND_LIVE_PER_CALLER;
-    if (!Number.isInteger(this.maxBackgroundLivePerCaller) || this.maxBackgroundLivePerCaller < 1 || this.maxBackgroundLivePerCaller > MAX_CONFIGURED_LIVE_TOTAL) {
-      throw new Error(`maxBackgroundLivePerCaller must be an integer between 1 and ${MAX_CONFIGURED_LIVE_TOTAL}`);
-    }
     this.maxLiveTotal = options.maxLiveTotal;
     if (this.maxLiveTotal !== undefined && (!Number.isInteger(this.maxLiveTotal) || this.maxLiveTotal < 1 || this.maxLiveTotal > MAX_CONFIGURED_LIVE_TOTAL)) {
       throw new Error(`maxLiveTotal must be an integer between 1 and ${MAX_CONFIGURED_LIVE_TOTAL}`);
@@ -3011,7 +3001,6 @@ export class ProcessManager {
     transportPreflightError?: string,
     dedupeIdentity: string = effectiveCommand,
     runtimeRepairAllowed = true,
-    slotClass: ProcessSlotClass = "interactive",
   ): StartResult {
     const preflightError = transportPreflightError ?? (preflightMode === "policy"
       ? commandPolicyError(preflightCommand)
@@ -3041,14 +3030,7 @@ export class ProcessManager {
       return { ...processResponseState(duplicate.startedAt, true), process_id: duplicate.id, pid: duplicate.pid, cwd: duplicate.cwd, running: true, ...(duplicate.launching ? { launching: true } : {}) } as StartResult;
     }
     const liveForCaller = [...this.processes.values()].filter((state) => state.exitCode === null && state.callerId === callerId);
-    const liveForSlotClass = liveForCaller.filter((state) => state.slotClass === slotClass);
-    const slotLimit = slotClass === "background" ? this.maxBackgroundLivePerCaller : this.maxLivePerCaller;
-    if (liveForSlotClass.length >= slotLimit) {
-      if (slotClass === "background") {
-        throw new Error(`start_process_background_concurrency_limited: caller already has ${liveForSlotClass.length} background processes; max_background_live_processes=${slotLimit}; active_process_ids=${liveForSlotClass.map((state) => state.id).join(",")}`);
-      }
-      throw new Error(`start_process_concurrency_limited: caller already has ${liveForSlotClass.length} live interactive processes; active_process_ids=${liveForSlotClass.map((state) => state.id).join(",")}`);
-    }
+    if (liveForCaller.length >= this.maxLivePerCaller) throw new Error(`start_process_concurrency_limited: caller already has ${liveForCaller.length} live processes; active_process_ids=${liveForCaller.map((state) => state.id).join(",")}`);
     const ownerContext = currentTelemetryContext();
     if (sharedLauncherFailure) throw new Error(`process_launcher_unavailable: ${sharedLauncherFailure}`);
     const processId = randomUUID();
@@ -3058,7 +3040,7 @@ export class ProcessManager {
     let resolveDone!: () => void;
     const done = new Promise<void>((resolve) => { resolveDone = resolve; });
     const state: ProcessState = {
-      id: processId, pid: 0, callerId, slotClass, ownerContext, command: effectiveCommand, dedupeIdentity, ...(submittedCommand !== undefined ? { submittedCommand } : {}), ...(activityTarget ? { activityTarget } : {}), ...(actionClass ? { actionClass } : {}), cwd,
+      id: processId, pid: 0, callerId, ownerContext, command: effectiveCommand, dedupeIdentity, ...(submittedCommand !== undefined ? { submittedCommand } : {}), ...(activityTarget ? { activityTarget } : {}), ...(actionClass ? { actionClass } : {}), cwd,
       launching: true, terminalObserved: false, resolveDone, killRequested: false,
       stdout: new BoundedCapture(), stderr: new BoundedCapture(),
       stdoutSpoolPath: outputSpools.stdout, stderrSpoolPath: outputSpools.stderr,
@@ -3091,11 +3073,11 @@ export class ProcessManager {
       throw error;
     }
     for (const rewrite of normalizationRewrites) emitTelemetry({ event: "process_command_normalized", process_id: state.id, rewrite }, state.ownerContext);
-    emitTelemetry({ event: "process_launch_queued", process_id: state.id, owner_caller_id: state.callerId, slot_class: state.slotClass, cwd: state.cwd, started_at: state.startedAt, ...(state.activityTarget ? { activity_target: state.activityTarget } : {}), ...(state.actionClass ? { action_class: state.actionClass } : {}) }, state.ownerContext);
+    emitTelemetry({ event: "process_launch_queued", process_id: state.id, owner_caller_id: state.callerId, cwd: state.cwd, started_at: state.startedAt, ...(state.activityTarget ? { activity_target: state.activityTarget } : {}), ...(state.actionClass ? { action_class: state.actionClass } : {}) }, state.ownerContext);
     return { ...processResponseState(state.startedAt, true), process_id: state.id, pid: 0, cwd: state.cwd, running: true, launching: true } as StartResult;
   }
 
-  start(command: string, workingDirectory?: string, callerId = "caller_unknown", activityTarget?: ActivityTarget, actionClass?: string, slotClass: ProcessSlotClass = "interactive"): StartResult {
+  start(command: string, workingDirectory?: string, callerId = "caller_unknown", activityTarget?: ActivityTarget, actionClass?: string): StartResult {
     this.pruneCompleted();
     const prepared = replayPrepareStartProcessCommand(command);
     const executionPlan = planCommandExecution(prepared.command, POWERSHELL_EXE);
@@ -3110,11 +3092,6 @@ export class ProcessManager {
       prepared.command !== command ? command : undefined,
       prepared.rewrites,
       preflightCommand,
-      "full",
-      undefined,
-      prepared.command,
-      true,
-      slotClass,
     );
   }
 
@@ -3127,7 +3104,6 @@ export class ProcessManager {
     actionClass?: string,
     stdin?: string,
     environment?: Record<string, string>,
-    slotClass: ProcessSlotClass = "interactive",
   ): StartResult {
     this.pruneCompleted();
     const executionPlan = planStructuredExecution(executable, args, stdin, POWERSHELL_EXE, process.env, environment);
@@ -3137,7 +3113,7 @@ export class ProcessManager {
     const transportPreflightError =
       structuredArgvTransportError(executable, args)
       ?? structuredHostPreflightError(executable);
-    return this.startPrepared(displayCommand, executionPlan, workingDirectory, callerId, activityTarget, actionClass, undefined, ["structured_argv", ...(stdin !== undefined ? ["structured_stdin"] : [])], preflightCommand, "full", transportPreflightError, this.executionDedupeIdentity(executionPlan), false, slotClass);
+    return this.startPrepared(displayCommand, executionPlan, workingDirectory, callerId, activityTarget, actionClass, undefined, ["structured_argv", ...(stdin !== undefined ? ["structured_stdin"] : [])], preflightCommand, "full", transportPreflightError, this.executionDedupeIdentity(executionPlan), false);
   }
 
   startScript(
@@ -3148,7 +3124,6 @@ export class ProcessManager {
     activityTarget?: ActivityTarget,
     actionClass?: string,
     environment?: Record<string, string>,
-    slotClass: ProcessSlotClass = "interactive",
   ): StartResult {
     this.pruneCompleted();
     const executionPlan = planStructuredScript(language, script, POWERSHELL_EXE, process.env, environment);
@@ -3168,7 +3143,6 @@ export class ProcessManager {
       undefined,
       this.executionDedupeIdentity(executionPlan),
       false,
-      slotClass,
     );
   }
 
@@ -3181,9 +3155,8 @@ export class ProcessManager {
     actionClass?: string,
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
+    const started = this.start(command, cwd, callerId, activityTarget, actionClass);
     const boundedWaitMs = Math.max(0, Math.min(waitMs, 240_000));
-    const slotClass: ProcessSlotClass = boundedWaitMs === 0 ? "background" : "interactive";
-    const started = this.start(command, cwd, callerId, activityTarget, actionClass, slotClass);
     emitTelemetry({
       event: "process_wait_requested",
       action: "start",
@@ -3273,9 +3246,8 @@ export class ProcessManager {
     environment?: Record<string, string>,
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
+    const started = this.startScript(language, script, cwd, callerId, activityTarget, actionClass, environment);
     const boundedWaitMs = Math.max(0, Math.min(waitMs, 240_000));
-    const slotClass: ProcessSlotClass = boundedWaitMs === 0 ? "background" : "interactive";
-    const started = this.startScript(language, script, cwd, callerId, activityTarget, actionClass, environment, slotClass);
     emitTelemetry({ event: "process_wait_requested", action: "start_script", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
@@ -3296,9 +3268,8 @@ export class ProcessManager {
     environment?: Record<string, string>,
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
+    const started = this.startStructured(executable, args, cwd, callerId, activityTarget, actionClass, stdin, environment);
     const boundedWaitMs = Math.max(0, Math.min(waitMs, 240_000));
-    const slotClass: ProcessSlotClass = boundedWaitMs === 0 ? "background" : "interactive";
-    const started = this.startStructured(executable, args, cwd, callerId, activityTarget, actionClass, stdin, environment, slotClass);
     emitTelemetry({ event: "process_wait_requested", action: "start_structured", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
