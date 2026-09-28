@@ -1,0 +1,117 @@
+name: Recover live MCP stack on KONE
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/recover-live-mcp-stack.yml
+
+jobs:
+  recover:
+    runs-on: self-hosted
+    timeout-minutes: 10
+
+    steps:
+      - name: Restore installed live MCP stack only
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+
+          $installRoot = Join-Path $env:LOCALAPPDATA 'ChatGPTMcpStack'
+          $configPath  = Join-Path $installRoot 'stack-config.json'
+
+          if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+            throw "live stack config missing: $configPath"
+          }
+
+          $cfg = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+          $mcpRoot = [IO.Path]::GetFullPath([string]$cfg.mcp_root)
+          $backendScript = Join-Path $mcpRoot 'scripts\start-stack.ps1'
+          $edgeScript = Join-Path $mcpRoot 'scripts\start-stack-caddy.ps1'
+          $backendPort = [int]$cfg.port
+          $edgePort = [int]$cfg.caddy_https_port
+          $backendTask = [string]$cfg.task_name
+          $edgeTask = [string]$cfg.caddy_task_name
+
+          foreach ($required in @($backendScript,$edgeScript,(Join-Path $mcpRoot 'dist\index.js'))) {
+            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+              throw "installed live component missing: $required"
+            }
+          }
+
+          function Test-Backend {
+            try {
+              $health = Invoke-RestMethod -Uri "http://127.0.0.1:$backendPort/health" -TimeoutSec 2
+              return ([string]$health.status -eq 'ok')
+            } catch {
+              return $false
+            }
+          }
+
+          function Test-Listener([int]$Port) {
+            return [bool](Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1)
+          }
+
+          Write-Host "Config: $configPath"
+          Write-Host "Installed MCP: $mcpRoot"
+          Write-Host "Backend task: $backendTask"
+          Write-Host "Edge task: $edgeTask"
+          Write-Host "Backend port: $backendPort"
+          Write-Host "Edge port: $edgePort"
+
+          # Prefer the installed scheduled tasks: they are the production boot authority.
+          $backendScheduledTask = Get-ScheduledTask -TaskName $backendTask -ErrorAction SilentlyContinue
+          if ($backendScheduledTask) {
+            if (-not (Test-Backend)) {
+              Stop-ScheduledTask -TaskName $backendTask -ErrorAction SilentlyContinue
+              Start-Sleep -Milliseconds 500
+              Start-ScheduledTask -TaskName $backendTask
+            }
+          } else {
+            # Fallback uses the installed launcher only. Avoid GitHub Runner child cleanup.
+            $env:RUNNER_TRACKING_ID = ''
+            Start-Process -FilePath 'pwsh.exe' -ArgumentList @(
+              '-NoLogo','-NoProfile','-NonInteractive','-WindowStyle','Hidden','-ExecutionPolicy','Bypass',
+              '-File',$backendScript,'-ConfigPath',$configPath
+            ) -WorkingDirectory $mcpRoot -WindowStyle Hidden
+          }
+
+          for ($i = 0; $i -lt 60 -and -not (Test-Backend); $i++) {
+            Start-Sleep -Milliseconds 500
+          }
+          if (-not (Test-Backend)) {
+            $info = if ($backendScheduledTask) { Get-ScheduledTaskInfo -TaskName $backendTask -ErrorAction SilentlyContinue } else { $null }
+            if ($info) { Write-Host "Backend task LastTaskResult=$($info.LastTaskResult)" }
+            throw "backend failed to become healthy on 127.0.0.1:$backendPort"
+          }
+          Write-Host 'BACKEND_OK'
+
+          $edgeScheduledTask = Get-ScheduledTask -TaskName $edgeTask -ErrorAction SilentlyContinue
+          if ($edgeScheduledTask) {
+            if (-not (Test-Listener $edgePort)) {
+              Stop-ScheduledTask -TaskName $edgeTask -ErrorAction SilentlyContinue
+              Start-Sleep -Milliseconds 500
+              Start-ScheduledTask -TaskName $edgeTask
+            }
+          } else {
+            $env:RUNNER_TRACKING_ID = ''
+            Start-Process -FilePath 'pwsh.exe' -ArgumentList @(
+              '-NoLogo','-NoProfile','-NonInteractive','-WindowStyle','Hidden','-ExecutionPolicy','Bypass',
+              '-File',$edgeScript,'-ConfigPath',$configPath
+            ) -WorkingDirectory $mcpRoot -WindowStyle Hidden
+          }
+
+          for ($i = 0; $i -lt 60 -and -not (Test-Listener $edgePort); $i++) {
+            Start-Sleep -Milliseconds 500
+          }
+          if (-not (Test-Listener $edgePort)) {
+            $info = if ($edgeScheduledTask) { Get-ScheduledTaskInfo -TaskName $edgeTask -ErrorAction SilentlyContinue } else { $null }
+            if ($info) { Write-Host "Edge task LastTaskResult=$($info.LastTaskResult)" }
+            throw "edge failed to listen on TCP $edgePort"
+          }
+          Write-Host 'EDGE_OK'
+
+          $oauthPath = Join-Path (Join-Path ([IO.Path]::GetFullPath([string]$cfg.state_root)) ([string]$cfg.instance_id)) 'oauth.json'
+          Write-Host "OAuth store present: $([bool](Test-Path -LiteralPath $oauthPath -PathType Leaf))"
+          Write-Host 'LIVE_MCP_STACK_RESTORED'
