@@ -1912,14 +1912,39 @@ export class ProcessManager {
     }
   }
 
-  private rejectHostAdmission(callerId: string, ownerContext: TelemetryContext, liveCount: number, maxLiveTotal: number): never {
-    emitTelemetry({
-      event: "process_host_concurrency_rejected",
+  private rejectConcurrency(scope: "caller" | "host", callerId: string, ownerContext: TelemetryContext, liveCount: number, limit: number, activeProcessIds: string[] = []): never {
+    const rejectionId = randomUUID();
+    const rejectedAt = new Date().toISOString();
+    const details = {
+      rejection_id: rejectionId,
       owner_caller_id: callerId,
+      request_id: ownerContext.request_id ?? null,
+      session_id: ownerContext.session_id ?? null,
       live_process_count: liveCount,
-      max_live_processes: maxLiveTotal,
-    }, ownerContext);
-    throw new Error(`start_process_host_concurrency_limited: live_process_count=${liveCount}; max_live_processes=${maxLiveTotal}`);
+      max_live_processes: limit,
+      active_process_ids: activeProcessIds,
+    };
+    if (this.receiptArchiveDirectory) {
+      const dayDirectory = join(this.receiptArchiveDirectory, rejectedAt.slice(0, 10));
+      const path = join(dayDirectory, `rejected-${rejectionId}.json`);
+      const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+      try {
+        mkdirSync(dayDirectory, { recursive: true });
+        writeFileSync(temporaryPath, JSON.stringify({ version: 1, kind: "process_concurrency_rejection", scope, ...details, rejected_at: rejectedAt }), { encoding: "utf8", flag: "wx" });
+        renameSync(temporaryPath, path);
+      } catch (error) {
+        emitTelemetry({ event: "process_concurrency_rejection_archive_error", scope, rejection_id: rejectionId, error_message: error instanceof Error ? error.message : String(error) }, ownerContext);
+      } finally {
+        try { unlinkSync(temporaryPath); } catch { /* already renamed or never created */ }
+      }
+    }
+    emitTelemetry({ event: scope === "host" ? "process_host_concurrency_rejected" : "process_concurrency_rejected", scope, ...details }, ownerContext);
+    const code = scope === "host" ? "start_process_host_concurrency_limited" : "start_process_concurrency_limited";
+    throw new Error(`${code}: live_process_count=${liveCount}; max_live_processes=${limit}; active_process_ids=${activeProcessIds.join(",")}; rejection_id=${rejectionId}`);
+  }
+
+  private rejectHostAdmission(callerId: string, ownerContext: TelemetryContext, liveCount: number, maxLiveTotal: number): never {
+    return this.rejectConcurrency("host", callerId, ownerContext, liveCount, maxLiveTotal);
   }
 
   private claimHostAdmissionSlot(processId: string, callerId: string, claimedAt: string, ownerContext: TelemetryContext): void {
@@ -2376,41 +2401,6 @@ export class ProcessManager {
     } finally { try { await unlinkAsync(temporaryPath); } catch {} }
   }
 
-  private persistPreflightRejection(command: string, workingDirectory: string | undefined, callerId: string, reason: string): string | undefined {
-    if (!this.receiptArchiveDirectory) return undefined;
-    const rejectionId = randomUUID();
-    const rejectedAt = new Date().toISOString();
-    const dayDirectory = join(this.receiptArchiveDirectory, rejectedAt.slice(0, 10));
-    mkdirSync(dayDirectory, { recursive: true });
-    const path = join(dayDirectory, `rejected-${rejectionId}.json`);
-    const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    const record = {
-      version: 1,
-      kind: "process_preflight_rejection",
-      rejection_id: rejectionId,
-      caller_id: callerId,
-      command: command.slice(0, MAX_COMMAND_REPORT_CHARS),
-      ...(command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}),
-      working_directory: workingDirectory ?? null,
-      reason,
-      rejected_at: rejectedAt,
-    };
-    try {
-      writeFileSync(temporaryPath, JSON.stringify(record), { encoding: "utf8", flag: "wx" });
-      renameSync(temporaryPath, path);
-      this.pruneReceiptArchive();
-      return rejectionId;
-    } catch (error) {
-      try { unlinkSync(temporaryPath); } catch { /* best-effort temporary cleanup */ }
-      emitTelemetry({
-        event: "process_preflight_rejection_archive_error",
-        reason,
-        error_message: error instanceof Error ? error.message : String(error),
-      });
-      return undefined;
-    }
-  }
-
   private async persistPreflightRejectionAsync(rejectionId: string, command: string, workingDirectory: string | undefined, callerId: string, reason: string): Promise<void> {
     if (!this.receiptArchiveDirectory) return;
     const rejectedAt = new Date().toISOString();
@@ -2495,15 +2485,6 @@ export class ProcessManager {
     return join(directory, `${requestId}.json`);
   }
 
-  private writeControlFile(path: string, value: ProcessControlRequest | ProcessControlResponse): void {
-    const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    try {
-      writeFileSync(temporaryPath, JSON.stringify(value), { encoding: "utf8", flag: "wx" });
-      renameSync(temporaryPath, path);
-    } finally {
-      try { unlinkSync(temporaryPath); } catch { /* already renamed or never created */ }
-    }
-  }
   private async writeControlFileAsync(path: string, value: ProcessControlRequest | ProcessControlResponse): Promise<void> {
     const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
     try {
@@ -2533,47 +2514,6 @@ export class ProcessManager {
           if (statSync(path).mtimeMs < cutoff) unlinkSync(path);
         } catch { /* best-effort cleanup */ }
       }
-    }
-  }
-
-  private sweepControlRequests(): void {
-    if (!this.controlRequestDirectory || !this.controlResponseDirectory) return;
-    this.pruneControlFiles();
-    let entries;
-    try {
-      entries = readdirSync(this.controlRequestDirectory, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-      const requestPath = join(this.controlRequestDirectory, entry.name);
-      let request: ProcessControlRequest;
-      try {
-        request = JSON.parse(readFileSync(requestPath, "utf8")) as ProcessControlRequest;
-      } catch {
-        continue;
-      }
-      if (
-        request.version !== 1 ||
-        !PROCESS_ID_PATTERN.test(request.request_id) ||
-        !PROCESS_ID_PATTERN.test(request.process_id) ||
-        (request.action !== "read" && request.action !== "kill") ||
-        typeof request.requester_caller_id !== "string" ||
-        !Number.isFinite(Date.parse(request.deadline_at))
-      ) {
-        try { unlinkSync(requestPath); } catch { /* best effort */ }
-        continue;
-      }
-      if (Date.now() > Date.parse(request.deadline_at)) {
-        try { unlinkSync(requestPath); } catch { /* best effort */ }
-        continue;
-      }
-      if (!this.processes.has(request.process_id) || this.controlRequestsInFlight.has(request.request_id)) continue;
-      this.controlRequestsInFlight.add(request.request_id);
-      void this.handleControlRequest(request, requestPath).finally(() => {
-        this.controlRequestsInFlight.delete(request.request_id);
-      });
     }
   }
 
@@ -2717,87 +2657,6 @@ export class ProcessManager {
     } finally {
       try { await unlinkAsync(requestPath); } catch { /* owner may already have consumed it */ }
       try { await unlinkAsync(responsePath); } catch { /* response may not exist */ }
-    }
-  }
-
-  private persistReceipt(state: ProcessState): void {
-    const path = this.receiptPath(state.id);
-    if (!path || !state.finishedAt) return;
-    const command = state.command.slice(0, MAX_COMMAND_REPORT_CHARS);
-    // Receipts are local evidence, not a transport payload, so they keep the full
-    // captured buffer. Using MAX_READ_CHARS here would shrink the durable record to the
-    // transport ceiling and destroy the only proof that a blocked read's process ran.
-    const stdout = state.stdout.tail(MAX_CAPTURE_CHARS, MAX_CAPTURE_CHARS);
-    const stderr = state.stderr.tail(MAX_CAPTURE_CHARS, MAX_CAPTURE_CHARS);
-    const audit = this.completeProcessAudit(state, state.exitCode, state.signal ?? null);
-    const receipt: CompletedProcessReceipt = {
-      version: 1,
-      process_id: state.id,
-      pid: state.pid,
-      caller_id: state.callerId,
-      ...(state.activityTarget ? { activity_target: state.activityTarget } : {}),
-      ...(state.actionClass ? { action_class: state.actionClass } : {}),
-      ...(state.executionMode ? { execution_mode: state.executionMode } : {}),
-      ...(state.executionReason ? { execution_reason: state.executionReason } : {}),
-      ...audit,
-      command,
-      ...(state.command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}),
-      ...(state.submittedCommand !== undefined ? { submitted_command: state.submittedCommand.slice(0, MAX_COMMAND_REPORT_CHARS), ...(state.submittedCommand.length > MAX_COMMAND_REPORT_CHARS ? { submitted_command_truncated: true as const } : {}) } : {}),
-      cwd: state.cwd,
-      stdout: stdout.text,
-      stderr: stderr.text,
-      stdout_spool_path: state.stdoutSpoolPath,
-      stderr_spool_path: state.stderrSpoolPath,
-      stdout_chars: this.spoolCharLength(state.stdoutSpoolPath),
-      stderr_chars: this.spoolCharLength(state.stderrSpoolPath),
-      ...(stdout.truncated ? { stdout_truncated: true as const } : {}),
-      ...(stderr.truncated ? { stderr_truncated: true as const } : {}),
-      exit_code: state.exitCode,
-      signal: state.signal ?? null,
-      started_at: state.startedAt,
-      finished_at: state.finishedAt,
-      ...(state.error ? { error: state.error } : {}),
-      ...(state.errorCode ? { error_code: state.errorCode } : {}),
-      ...(state.repairAttempts.length > 0 ? { repair_attempts: state.repairAttempts } : {}),
-    };
-    const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    try {
-      writeFileSync(temporaryPath, JSON.stringify(receipt), { encoding: "utf8", flag: "wx" });
-      renameSync(temporaryPath, path);
-      try {
-        this.persistArchivedReceipt(receipt);
-        emitTelemetry({
-          event: "process_receipt_archived",
-          process_id: state.id,
-          pid: state.pid,
-          owner_caller_id: state.callerId,
-        }, state.ownerContext);
-      } catch (error) {
-        emitTelemetry({
-          event: "process_receipt_archive_error",
-          process_id: state.id,
-          pid: state.pid,
-          owner_caller_id: state.callerId,
-          error_message: error instanceof Error ? error.message : String(error),
-        }, state.ownerContext);
-      }
-      this.pruneReceipts();
-      emitTelemetry({
-        event: "process_receipt_persisted",
-        process_id: state.id,
-        pid: state.pid,
-        owner_caller_id: state.callerId,
-        ...audit,
-      }, state.ownerContext);
-    } catch (error) {
-      try { unlinkSync(temporaryPath); } catch { /* best-effort temporary cleanup */ }
-      emitTelemetry({
-        event: "process_receipt_error",
-        process_id: state.id,
-        pid: state.pid,
-        owner_caller_id: state.callerId,
-        error_message: error instanceof Error ? error.message : String(error),
-      }, state.ownerContext);
     }
   }
 
@@ -3029,9 +2888,9 @@ export class ProcessManager {
       emitTelemetry({ event: "process_reused", process_id: duplicate.id, pid: duplicate.pid, owner_caller_id: duplicate.callerId });
       return { ...processResponseState(duplicate.startedAt, true), process_id: duplicate.id, pid: duplicate.pid, cwd: duplicate.cwd, running: true, ...(duplicate.launching ? { launching: true } : {}) } as StartResult;
     }
-    const liveForCaller = [...this.processes.values()].filter((state) => state.exitCode === null && state.callerId === callerId);
-    if (liveForCaller.length >= this.maxLivePerCaller) throw new Error(`start_process_concurrency_limited: caller already has ${liveForCaller.length} live processes; active_process_ids=${liveForCaller.map((state) => state.id).join(",")}`);
     const ownerContext = currentTelemetryContext();
+    const liveForCaller = [...this.processes.values()].filter((state) => state.exitCode === null && state.callerId === callerId);
+    if (liveForCaller.length >= this.maxLivePerCaller) this.rejectConcurrency("caller", callerId, ownerContext, liveForCaller.length, this.maxLivePerCaller, liveForCaller.map((state) => state.id));
     if (sharedLauncherFailure) throw new Error(`process_launcher_unavailable: ${sharedLauncherFailure}`);
     const processId = randomUUID();
     const startedAt = new Date().toISOString();
@@ -3334,6 +3193,10 @@ export class ProcessManager {
     if (boundedWaitMs === 0 || state.exitCode !== null) return this.read(processId, maxChars);
     const observer = currentTelemetryContext();
     const observerCallerId = observer.caller_id ?? "caller_unknown";
+    const cursor = this.outputCursors.get(this.cursorKey(processId, observerCallerId)) ?? { stdout: 0, stderr: 0 };
+    if (this.spoolCharLength(state.stdoutSpoolPath) > cursor.stdout || this.spoolCharLength(state.stderrSpoolPath) > cursor.stderr) {
+      return this.read(processId, maxChars);
+    }
     const lastReadRevision = state.lastReadRevisionByCaller.get(observerCallerId) ?? 0;
     if (state.revision > lastReadRevision) return this.read(processId, maxChars);
 

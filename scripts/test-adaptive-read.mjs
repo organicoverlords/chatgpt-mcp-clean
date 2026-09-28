@@ -13,6 +13,7 @@ assert.equal(adaptiveReadWaitMs(99), 60_000);
 
 const manager = new ProcessManager();
 let started;
+let paged;
 try {
   started = manager.startStructured(process.execPath, ["-e", "setTimeout(()=>{console.log(\"ADAPTIVE_WAKE\");setTimeout(()=>{},5000)},4500)"], undefined, "caller_adaptive_read_test");
   const firstAt = Date.now();
@@ -41,7 +42,17 @@ try {
   assert.equal(explicit.running, true, JSON.stringify(explicit));
   assert.equal(explicit.no_change, true, JSON.stringify(explicit));
   assert.ok(explicitMs >= 100 && explicitMs < 1_000, `explicit wait_ms must bypass adaptive timing (${explicitMs}ms)`);
-  console.log(`PASS adaptive_read first_ms=${firstMs} second_ms=${secondMs} reset_ms=${resetMs} explicit_ms=${explicitMs}`);
+  paged = manager.startStructured(process.execPath, ["-e", "process.stdout.write('X'.repeat(10000)); setTimeout(()=>{},10000)"], undefined, "caller_adaptive_page_test");
+  const pageOne = await manager.readWithWait(paged.process_id, 200, 2_000);
+  assert.equal(pageOne.output_page?.more, true, JSON.stringify(pageOne));
+  const pageTwoAt = Date.now();
+  const pageTwo = await manager.readOutput(paged.process_id, 200);
+  const pageTwoMs = Date.now() - pageTwoAt;
+  assert.equal(pageTwo.output_page?.stdout_start, 200, JSON.stringify(pageTwo));
+  assert.equal(pageTwo.stdout.length, 200);
+  assert.ok(pageTwoMs < 500, `already-spooled next page must return immediately (${pageTwoMs}ms)`);
+  console.log(`PASS adaptive_read first_ms=${firstMs} second_ms=${secondMs} reset_ms=${resetMs} explicit_ms=${explicitMs} buffered_page_ms=${pageTwoMs}`);
 } finally {
   if (started) await manager.kill(started.process_id).catch(() => undefined);
+  if (paged) await manager.kill(paged.process_id).catch(() => undefined);
 }

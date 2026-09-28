@@ -24,32 +24,81 @@ const defaultExecutionTarget = configuredDefaultExecutionTarget as "local" | "om
 const nativeOmenHost = process.env.MCP_NATIVE_OMEN_HOST === "1";
 const omenMcpUrl = process.env.MCP_OMEN_MCP_URL?.trim() || undefined;
 const OMEN_MCP_PROCESS_PREFIX = "omen-mcp:";
-let omenMcpClientPromise: Promise<Client> | undefined;
+type OmenClientEntry = { promise: Promise<Client>; active: number; lastUsedAt: number };
+const omenMcpClients = new Map<string, OmenClientEntry>();
+const OMEN_CLIENT_IDLE_MS = 10 * 60_000;
+const OMEN_CLIENT_CACHE_LIMIT = 64;
 
-async function remoteOmenClient(): Promise<Client> {
-  if (!omenMcpUrl) throw new Error("omen_mcp_unavailable: MCP_OMEN_MCP_URL is not configured");
-  if (!omenMcpClientPromise) {
-    omenMcpClientPromise = (async () => {
-      const client = new Client({ name: "shell-mcp-omen-proxy", version: "1" });
-      const transport = new StreamableHTTPClientTransport(new URL(omenMcpUrl));
-      await client.connect(transport);
-      return client;
-    })().catch((error) => { omenMcpClientPromise = undefined; throw error; });
+function pruneOmenClients(): void {
+  const now = Date.now();
+  for (const [callerId, entry] of omenMcpClients) {
+    if (entry.active > 0 || (omenMcpClients.size <= OMEN_CLIENT_CACHE_LIMIT && now - entry.lastUsedAt < OMEN_CLIENT_IDLE_MS)) continue;
+    omenMcpClients.delete(callerId);
+    void entry.promise.then((client) => client.close()).catch(() => undefined);
   }
-  return omenMcpClientPromise;
 }
 
-async function callRemoteOmenTool(name: "start_process" | "read_output" | "kill_process", args: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const client = await remoteOmenClient();
+export async function closeRemoteOmenClients(): Promise<void> {
+  const entries = [...omenMcpClients.values()];
+  omenMcpClients.clear();
+  await Promise.all(entries.map((entry) => entry.promise.then((client) => client.close()).catch(() => undefined)));
+}
+
+function remoteOmenClient(callerId: string): OmenClientEntry {
+  if (!omenMcpUrl) throw new Error("omen_mcp_unavailable: MCP_OMEN_MCP_URL is not configured");
+  pruneOmenClients();
+  let entry = omenMcpClients.get(callerId);
+  if (!entry) {
+    const client = new Client({ name: "shell-mcp-omen-proxy", version: "1" });
+    // A transport belongs to one upstream caller. Native OMEN must not see
+    // every Windows worker as one shared SDK client/session.
+    const transport = new StreamableHTTPClientTransport(new URL(omenMcpUrl), {
+      requestInit: { headers: { "x-openai-session": `proxy:${callerId}` } },
+    });
+    entry = { active: 0, lastUsedAt: Date.now(), promise: client.connect(transport).then(() => client) };
+    omenMcpClients.set(callerId, entry);
+    const created = entry;
+    void created.promise.catch(() => {
+      if (omenMcpClients.get(callerId) === created) omenMcpClients.delete(callerId);
+    });
+  }
+  entry.active += 1;
+  entry.lastUsedAt = Date.now();
+  return entry;
+}
+
+function remoteOmenToolError(name: string, reply: unknown): Error {
+  const content = reply && typeof reply === "object" && "content" in reply && Array.isArray(reply.content) ? reply.content : [];
+  const message = content.filter((item): item is { type: "text"; text: string } =>
+    Boolean(item && typeof item === "object" && "type" in item && item.type === "text" && "text" in item && typeof item.text === "string"))
+    .map((item) => item.text).join("\n");
+  const code = message.match(/\bstart_process_(?:host_)?concurrency_limited\b/)?.[0];
+  if (!code) return new Error(`omen_mcp_tool_error:${name}`);
+  const live = message.match(/\blive_process_count=(\d+)\b/)?.[1];
+  const limit = message.match(/\bmax_live_processes=(\d+)\b/)?.[1];
+  const rejectionId = message.match(/\brejection_id=([0-9a-f-]{36})\b/i)?.[1];
+  return new Error(`omen_${code}${live ? `; live_process_count=${live}` : ""}${limit ? `; max_live_processes=${limit}` : ""}${rejectionId ? `; rejection_id=${rejectionId}` : ""}`);
+}
+
+async function callRemoteOmenTool(name: "start_process" | "read_output" | "kill_process", args: Record<string, unknown>, callerId: string): Promise<Record<string, unknown>> {
+  const entry = remoteOmenClient(callerId);
+  let transportFailed = false;
   try {
-    const reply = await client.callTool({ name, arguments: args });
-    if (reply.isError) throw new Error(`omen_mcp_tool_error:${name}`);
+    const client = await entry.promise;
+    const reply = await client.callTool({ name, arguments: args }).catch((error) => { transportFailed = true; throw error; });
+    if (reply.isError) throw remoteOmenToolError(name, reply);
     const value = reply.structuredContent;
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`omen_mcp_invalid_structured_result:${name}`);
     return value as Record<string, unknown>;
   } catch (error) {
-    omenMcpClientPromise = undefined;
+    if (transportFailed && omenMcpClients.get(callerId) === entry) {
+      omenMcpClients.delete(callerId);
+      void entry.promise.then((client) => client.close()).catch(() => undefined);
+    }
     throw error;
+  } finally {
+    entry.active -= 1;
+    entry.lastUsedAt = Date.now();
   }
 }
 
@@ -57,9 +106,11 @@ function remoteProcessId(processId: string): string { return `${OMEN_MCP_PROCESS
 function localRemoteProcessId(processId: string): string | undefined { return processId.startsWith(OMEN_MCP_PROCESS_PREFIX) ? processId.slice(OMEN_MCP_PROCESS_PREFIX.length) : undefined; }
 function remoteProcessResult(value: Record<string, unknown>): Record<string, unknown> {
   const rawId = typeof value.process_id === "string" ? value.process_id : undefined;
+  const executionCallerId = typeof value.caller_id === "string" ? value.caller_id : undefined;
   const executionIdentity = value.serving_identity;
   return {
     ...value,
+    ...(executionCallerId ? { execution_caller_id: executionCallerId } : {}),
     ...(rawId ? { process_id: remoteProcessId(rawId) } : {}),
     execution_target: "omen",
     execution_transport: "native-mcp",
@@ -178,6 +229,7 @@ const processServingIdentitySchema = z.object({
 // cannot silently bypass MCP structured-output validation.
 const processOutputSchema = z.object({
   caller_id: z.string(),
+  execution_caller_id: z.string().optional(),
   serving_identity: processServingIdentitySchema,
   execution_serving_identity: processServingIdentitySchema.optional(),
   mcp_status: z.enum(["OK", "STALE"]),
@@ -235,6 +287,7 @@ const processOutputSchema = z.object({
 
 const killProcessOutputSchema = z.object({
   caller_id: z.string(),
+  execution_caller_id: z.string().optional(),
   serving_identity: processServingIdentitySchema,
   execution_serving_identity: processServingIdentitySchema.optional(),
   execution_target: z.enum(["local", "omen"]).optional(),
@@ -360,7 +413,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
             ...(wait_ms !== undefined ? { wait_ms } : {}),
             ...(activity_target ? { activity_target } : {}),
             ...(action_class ? { action_class } : {}),
-          }));
+          }, callerId));
         } else {
           if (!omenExecPath) throw new Error("omen_execution_unavailable: MCP_OMEN_EXEC_PATH is not configured and no Windows default is available");
           if (input.executable === undefined || input.stdin !== undefined || input.env !== undefined) {
@@ -412,7 +465,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       const boundedMaxChars = Math.max(1, Math.min(max_chars ?? 256_000, 256_000));
       const remoteId = localRemoteProcessId(process_id);
       const value = remoteId !== undefined
-        ? remoteProcessResult(await callRemoteOmenTool("read_output", { process_id: remoteId, max_chars: boundedMaxChars, ...(wait_ms !== undefined ? { wait_ms } : {}) }))
+        ? remoteProcessResult(await callRemoteOmenTool("read_output", { process_id: remoteId, max_chars: boundedMaxChars, ...(wait_ms !== undefined ? { wait_ms } : {}) }, callerId))
         : (isBootstrapSnapshot(process_id)
           ? await readBootstrapSnapshot(boundedMaxChars, process_id, callerId, conversation_id, expected_room_head)
           : await processManager.readOutput(process_id, boundedMaxChars, wait_ms));
@@ -432,7 +485,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
     async ({ process_id }) => {
       const remoteId = localRemoteProcessId(process_id);
       const value = remoteId !== undefined
-        ? remoteProcessResult(await callRemoteOmenTool("kill_process", { process_id: remoteId }))
+        ? remoteProcessResult(await callRemoteOmenTool("kill_process", { process_id: remoteId }, callerId))
         : await processManager.kill(process_id);
       return structuredTextResult(value, callerId, servingIdentity);
     },

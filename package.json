@@ -13,6 +13,8 @@
     "start": "node dist/index.js",
     "test:stack": "node scripts/test-stack-installer.mjs",
     "test:omen-contract": "tsc && node scripts/verify-process-contract.mjs && node scripts/test-prepare-frozen-home-direct.mjs && node scripts/check-readme-timeline.mjs",
+    "test:capacity-receipts": "tsc && node scripts/test-concurrency-rejection-receipt.mjs && node scripts/test-audit-process-evidence.mjs",
+    "test:mcp-reliability": "tsc && node scripts/test-adaptive-read.mjs && node scripts/test-public-read-fast-path.mjs && node scripts/test-omen-forwarding-identity.mjs && node scripts/test-concurrency-rejection-receipt.mjs && node scripts/test-audit-process-evidence.mjs && node scripts/test-receipt-archive.mjs && node scripts/verify-process-contract.mjs",
     "test:native-omen-linux": "tsc && node scripts/test-native-omen-linux.mjs",
     "test:native-omen-mcp": "tsc && node scripts/test-native-omen-linux.mjs && node scripts/test-native-omen-mcp-proxy.mjs"
   },

@@ -43,6 +43,8 @@ function parseArgs(argv) {
 async function walkJsonFiles(root, sinceMs) {
   const candidates = [];
   const stack = [root];
+  const recentFlatWindow = sinceMs != null && Date.now() - sinceMs <= 30 * 60_000;
+  const archiveRoot = path.join(root, "archive");
   while (stack.length) {
     const current = stack.pop();
     let entries;
@@ -51,14 +53,17 @@ async function walkJsonFiles(root, sinceMs) {
     for (const entry of entries) {
       const full = path.join(current, entry.name);
       if (entry.isDirectory()) {
-        const recentFlatWindow = sinceMs != null && Date.now() - sinceMs <= 30 * 60_000;
-        if (recentFlatWindow && current === root && entry.name === "archive") continue;
         if (sinceMs != null && entry.name.match(/^\d{4}-\d{2}-\d{2}$/)) {
           const dayEnd = Date.parse(`${entry.name}T23:59:59.999Z`);
           if (!Number.isNaN(dayEnd) && dayEnd < sinceMs) continue;
         }
         stack.push(full);
-      } else if (entry.isFile() && entry.name.endsWith(".json")) candidates.push(full);
+      } else if (entry.isFile() && entry.name.endsWith(".json")) {
+        // Recent process receipts are available in the flat cache; archived
+        // rejections have no flat copy and must still be included.
+        if (recentFlatWindow && path.dirname(current) === archiveRoot && !entry.name.startsWith("rejected-")) continue;
+        candidates.push(full);
+      }
     }
   }
   const inspected = await mapLimit(candidates, FILE_IO_CONCURRENCY, async (file) => {
@@ -188,6 +193,7 @@ async function summarize(receiptDir, since) {
   const dedup = new Map();
   let malformedFiles = 0;
   let nonReceiptJsonFiles = 0;
+  const rejections = { total: 0, caller_limit: 0, host_limit: 0 };
   const parsed = await mapLimit(collapsed.files, FILE_IO_CONCURRENCY, async ({ file, mtimeMs }) => {
     try { return { receipt: JSON.parse(await readFile(file, "utf8")), file, mtimeMs }; }
     catch { return { malformed: true }; }
@@ -195,6 +201,15 @@ async function summarize(receiptDir, since) {
   for (const candidate of parsed) {
     if (candidate.malformed) { malformedFiles += 1; continue; }
     const { receipt, file, mtimeMs } = candidate;
+    if (receipt?.kind === "process_concurrency_rejection" && typeof receipt.rejection_id === "string") {
+      const rejectedAt = Date.parse(receipt.rejected_at);
+      if (Number.isFinite(rejectedAt) && (sinceMs == null || rejectedAt >= sinceMs)) {
+        rejections.total += 1;
+        if (receipt.scope === "caller") rejections.caller_limit += 1;
+        else if (receipt.scope === "host") rejections.host_limit += 1;
+      }
+      continue;
+    }
     if (!receipt || typeof receipt.process_id !== "string") { nonReceiptJsonFiles += 1; continue; }
     const at = receiptTime(receipt);
     if (sinceMs != null && (!at || Number.isNaN(Date.parse(at)) || Date.parse(at) < sinceMs)) continue;
@@ -280,6 +295,7 @@ async function summarize(receiptDir, since) {
       non_receipt_json_files: nonReceiptJsonFiles,
       deduplicated_process_receipts: dedup.size,
     },
+    rejections,
     totals,
     callers: callerRows,
   };
