@@ -56,11 +56,16 @@ $id = [guid]::NewGuid().ToString('N')
 $stage = "/tmp/mcp-edge-health-$id"
 $backup = "/var/lib/mcp-edge/backups/mcp-edge-health-$expected"
 $stageTarget = $target + ':' + $stage
+$normalizedObserver = Join-Path $env:TEMP ("mcp-edge-health-$id.sh")
 
-& $scp -q -o BatchMode=yes -o ConnectTimeout=5 -i $key $ObserverSourcePath $stageTarget
-if ($LASTEXITCODE -ne 0) { throw 'observer staging copy failed' }
+try {
+    $observerText = [Text.RegularExpressions.Regex]::Replace([IO.File]::ReadAllText($ObserverSourcePath), '\r\n?', [string][char]10)
+    [IO.File]::WriteAllText($normalizedObserver,$observerText,[Text.UTF8Encoding]::new($false))
 
-$remoteTemplate = @'
+    & $scp -q -o BatchMode=yes -o ConnectTimeout=5 -i $key $normalizedObserver $stageTarget
+    if ($LASTEXITCODE -ne 0) { throw 'observer staging copy failed' }
+
+    $remoteTemplate = @'
 set -eu
 remote='__REMOTE__'
 stage='__STAGE__'
@@ -87,12 +92,16 @@ cat /var/lib/mcp-edge/status.json
 printf '\nbackup=%s\n' "$backup"
 '@
 
-$remote = $remoteTemplate.Replace('__REMOTE__',$remotePath).
-    Replace('__STAGE__',$stage).
-    Replace('__BACKUP__',$backup).
-    Replace('__EXPECTED__',$expected)
+    $remote = $remoteTemplate.Replace('__REMOTE__',$remotePath).
+        Replace('__STAGE__',$stage).
+        Replace('__BACKUP__',$backup).
+        Replace('__EXPECTED__',$expected)
+    $remote = [Text.RegularExpressions.Regex]::Replace($remote, '\r\n?', [string][char]10)
 
-$result = & $ssh -T -o BatchMode=yes -o ConnectTimeout=5 -i $key $target $remote
-if ($LASTEXITCODE -ne 0) { throw 'VPS observer install or live validation failed; rollback attempted remotely' }
+    $result = & $ssh -T -o BatchMode=yes -o ConnectTimeout=5 -i $key $target $remote
+    if ($LASTEXITCODE -ne 0) { throw 'VPS observer install or live validation failed; rollback attempted remotely' }
 
-$result
+    $result
+} finally {
+    Remove-Item -LiteralPath $normalizedObserver -Force -ErrorAction SilentlyContinue
+}
