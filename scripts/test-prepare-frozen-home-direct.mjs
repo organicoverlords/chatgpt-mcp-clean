@@ -28,6 +28,12 @@ for(const required of [
   "Register-ScheduledTask",
   "Start-ScheduledTask",
   "CurrentTopologyPath",
+  "sourceBranch",
+  "canonical_branch=$sourceBranch",
+  "mcp-live-topology.v2",
+  "derived_live_snapshot",
+  "Resolve-CurrentFrozenRoot",
+  "stable rollback live health",
   "Get-Sha256Hex",
   "Security.Cryptography.SHA256",
   "preserved_previous_routes",
@@ -51,4 +57,4 @@ for(const forbidden of [
 assert.match(script,/if\(\$Plan\).*route_mutation/s);
 assert.match(script,/if\(-not \$ExplicitUserAuthorization\)/);
 assert.match(script,/Push-Location -LiteralPath \$runtime[\s\S]*verify-process-contract\.mjs[\s\S]*finally \{[^}]*Pop-Location/,"frozen verifier must run with cwd bound to the frozen runtime even when prepare is launched elsewhere");
-console.log("PASS prepare_frozen_home_direct exact_commit=true self_contained=true persistent_task=true shared_state=true oauth_existing_required=true route_unchanged=true explicit_auth=true verifier_runtime_cwd=true fixed_three_tool_surface=true per_binding_execution_target=true native_omen_mcp=true ssh_adapter_rollback_only=true");
+console.log("PASS prepare_frozen_home_direct exact_commit=true self_contained=true persistent_task=true shared_state=true oauth_existing_required=true route_unchanged=true explicit_auth=true verifier_runtime_cwd=true fixed_three_tool_surface=true per_binding_execution_target=true native_omen_mcp=true ssh_adapter_rollback_only=true live_topology_v2=true rollback_live_proof=true");

@@ -31,29 +31,55 @@ function Get-Sha256Hex([string]$Path){
 function Read-Topology([string]$Path){
     if(-not (Test-Path -LiteralPath $Path -PathType Leaf)){ Fail "current topology missing: $Path" }
     $topology=Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
-    if([string]$topology.schema -ne 'mcp-current-topology.v1' -or [string]$topology.authority -ne 'current_serving_topology'){ Fail 'current topology contract is invalid' }
+    $schema=[string]$topology.schema
+    $authority=[string]$topology.authority
+    $legacy=($schema -eq 'mcp-current-topology.v1' -and $authority -eq 'current_serving_topology')
+    $liveSnapshot=($schema -eq 'mcp-live-topology.v2' -and $authority -eq 'derived_live_snapshot')
+    if(-not $legacy -and -not $liveSnapshot){ Fail "current topology contract is invalid: schema=$schema authority=$authority" }
     return $topology
 }
 function Resolve-StableRollback($Topology){
-    $recoveryProperty=$Topology.PSObject.Properties['recovery']
-    if(-not $recoveryProperty -or $null -eq $recoveryProperty.Value){ Fail 'current topology has no recovery section' }
-    $recovery=$recoveryProperty.Value
-    $legacyProperty=$recovery.PSObject.Properties['stable_rollback']
-    $rollback=if($legacyProperty -and $null -ne $legacyProperty.Value){ $legacyProperty.Value }else{ $null }
-    if($null -eq $rollback){
-        $preservedProperty=$recovery.PSObject.Properties['preserved_previous_routes']
-        $routes=if($preservedProperty -and $null -ne $preservedProperty.Value){ @($preservedProperty.Value) }else{ @() }
-        $stable=@($routes | Where-Object { [string]$_.name -eq 'stable' -and $_.currently_listening -eq $true })
-        if($stable.Count -ne 1){ Fail "current topology must expose exactly one listening stable rollback route; found $($stable.Count)" }
-        $rollback=$stable[0]
+    $schema=[string]$Topology.schema
+    if($schema -eq 'mcp-live-topology.v2'){
+        # V2 is rollback/comparison evidence only. Use its current stable backend as a locator,
+        # then prove that exact listener live before it can become candidate rollback metadata.
+        $backend=$Topology.serving.backend
+        if($null -eq $backend){ Fail 'live topology has no serving backend' }
+        $rollback=[pscustomobject]@{listen=[string]$backend.listen;instance=[string]$backend.instance_id}
+    }else{
+        $recoveryProperty=$Topology.PSObject.Properties['recovery']
+        if(-not $recoveryProperty -or $null -eq $recoveryProperty.Value){ Fail 'current topology has no recovery section' }
+        $recovery=$recoveryProperty.Value
+        $legacyProperty=$recovery.PSObject.Properties['stable_rollback']
+        $rollback=if($legacyProperty -and $null -ne $legacyProperty.Value){ $legacyProperty.Value }else{ $null }
+        if($null -eq $rollback){
+            $preservedProperty=$recovery.PSObject.Properties['preserved_previous_routes']
+            $routes=if($preservedProperty -and $null -ne $preservedProperty.Value){ @($preservedProperty.Value) }else{ @() }
+            $stable=@($routes | Where-Object { [string]$_.name -eq 'stable' -and $_.currently_listening -eq $true })
+            if($stable.Count -ne 1){ Fail "current topology must expose exactly one listening stable rollback route; found $($stable.Count)" }
+            $rollback=$stable[0]
+        }
     }
     $listen=[string]$rollback.listen
     if($listen -notmatch '^127\.0\.0\.1:(?<port>[0-9]+)$'){ Fail "stable rollback listen is unsupported: $listen" }
     $port=[int]$Matches.port
     if($port -lt 1024 -or $port -gt 65535){ Fail "stable rollback port is invalid: $port" }
-    $instance=[string]$rollback.instance
+    $instanceProperty=$rollback.PSObject.Properties['instance']
+    $instance=if($instanceProperty){[string]$instanceProperty.Value}else{''}
     if([string]::IsNullOrWhiteSpace($instance)){ Fail 'stable rollback instance is missing' }
+    try{$health=Invoke-RestMethod -Uri ("http://127.0.0.1:{0}/health" -f $port) -TimeoutSec 2}catch{ Fail "stable rollback live health failed: $($_.Exception.Message)" }
+    if([string]$health.status -ne 'ok' -or [int]$health.port -ne $port){ Fail 'stable rollback live health identity failed' }
+    $healthInstance=[string]$health.runtime_identity.instance_id
+    if($healthInstance -and $healthInstance -ne $instance){ Fail "stable rollback live instance mismatch: expected=$instance actual=$healthInstance" }
     return [pscustomobject]@{listen=$listen;port=$port;instance=$instance}
+}
+function Resolve-CurrentFrozenRoot($Topology){
+    if([string]$Topology.schema -eq 'mcp-live-topology.v2'){
+        $runtime=[Environment]::ExpandEnvironmentVariables([string]$Topology.serving.backend.deployment.runtime_root)
+        if([string]::IsNullOrWhiteSpace($runtime)){ Fail 'live topology backend deployment runtime root is missing' }
+        return (Split-Path -Parent $runtime)
+    }
+    return [Environment]::ExpandEnvironmentVariables([string]$Topology.serving.backend.durable_runtime_root)
 }
 function Assert-Candidate([string]$Root,[string]$Commit){
     $resolved=[IO.Path]::GetFullPath($Root)
@@ -71,6 +97,8 @@ if(-not $TaskName){ $TaskName="McpV4FrozenStable${Port}-${short}" }
 if(-not $DeploymentRoot){ $DeploymentRoot=Join-Path $env:LOCALAPPDATA ("ChatGPTMcpFrozen\\{0}" -f $short) }
 $DeploymentRoot=[IO.Path]::GetFullPath($DeploymentRoot)
 $root=Assert-Candidate $CandidateRoot $commit
+$sourceBranch=(& git.exe -C $root branch --show-current).Trim()
+if([string]::IsNullOrWhiteSpace($sourceBranch)){ $sourceBranch='(detached)' }
 $omenExecPath=[IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($OmenExecPath))
 $omenMcpUrl=$OmenMcpUrl.Trim()
 if($omenMcpUrl){
@@ -82,7 +110,7 @@ $topology=Read-Topology $CurrentTopologyPath
 $stableRollback=Resolve-StableRollback $topology
 $rollbackPort=[int]$stableRollback.port
 $rollbackInstance=[string]$stableRollback.instance
-$currentFrozen=[Environment]::ExpandEnvironmentVariables([string]$topology.serving.backend.durable_runtime_root)
+$currentFrozen=Resolve-CurrentFrozenRoot $topology
 $ownerLoginSource=if([string]::IsNullOrWhiteSpace($OwnerLoginSourcePath)){ Join-Path $currentFrozen 'owner-login.txt' }else{ [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($OwnerLoginSourcePath)) }
 if(-not (Test-Path -LiteralPath $ownerLoginSource -PathType Leaf)){ Fail "owner identity source missing: $ownerLoginSource" }
 $ownerLogin=(Get-Content -LiteralPath $ownerLoginSource -Raw).Trim()
@@ -128,7 +156,7 @@ try {
     }
     Copy-Item -LiteralPath $ownerLoginSource -Destination (Join-Path $staging 'owner-login.txt')
     $manifest=[ordered]@{
-        schema='mcp-frozen-deployment.v1'; frozen_at=[DateTimeOffset]::UtcNow.ToString('o'); source_repo='organicoverlords/chatgpt-mcp-clean'; canonical_branch='master'; merge_commit=$commit;
+        schema='mcp-frozen-deployment.v1'; frozen_at=[DateTimeOffset]::UtcNow.ToString('o'); source_repo='organicoverlords/chatgpt-mcp-clean'; canonical_branch=$sourceBranch; merge_commit=$commit;
         runtime_root=(Join-Path $DeploymentRoot 'runtime'); runtime_tracked_clean=$true; hashes=[ordered]@{dist_index_sha256=$hashes.dist_index_sha256;dist_server_sha256=$hashes.dist_server_sha256};
         routes=[ordered]@{stable=[ordered]@{public_origin=$PublicOrigin;port=$Port;instance=$InstanceId;oauth_store=(Join-Path $env:LOCALAPPDATA ("ChatGPTMcpClean\\minimal-connectors\\$OAuthStoreRelative"));rollback_port=$rollbackPort;rollback_instance=$rollbackInstance}};
         tool_contract=$toolContract; self_contained_runtime=(Join-Path $DeploymentRoot 'runtime'); runtime_commit=$commit; default_execution_target=$DefaultExecutionTarget; omen_exec_path=$(if($omenMcpUrl){$null}else{$omenExecPath}); omen_mcp_url=$omenMcpUrl;
