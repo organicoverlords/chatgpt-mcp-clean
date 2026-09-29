@@ -7,6 +7,7 @@ import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/serv
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import type { OAuthClientInformationFull, OAuthTokens, OAuthTokenRevocationRequest } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { InvalidClientMetadataError, InvalidGrantError, InvalidScopeError, InvalidTargetError, InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import { emitTelemetry } from "./transport-telemetry.js";
 
 const ACCESS_TTL_SEC = 60 * 60;
 const REFRESH_TTL_SEC = 7 * 24 * 60 * 60;
@@ -82,6 +83,9 @@ export class LocalOAuthProvider implements OAuthServerProvider {
   private access = new Map<string, TokenRecord>();
   private refresh = new Map<string, TokenRecord>();
   private codes = new Map<string, CodeRecord>();
+  // Keep the successor only in memory for the short retry window. The durable
+  // store continues to hold refresh-token digests, never plaintext tokens.
+  private recentRefreshSuccessors = new Map<string, { token: string; digest: string; issuedAt: number }>();
 
   constructor(
     private readonly resourceUrl: URL,
@@ -160,7 +164,10 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     const now = Date.now();
     const key = digest(refreshToken);
     const rec = this.refresh.get(key);
-    if (!rec || rec.clientId !== client.client_id || rec.expiresAt <= now) throw new InvalidGrantError("Invalid refresh token");
+    if (!rec || rec.clientId !== client.client_id || rec.expiresAt <= now) {
+      emitTelemetry({ event: "oauth_refresh_rejected", reason: !rec ? "unknown_token" : rec.clientId !== client.client_id ? "client_mismatch" : "expired_token" });
+      throw new InvalidGrantError("Invalid refresh token");
+    }
     if (resource && canonical(resource) !== rec.resource) throw new InvalidTargetError("resource mismatch");
     const nextScopes = scopes?.length ? this.validateScopes(scopes) : rec.scopes;
     if (nextScopes.some((s) => !rec.scopes.includes(s))) throw new InvalidScopeError("scope escalation denied");
@@ -178,24 +185,42 @@ export class LocalOAuthProvider implements OAuthServerProvider {
         expiresAt: now + ACCESS_TTL_SEC * 1000,
       });
       this.persist();
+      emitTelemetry({ event: "oauth_refresh_completed", mode: "confidential" });
       return { access_token: accessToken, token_type: "Bearer", expires_in: ACCESS_TTL_SEC, refresh_token: refreshToken, scope: nextScopes.join(" ") };
     }
 
     if (rec.supersededAt !== undefined) {
       const insideRetryGrace = now - rec.supersededAt <= REFRESH_REUSE_GRACE_MS;
-      const retryAvailable = (rec.supersededReuseCount ?? 0) < 1;
       const successor = rec.successorRefreshDigest ? this.refresh.get(rec.successorRefreshDigest) : undefined;
       const familyAlreadyAdvanced = successor?.supersededAt !== undefined;
-      if (!insideRetryGrace || !retryAvailable || familyAlreadyAdvanced) {
+      if (!insideRetryGrace) {
         this.revokeRefreshFamily(key);
         this.persist();
+        emitTelemetry({ event: "oauth_refresh_rejected", reason: "replay_outside_grace", family_revoked: true });
         throw new InvalidGrantError("Refresh token replay detected");
       }
-      rec.supersededReuseCount = (rec.supersededReuseCount ?? 0) + 1;
-      if (rec.successorRefreshDigest) this.refresh.delete(rec.successorRefreshDigest);
+      if (familyAlreadyAdvanced) {
+        emitTelemetry({ event: "oauth_refresh_rejected", reason: "successor_already_rotated", family_revoked: false });
+        throw new InvalidGrantError("Refresh token already rotated");
+      }
+      const recent = this.recentRefreshSuccessors.get(key);
+      if (recent && recent.digest === rec.successorRefreshDigest && successor) {
+        if (nextScopes.join(" ") !== successor.scopes.join(" ")) throw new InvalidScopeError("refresh retry scope mismatch");
+        const accessToken = freshToken();
+        this.access.set(digest(accessToken), {
+          clientId: client.client_id, scopes: nextScopes, resource: rec.resource, subject: rec.subject,
+          expiresAt: now + ACCESS_TTL_SEC * 1000,
+        });
+        this.persist();
+        emitTelemetry({ event: "oauth_refresh_completed", mode: "coalesced_retry" });
+        return { access_token: accessToken, token_type: "Bearer", expires_in: ACCESS_TTL_SEC, refresh_token: recent.token, scope: nextScopes.join(" ") };
+      }
+      // Never branch a refresh family after restart. A lost retry response must
+      // not invalidate the successor already delivered to another request.
+      emitTelemetry({ event: "oauth_refresh_rejected", reason: "retry_not_cached", family_revoked: false });
+      throw new InvalidGrantError("Refresh retry unavailable after restart");
     } else {
       rec.supersededAt = now;
-      rec.supersededReuseCount = 0;
       // Retain the hash as a bounded replay-detection tombstone; it is no longer
       // usable after the short retry grace even though the record remains durable.
       rec.expiresAt = now + REFRESH_TTL_SEC * 1000;
@@ -209,7 +234,9 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     this.access.set(digest(accessToken), { ...common, expiresAt: now + ACCESS_TTL_SEC * 1000 });
     this.refresh.set(nextRefreshDigest, { ...common, expiresAt: now + REFRESH_TTL_SEC * 1000 });
     rec.successorRefreshDigest = nextRefreshDigest;
+    this.recentRefreshSuccessors.set(key, { token: nextRefreshToken, digest: nextRefreshDigest, issuedAt: now });
     this.persist();
+    emitTelemetry({ event: "oauth_refresh_completed", mode: "rotated" });
     return { access_token: accessToken, token_type: "Bearer", expires_in: ACCESS_TTL_SEC, refresh_token: nextRefreshToken, scope: nextScopes.join(" ") };
   }
 
@@ -219,7 +246,10 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     // so rereading oauth.json here only couples every tool call to disk latency.
     this.prune();
     const rec = this.access.get(digest(token));
-    if (!rec || rec.expiresAt <= Date.now()) throw new InvalidTokenError("Invalid or expired access token");
+    if (!rec || rec.expiresAt <= Date.now()) {
+      emitTelemetry({ event: "oauth_access_rejected", reason: "unknown_or_expired_token" });
+      throw new InvalidTokenError("Invalid or expired access token");
+    }
     return {
       token,
       clientId: rec.clientId,
@@ -330,6 +360,7 @@ export class LocalOAuthProvider implements OAuthServerProvider {
       const rec = this.refresh.get(key);
       const next = rec?.successorRefreshDigest;
       this.refresh.delete(key);
+      this.recentRefreshSuccessors.delete(key);
       key = next;
     }
   }
@@ -346,6 +377,9 @@ export class LocalOAuthProvider implements OAuthServerProvider {
   }
   private prune(): void {
     const now = Date.now();
+    for (const [key, rec] of this.recentRefreshSuccessors) {
+      if (now - rec.issuedAt > REFRESH_REUSE_GRACE_MS || !this.refresh.has(key)) this.recentRefreshSuccessors.delete(key);
+    }
     for (const [code, rec] of this.codes) if (rec.expiresAt <= now) this.codes.delete(code);
     for (const [key, rec] of this.access) if (rec.expiresAt <= now) this.access.delete(key);
     for (const [key, rec] of this.refresh) {
