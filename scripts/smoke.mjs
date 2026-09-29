@@ -152,7 +152,7 @@ async function readAllUntilExit(sessionId, first, timeoutMs = 20_000) {
     if (!output.running && output.next_action !== "READ_SAME_PROCESS_ID") {
       return { pages, stdout, stderr, last: output };
     }
-    output = await callTool(sessionId, "read_output", { process_id: processId, max_chars: 256_000 });
+    output = await callTool(sessionId, "read_output", { process_id: processId, max_chars: 9_800 });
   } while (Date.now() < deadline);
   throw new Error(`process ${processId} did not reach a terminal output page within ${timeoutMs}ms`);
 }
@@ -601,8 +601,8 @@ try {
   assert.equal(floodOutput.last.running, false);
   const floodPages = floodOutput.pages.filter((page) => page.output_page);
   assert.ok(floodPages.length >= 2, "high-output process must exercise paging");
-  assert.ok(floodPages.every((page) => page.output_page.page_chars <= 256_000), "paged read_output exceeded 256k");
-  assert.ok(floodPages.some((page) => page.output_page.page_chars > 200_000), "high-output paging never used a substantial 256k page");
+  assert.ok(floodPages.every((page) => page.output_page.page_chars <= 9_800), "paged read_output exceeded the 9.8k model-visible cap");
+  assert.ok(floodPages.some((page) => page.output_page.page_chars > 9_000), "high-output paging never exercised a substantial model-visible page");
   assert.equal(floodOutput.pages.at(-1).stdout_truncated, undefined);
   assert.ok(floodOutput.stdout.length > 2_000_000, 'lossless output should exceed 2M characters');
   assert.match(floodOutput.stdout, /FLOOD_10000_/);
