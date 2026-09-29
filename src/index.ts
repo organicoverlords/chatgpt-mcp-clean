@@ -16,6 +16,7 @@ import { startStallWatchdog } from "./lib/stall-watchdog.js";
 import { createResponseByteCounter } from "./lib/response-bytes.js";
 import { createServer, processRuntimeStatus } from "./server.js";
 import { serveLocalFileTransfer } from "./lib/file-transfer.js";
+import { awaitRequestOrDisconnect } from "./request-lifecycle.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "127.0.0.1";
@@ -174,7 +175,7 @@ async function handleStateless(req: Request, res: Response, body: unknown): Prom
   res.once("close", () => void cleanup());
   try {
     await server.connect(transport);
-    await transport.handleRequest(req, res, body);
+    await awaitRequestOrDisconnect(req, res, () => transport.handleRequest(req, res, body));
   } catch (error) {
     await cleanup();
     throw error;
