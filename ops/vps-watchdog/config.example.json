@@ -1,0 +1,21 @@
+{
+  "healthline_stale_seconds": 600,
+  "nodes": {
+    "KONE": {
+      "heartbeat_warn_seconds": 90,
+      "heartbeat_critical_seconds": 180,
+      "memory_warn_gb": 3.0,
+      "memory_critical_gb": 1.5,
+      "disk_warn_gb": 15.0,
+      "disk_critical_gb": 8.0
+    },
+    "OMEN": {
+      "heartbeat_warn_seconds": 90,
+      "heartbeat_critical_seconds": 180,
+      "memory_warn_gb": 3.0,
+      "memory_critical_gb": 1.5,
+      "disk_warn_gb": 20.0,
+      "disk_critical_gb": 10.0
+    }
+  }
+}
