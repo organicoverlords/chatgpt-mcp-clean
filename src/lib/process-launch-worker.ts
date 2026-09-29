@@ -52,6 +52,7 @@ type StepResult = { code: number; signal: NodeJS.Signals | null };
 
 const OUTPUT_FLUSH_INTERVAL_MS = 50;
 const OUTPUT_BATCH_MAX_CHARS = 256_000;
+const OWNED_PID_STDIO_DRAIN_GRACE_MS = 250;
 
 const data = workerData as LaunchData;
 const port = parentPort;
@@ -171,6 +172,44 @@ function shouldRunStep(step: CommandExecutionStep, previousCode: number | undefi
   return previousCode !== 0;
 }
 
+function ownedPidResult(
+  requestId: string,
+  child: ChildProcess,
+  flushErrorOutputBeforeReject = true,
+): Promise<StepResult> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let exitResult: StepResult | undefined;
+    let drainTimer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (result: StepResult) => {
+      if (settled) return;
+      settled = true;
+      if (drainTimer) clearTimeout(drainTimer);
+      flushOutput(requestId);
+      removeChild(requestId, child);
+      resolve(result);
+    };
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      if (drainTimer) clearTimeout(drainTimer);
+      if (flushErrorOutputBeforeReject) flushOutput(requestId);
+      removeChild(requestId, child);
+      reject(error);
+    });
+    child.once("exit", (code, signal) => {
+      exitResult = { code: code ?? -1, signal };
+      // `close` waits for stdio handles. On Windows, a descendant can inherit those
+      // handles after the owned PID has exited and keep an MCP slot falsely live. Give
+      // the direct child's buffered output a short chance to drain, then converge on the
+      // owned PID's terminal state even if inherited handles remain open.
+      drainTimer = setTimeout(() => finish(exitResult!), OWNED_PID_STDIO_DRAIN_GRACE_MS);
+      drainTimer.unref();
+    });
+    child.once("close", (code, signal) => finish(exitResult ?? { code: code ?? -1, signal }));
+  });
+}
+
 function runStep(
   requestId: string,
   step: CommandExecutionStep,
@@ -180,48 +219,32 @@ function runStep(
   stepIndex: number,
   stepCount: number,
 ): Promise<StepResult> {
-  return new Promise((resolve, reject) => {
-    const child = crossSpawn(step.executable, step.args, {
-      cwd,
-      windowsHide: true,
-      detached: process.platform !== "win32",
-      stdio: [step.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
-      env,
-    });
-    let settled = false;
-    child.once("error", (error) => {
-      if (settled) return;
-      settled = true;
-      flushOutput(requestId);
-      removeChild(requestId, child);
-      reject(error);
-    });
-    if (!child.pid) return;
-
-    addChild(requestId, child);
-    const startMessage = stepIndex === 0 ? "started" : "step_started";
-    send(requestId, {
-      type: startMessage,
-      pid: child.pid,
-      executionMode: plan.mode,
-      executionReason: plan.reason,
-      stepIndex,
-      stepCount,
-      stepReason: step.reason,
-    });
-    if (pendingKills.has(requestId)) requestKill(requestId);
-    child.stdout?.on("data", (chunk) => queueOutput(requestId, "stdout", chunk));
-    child.stderr?.on("data", (chunk) => queueOutput(requestId, "stderr", chunk));
-    if (step.stdin !== undefined) child.stdin?.end(step.stdin);
-
-    child.once("close", (code, signal) => {
-      if (settled) return;
-      settled = true;
-      flushOutput(requestId);
-      removeChild(requestId, child);
-      resolve({ code: code ?? -1, signal });
-    });
+  const child = crossSpawn(step.executable, step.args, {
+    cwd,
+    windowsHide: true,
+    detached: process.platform !== "win32",
+    stdio: [step.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
+    env,
   });
+  const result = ownedPidResult(requestId, child);
+  if (!child.pid) return result;
+
+  addChild(requestId, child);
+  const startMessage = stepIndex === 0 ? "started" : "step_started";
+  send(requestId, {
+    type: startMessage,
+    pid: child.pid,
+    executionMode: plan.mode,
+    executionReason: plan.reason,
+    stepIndex,
+    stepCount,
+    stepReason: step.reason,
+  });
+  if (pendingKills.has(requestId)) requestKill(requestId);
+  child.stdout?.on("data", (chunk) => queueOutput(requestId, "stdout", chunk));
+  child.stderr?.on("data", (chunk) => queueOutput(requestId, "stderr", chunk));
+  if (step.stdin !== undefined) child.stdin?.end(step.stdin);
+  return result;
 }
 
 async function runNativePipeline(
@@ -237,11 +260,10 @@ async function runNativePipeline(
     for (let index = 0; index < steps.length; index += 1) {
       const step = steps[index]!;
       const child = crossSpawn(step.executable, step.args, { cwd, windowsHide: true, detached: process.platform !== "win32", stdio: [index === 0 && step.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"], env });
-      const result = new Promise<StepResult>((resolve, reject) => {
-        let settled = false;
-        child.once("error", (error) => { if (settled) return; settled = true; removeChild(requestId, child); reject(error); });
-        child.once("close", (code, signal) => { if (settled) return; settled = true; removeChild(requestId, child); resolve({ code: code ?? -1, signal }); });
-      });
+      // Preserve the established pipeline error ordering: publish the terminal spawn
+      // error before any buffered shell diagnostic so a blocking read cannot wake on
+      // output and still observe a falsely running request.
+      const result = ownedPidResult(requestId, child, false);
       if (!child.pid) {
         await result;
         throw new Error(`Background pipeline process did not receive a PID: ${step.executable}`);
