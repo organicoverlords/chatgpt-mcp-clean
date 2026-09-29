@@ -23,6 +23,9 @@
         "caller_id": {
           "type": "string"
         },
+        "execution_caller_id": {
+          "type": "string"
+        },
         "serving_identity": {
           "type": "object",
           "properties": {
@@ -181,6 +184,9 @@
       "type": "object",
       "properties": {
         "caller_id": {
+          "type": "string"
+        },
+        "execution_caller_id": {
           "type": "string"
         },
         "serving_identity": {
@@ -852,6 +858,9 @@
       "type": "object",
       "properties": {
         "caller_id": {
+          "type": "string"
+        },
+        "execution_caller_id": {
           "type": "string"
         },
         "serving_identity": {

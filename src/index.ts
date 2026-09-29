@@ -207,7 +207,7 @@ app.use((req, res, next) => {
   const requestId = randomUUID();
   const requestCallerId = callerId(req);
   const connectionId = observeSocket(req.socket);
-  const sessionId = sessionFingerprint(req.header("mcp-session-id") || req.header("x-openai-session"));
+  const sessionId = sessionFingerprint(req.header("x-openai-session") || req.header("mcp-session-id"));
   const startedAt = process.hrtime.bigint();
   const host = req.header("host") || "";
   const viaFunnel = publicOrigin.hostname.endsWith(".ts.net") && host.toLowerCase() === publicOrigin.host.toLowerCase();

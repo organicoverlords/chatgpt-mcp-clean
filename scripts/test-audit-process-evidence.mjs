@@ -87,6 +87,12 @@ try {
   writeFileSync(path.join(root, "old.json"), JSON.stringify(old));
   writeFileSync(path.join(root, "malformed.json"), "{");
   writeFileSync(path.join(root, "other.json"), JSON.stringify({ hello: "world" }));
+  for (const [scope, id] of [["caller", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"], ["host", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]]) {
+    writeFileSync(path.join(archive, `rejected-${id}.json`), JSON.stringify({
+      version: 1, kind: "process_concurrency_rejection", scope,
+      rejection_id: id, owner_caller_id: "caller_a", rejected_at: "2026-09-05T20:05:00.000Z",
+    }));
+  }
 
   const output = execFileSync(process.execPath, [
     fileURLToPath(new URL("./audit-process-evidence.mjs", import.meta.url)),
@@ -99,12 +105,13 @@ try {
   assert.equal(report.semantics.aggregate_only, true);
   assert.equal(report.semantics.semantic_work_quality_scored, false);
   assert.equal(report.semantics.caller_id_is_opaque_not_named_worker_identity, true);
-  assert.equal(report.source.scanned_json_files, 8);
-  assert.equal(report.source.parsed_json_files, 7);
+  assert.equal(report.source.scanned_json_files, 10);
+  assert.equal(report.source.parsed_json_files, 9);
   assert.equal(report.source.duplicate_durable_files_skipped, 1);
   assert.equal(report.source.deduplicated_process_receipts, 4);
   assert.equal(report.source.malformed_json_files, 1);
   assert.equal(report.source.non_receipt_json_files, 1);
+  assert.deepEqual(report.rejections, { total: 2, caller_limit: 1, host_limit: 1 });
   assert.equal(report.totals.process_count, 4);
   assert.equal(report.totals.total_retained_output_bytes, 23);
   assert.equal(report.totals.completeness.complete, 3);
