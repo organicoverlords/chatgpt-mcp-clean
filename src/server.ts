@@ -28,6 +28,7 @@ type OmenClientEntry = { promise: Promise<Client>; active: number; lastUsedAt: n
 const omenMcpClients = new Map<string, OmenClientEntry>();
 const OMEN_CLIENT_IDLE_MS = 10 * 60_000;
 const OMEN_CLIENT_CACHE_LIMIT = 64;
+const MODEL_VISIBLE_PAGE_MAX_CHARS = 9_800;
 
 function pruneOmenClients(): void {
   const now = Date.now();
@@ -382,6 +383,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
                 input.stdin,
                 input.env,
                 extra.signal,
+                MODEL_VISIBLE_PAGE_MAX_CHARS,
               )
             : await processManager.startScriptWithWait(
                 input.language!,
@@ -393,6 +395,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
                 action_class,
                 input.env,
                 extra.signal,
+                MODEL_VISIBLE_PAGE_MAX_CHARS,
               );
           value = { ...value, execution_target: "omen", execution_transport: "native-mcp" };
         } else if (omenMcpUrl) {
@@ -432,13 +435,14 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
             undefined,
             undefined,
             extra.signal,
+            MODEL_VISIBLE_PAGE_MAX_CHARS,
           );
           value = { ...value, execution_target: "omen", execution_transport: "ssh-adapter" };
         }
       } else {
         value = input.executable !== undefined
-          ? await processManager.startStructuredWithWait(input.executable, input.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, input.stdin, input.env, extra.signal)
-          : await processManager.startScriptWithWait(input.language!, input.script!, working_directory, callerId, wait_ms ?? 750, activity_target, action_class, input.env, extra.signal);
+          ? await processManager.startStructuredWithWait(input.executable, input.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, input.stdin, input.env, extra.signal, MODEL_VISIBLE_PAGE_MAX_CHARS)
+          : await processManager.startScriptWithWait(input.language!, input.script!, working_directory, callerId, wait_ms ?? 750, activity_target, action_class, input.env, extra.signal, MODEL_VISIBLE_PAGE_MAX_CHARS);
       }
       return structuredTextResult(value, callerId, servingIdentity);
     },
@@ -467,7 +471,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       outputSchema: processOutputSchema,
     },
     async ({ process_id, max_chars, wait_ms, conversation_id, expected_room_head }, extra) => {
-      const boundedMaxChars = Math.max(1, Math.min(max_chars ?? 256_000, 256_000));
+      const boundedMaxChars = Math.max(1, Math.min(max_chars ?? MODEL_VISIBLE_PAGE_MAX_CHARS, MODEL_VISIBLE_PAGE_MAX_CHARS));
       const remoteId = localRemoteProcessId(process_id);
       const value = remoteId !== undefined
         ? remoteProcessResult(await callRemoteOmenTool("read_output", { process_id: remoteId, max_chars: boundedMaxChars, ...(wait_ms !== undefined ? { wait_ms } : {}) }, callerId))
