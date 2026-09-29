@@ -56,7 +56,8 @@ function rejectsRawVpsWithGuidance(command) {
       && /direct MCP production ingress mutation/.test(error.message)
       && /capture-edge-runtime\.mjs/.test(error.message)
       && /capture-edge-fanout\.mjs/.test(error.message)
-      && /capture-edge-backend-correlation\.mjs/.test(error.message)\n      && /install-vps-watchdog\.ps1/.test(error.message),
+      && /capture-edge-backend-correlation\.mjs/.test(error.message)
+      && /install-vps-watchdog\.ps1/.test(error.message),
     `expected raw production VPS rejection with supported read-route guidance: ${command}`,
   );
 }
