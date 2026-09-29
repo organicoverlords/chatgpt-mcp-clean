@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 export const BOOTSTRAP_PROCESS_ALIAS = "bootstrap";
 const LEGACY_BOOTSTRAP_PROCESS_ID = "231b7e74-4cc8-43d0-9702-fd6dfa2215b3";
-const SNAPSHOT_PAGE_MAX_CHARS = 9_800;
+const SNAPSHOT_PAGE_MAX_CHARS = 30_000;
 const TIMELINE_SNAPSHOT_MAX_BYTES = 64 * 1024;
 const SNAPSHOT_PAGE_SESSION_TTL_MS = 30 * 60 * 1000;
 const SNAPSHOT_PAGE_MAX_SESSIONS = 128;
@@ -28,11 +28,18 @@ type SnapshotPageBase = {
   bootstrap_alias?: true;
 };
 
+type SnapshotProtectedRange = {
+  start: number;
+  end: number;
+  key: string;
+};
+
 type SnapshotPageSession = {
   base: SnapshotPageBase;
   stdout: string;
   offset: number;
   lastAccessMs: number;
+  protectedRanges: SnapshotProtectedRange[];
 };
 
 const snapshotPageSessions = new Map<string, SnapshotPageSession>();
@@ -139,6 +146,61 @@ function snapshotPath(timeline: boolean): string {
     : join(userProfile, "Desktop", "vault", ".state", "bootstrap", "latest.json");
 }
 
+function protectTopLevelSnapshotField(key: string): boolean {
+  return key === "rules"
+    || key === "bootstrap_end"
+    || key === "coverage"
+    || key === "session"
+    || key === "source"
+    || key === "schema"
+    || key === "semantics"
+    || key === "view"
+    || /(?:^|_)(?:rule|rules|contract|contracts)(?:_|$)/i.test(key);
+}
+
+function serializeSnapshotPayload(payload: Record<string, unknown>): {
+  stdout: string;
+  protectedRanges: SnapshotProtectedRange[];
+} {
+  const entries = Object.entries(payload);
+  let stdout = "{\n";
+  const protectedRanges: SnapshotProtectedRange[] = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const [key, value] = entries[index];
+    const serializedValue = JSON.stringify(value, null, 2);
+    const indentedValue = serializedValue.replace(/\n/g, "\n  ");
+    const start = stdout.length;
+    stdout += "  " + JSON.stringify(key) + ": " + indentedValue;
+    if (index + 1 < entries.length) stdout += ",";
+    stdout += "\n";
+    const end = stdout.length;
+    if (protectTopLevelSnapshotField(key)) protectedRanges.push({ start, end, key });
+  }
+  stdout += "}";
+  return { stdout, protectedRanges };
+}
+
+function structuralPageEnd(
+  session: SnapshotPageSession,
+  start: number,
+  pageLimit: number,
+): number {
+  const nominalEnd = Math.min(session.stdout.length, start + pageLimit);
+  if (nominalEnd >= session.stdout.length) return session.stdout.length;
+
+  for (const range of session.protectedRanges) {
+    if (range.end <= start || range.start >= nominalEnd) continue;
+    if (start < range.start && nominalEnd > range.start && nominalEnd < range.end) {
+      if (range.end - start <= pageLimit) return range.end;
+      return range.start;
+    }
+    if (start >= range.start && start < range.end && range.end - start <= pageLimit) {
+      return range.end;
+    }
+  }
+  return nominalEnd;
+}
+
 function pageSnapshot(
   session: SnapshotPageSession,
   key: string,
@@ -147,7 +209,7 @@ function pageSnapshot(
 ): Record<string, unknown> {
   const pageLimit = Math.max(1, Math.min(requestedChars, SNAPSHOT_PAGE_MAX_CHARS));
   const start = session.offset;
-  const end = Math.min(session.stdout.length, start + pageLimit);
+  const end = structuralPageEnd(session, start, pageLimit);
   const more = end < session.stdout.length;
   session.offset = end;
   session.lastAccessMs = Date.now();
@@ -174,7 +236,7 @@ function pageSnapshot(
 }
 
 export async function readBootstrapSnapshot(
-  maxChars = 9_800,
+  maxChars = 30_000,
   processId = BOOTSTRAP_PROCESS_ALIAS,
   callerId = "caller_unknown",
   conversationId?: string,
@@ -250,7 +312,7 @@ export async function readBootstrapSnapshot(
     Object.assign(payload.overview.timeline_materialized, freshness);
     if (stale) payload.overview.timeline_materialized.absence_semantics = "NO_MATCH_IS_NOT_PROOF_OF_ABSENCE";
   }
-  const stdout = JSON.stringify(payload, null, 2);
+  const { stdout, protectedRanges } = serializeSnapshotPayload(payload);
   const base: SnapshotPageBase = {
     mcp_status: stale ? "STALE" : "OK",
     process_state: "SNAPSHOT",
@@ -271,7 +333,13 @@ export async function readBootstrapSnapshot(
       stderr: "",
     };
   }
-  const session: SnapshotPageSession = { base, stdout, offset: 0, lastAccessMs: Date.now() };
+  const session: SnapshotPageSession = {
+    base,
+    stdout,
+    offset: 0,
+    lastAccessMs: Date.now(),
+    protectedRanges,
+  };
   pruneSnapshotPageSessions();
   snapshotPageSessions.set(key, session);
   return pageSnapshot(session, key, maxChars, startedAt);

@@ -107,13 +107,38 @@ try {
     writeBootstrap(invalid);
     await assert.rejects(readBootstrapSnapshot(), /incomplete or invalid/);
   }
+  const structuralRules = `RULES_BEGIN\n${"r".repeat(17_000)}\nRULES_END`;
+  const structuralContract = `CONTRACT_BEGIN\n${"c".repeat(12_000)}\nCONTRACT_END`;
+  writeBootstrap({
+    padding_before_rules: "p".repeat(22_000),
+    rules: structuralRules,
+    lifecycle_contract: structuralContract,
+    tail_after_contract: "t".repeat(25_000),
+  });
+  const structuralPieces = [];
+  let structuralPage = await readBootstrapSnapshot(30_000, "bootstrap", "structural-boundary-caller");
+  while (true) {
+    assert.ok(structuralPage.stdout.length <= 30_000);
+    structuralPieces.push(structuralPage.stdout);
+    if (structuralPage.next_action === "STOP_READING") break;
+    structuralPage = await readBootstrapSnapshot(30_000, "bootstrap", "structural-boundary-caller");
+  }
+  assert.equal(structuralPieces.filter(piece => piece.includes("RULES_BEGIN") && piece.includes("RULES_END")).length, 1, "rules must stay whole on one model-visible snapshot page");
+  assert.equal(structuralPieces.some(piece => piece.includes("RULES_BEGIN") !== piece.includes("RULES_END")), false, "rules must not be split across snapshot pages");
+  assert.equal(structuralPieces.filter(piece => piece.includes("CONTRACT_BEGIN") && piece.includes("CONTRACT_END")).length, 1, "contract must stay whole on one model-visible snapshot page");
+  assert.equal(structuralPieces.some(piece => piece.includes("CONTRACT_BEGIN") !== piece.includes("CONTRACT_END")), false, "contract must not be split across snapshot pages");
+  const reconstructedStructural = structuralPieces.join("");
+  const parsedStructural = JSON.parse(reconstructedStructural);
+  assert.equal(parsedStructural.rules, structuralRules);
+  assert.equal(parsedStructural.lifecycle_contract, structuralContract);
+
   writeBootstrap({ schema: "bootstrap.v2", bootstrap_end: { status: "COMPLETE", schema: "bootstrap.v2" }, padding: "x".repeat(300_000) });
   const v2Pieces = [];
   let v2Page = await readBootstrapSnapshot(1_000_000, "bootstrap", "v2-large-caller");
   assert.equal(v2Page.next_action, "READ_SAME_PROCESS_ID");
-  assert.equal(v2Page.output_page.page_limit, 9_800);
+  assert.equal(v2Page.output_page.page_limit, 30_000);
   while (true) {
-    assert.ok(v2Page.stdout.length <= 9_800, "bootstrap model-facing page must stay inside the 9.8k envelope");
+    assert.ok(v2Page.stdout.length <= 30_000, "bootstrap model-facing page must stay inside the 30k envelope");
     v2Pieces.push(v2Page.stdout);
     if (v2Page.next_action === "STOP_READING") break;
     v2Page = await readBootstrapSnapshot(1_000_000, "bootstrap", "v2-large-caller");
@@ -126,7 +151,7 @@ try {
   const v4Pieces = [];
   let v4Page = await readBootstrapSnapshot(1_000_000, "bootstrap", "v4-caller");
   while (true) {
-    assert.ok(v4Page.stdout.length <= 9_800);
+    assert.ok(v4Page.stdout.length <= 30_000);
     v4Pieces.push(v4Page.stdout);
     if (v4Page.next_action === "STOP_READING") break;
     v4Page = await readBootstrapSnapshot(1_000_000, "bootstrap", "v4-caller");
@@ -199,7 +224,7 @@ try {
   const hugePieces = [];
   let hugePage = await readBootstrapSnapshot(1_000_000, "bootstrap", "large-bootstrap-caller");
   while (true) {
-    assert.ok(hugePage.stdout.length <= 9_800);
+    assert.ok(hugePage.stdout.length <= 30_000);
     hugePieces.push(hugePage.stdout);
     if (hugePage.next_action === "STOP_READING") break;
     hugePage = await readBootstrapSnapshot(1_000_000, "bootstrap", "large-bootstrap-caller");
@@ -243,8 +268,8 @@ try {
   const pagePieces = [];
   let paged = await readBootstrapSnapshot(256_000, "bootstrap", "paging-stability-caller");
   assert.equal(paged.next_action, "READ_SAME_PROCESS_ID");
-  assert.equal(paged.output_page.page_limit, 9_800);
-  assert.ok(paged.stdout.length <= 9_800);
+  assert.equal(paged.output_page.page_limit, 30_000);
+  assert.ok(paged.stdout.length <= 30_000);
   const modelVisiblePage = {
     content: [],
     structuredContent: {
@@ -257,13 +282,13 @@ try {
       },
     },
   };
-  assert.ok(JSON.stringify(modelVisiblePage).length < 15_000, "9.8k bootstrap page plus response metadata stays model-visible");
+  assert.ok(JSON.stringify(modelVisiblePage).length < 40_000, "30k bootstrap page plus response metadata stays model-visible");
   const expectedTotal = paged.output_page.stdout_total;
   pagePieces.push(paged.stdout);
   writeBootstrap({ marker: "replacement-after-first-page", padding: "y".repeat(400_000) });
   while (paged.next_action === "READ_SAME_PROCESS_ID") {
     paged = await readBootstrapSnapshot(256_000, "bootstrap", "paging-stability-caller");
-    assert.ok(paged.stdout.length <= 9_800);
+    assert.ok(paged.stdout.length <= 30_000);
     pagePieces.push(paged.stdout);
   }
   const reconstructed = pagePieces.join("");
@@ -327,7 +352,7 @@ try {
       console.log(`PASS local MCP read_output ${id}: ${Math.round(performance.now() - started)} ms, no subprocess`);
     }
   } finally { await client.close(); await server.close(); }
-  console.log("PASS materialized reads: concurrency, 9.8k model-visible paging, readable large bootstrap, freshness, missing/invalid files, failure recovery");
+  console.log("PASS materialized reads: concurrency, 30k model-visible paging, readable large bootstrap, freshness, missing/invalid files, failure recovery");
 } finally {
   childProcess.spawn = realSpawn;
   childProcess.execFile = realExecFile;

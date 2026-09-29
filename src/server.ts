@@ -28,7 +28,7 @@ type OmenClientEntry = { promise: Promise<Client>; active: number; lastUsedAt: n
 const omenMcpClients = new Map<string, OmenClientEntry>();
 const OMEN_CLIENT_IDLE_MS = 10 * 60_000;
 const OMEN_CLIENT_CACHE_LIMIT = 64;
-const MODEL_VISIBLE_PAGE_MAX_CHARS = 9_800;
+const MODEL_VISIBLE_PAGE_MAX_CHARS = 30_000;
 
 function pruneOmenClients(): void {
   const now = Date.now();
