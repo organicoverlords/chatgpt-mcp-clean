@@ -3118,7 +3118,6 @@ export class ProcessManager {
     waitMs = 750,
     activityTarget?: ActivityTarget,
     actionClass?: string,
-    outputMaxChars = MAX_READ_CHARS,
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
     const started = this.start(command, cwd, callerId, activityTarget, actionClass);
@@ -3131,9 +3130,9 @@ export class ProcessManager {
     });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
-    if (!state || state.exitCode !== null) return this.read(started.process_id, outputMaxChars);
+    if (!state || state.exitCode !== null) return this.read(started.process_id, MAX_READ_CHARS);
     await Promise.race([state.done, delay(boundedWaitMs)]);
-    return this.read(started.process_id, outputMaxChars);
+    return this.read(started.process_id, MAX_READ_CHARS);
   }
 
   read(processId: string, maxChars = MAX_READ_CHARS, markRead = true): Record<string, unknown> {
@@ -3235,7 +3234,6 @@ export class ProcessManager {
     actionClass?: string,
     environment?: Record<string, string>,
     signal?: AbortSignal,
-    outputMaxChars = MAX_READ_CHARS,
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
     const started = this.startScript(language, script, cwd, callerId, activityTarget, actionClass, environment);
@@ -3243,9 +3241,9 @@ export class ProcessManager {
     emitTelemetry({ event: "process_wait_requested", action: "start_script", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
-    if (!state || state.exitCode !== null) return this.read(started.process_id, outputMaxChars);
+    if (!state || state.exitCode !== null) return this.read(started.process_id, MAX_READ_CHARS);
     await this.waitForDoneOrTimeout(state, boundedWaitMs, signal);
-    return this.read(started.process_id, outputMaxChars);
+    return this.read(started.process_id, MAX_READ_CHARS);
   }
 
   async startStructuredWithWait(
@@ -3259,7 +3257,6 @@ export class ProcessManager {
     stdin?: string,
     environment?: Record<string, string>,
     signal?: AbortSignal,
-    outputMaxChars = MAX_READ_CHARS,
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
     const started = this.startStructured(executable, args, cwd, callerId, activityTarget, actionClass, stdin, environment);
@@ -3267,9 +3264,9 @@ export class ProcessManager {
     emitTelemetry({ event: "process_wait_requested", action: "start_structured", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
-    if (!state || state.exitCode !== null) return this.read(started.process_id, outputMaxChars);
+    if (!state || state.exitCode !== null) return this.read(started.process_id, MAX_READ_CHARS);
     await this.waitForDoneOrTimeout(state, boundedWaitMs, signal);
-    return this.read(started.process_id, outputMaxChars);
+    return this.read(started.process_id, MAX_READ_CHARS);
   }
 
   async readOutput(processId: string, maxChars = MAX_READ_CHARS, waitMs?: number, signal?: AbortSignal): Promise<Record<string, unknown>> {
