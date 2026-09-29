@@ -469,6 +469,107 @@ function driveRootRecursiveScanError(command: string, code: string): string | un
   return undefined;
 }
 
+
+function broadRecursiveRootMention(rawSegment: string): string | undefined {
+  const roots: Array<{ label: string; values: string[] }> = [
+    {
+      label: "LOCALAPPDATA",
+      values: [
+        process.env.LOCALAPPDATA || "",
+        String.raw`$env:LOCALAPPDATA`,
+        String.raw`%LOCALAPPDATA%`,
+      ],
+    },
+    {
+      label: "C:\\AI",
+      values: [
+        `${process.env.SystemDrive || "C:"}\\AI`,
+      ],
+    },
+    {
+      label: "PIPELINE_RESULTS_LIBRARY",
+      values: [
+        process.env.USERPROFILE ? join(process.env.USERPROFILE, "Desktop", "PIPELINE_RESULTS_LIBRARY") : "",
+        String.raw`$env:USERPROFILE\Desktop\PIPELINE_RESULTS_LIBRARY`,
+        String.raw`%USERPROFILE%\Desktop\PIPELINE_RESULTS_LIBRARY`,
+      ],
+    },
+  ];
+  const normalized = rawSegment.replaceAll("/", "\\").toLowerCase();
+  const delimiter = (char: string | undefined) => !char || /[\s,;)|"'`=]/.test(char);
+  for (const root of roots) {
+    for (const value of new Set(root.values.filter(Boolean).map((item) => item.replaceAll("/", "\\").toLowerCase()))) {
+      let offset = 0;
+      while (offset < normalized.length) {
+        const index = normalized.indexOf(value, offset);
+        if (index < 0) break;
+        const before = index > 0 ? normalized[index - 1] : undefined;
+        const afterIndex = index + value.length;
+        const after = normalized[afterIndex];
+        const exactBoundary = delimiter(before) && (delimiter(after) || (after === "\\" && (delimiter(normalized[afterIndex + 1]) || normalized[afterIndex + 1] === "*")));
+        if (exactBoundary) return root.label;
+        offset = index + value.length;
+      }
+    }
+  }
+  return undefined;
+}
+
+function broadRootRecursiveScanError(command: string, code: string): string | undefined {
+  const boundaries = [...code.matchAll(/[;\r\n]/g)].map((match) => match.index ?? 0);
+  const starts = [0, ...boundaries.map((index) => index + 1)];
+  const ends = [...boundaries, command.length];
+  const producerVariables = new Map<string, string>();
+
+  for (let segmentIndex = 0; segmentIndex < starts.length; segmentIndex += 1) {
+    const start = starts[segmentIndex]!;
+    const end = ends[segmentIndex]!;
+    const rawSegment = command.slice(start, end);
+    const codeSegment = code.slice(start, end);
+    const rootLabel = broadRecursiveRootMention(rawSegment);
+    if (!rootLabel) continue;
+
+    const producer = /\$([A-Za-z_][A-Za-z0-9_]*)\s*=/i.exec(codeSegment);
+    if (producer) producerVariables.set(producer[1]!.toLowerCase(), rootLabel);
+
+    if (/\b(?:Get-ChildItem|gci|dir|ls)\b/i.test(codeSegment) && /-(?:Recurse|r)\b/i.test(codeSegment)) {
+      return `recursive enumeration from broad ${rootLabel} root is blocked; use an explicit project or subdirectory root`;
+    }
+    if (/\b(?:rg|rg\.exe|ripgrep|fd|fd\.exe)\b/i.test(codeSegment)) {
+      return `recursive native search from broad ${rootLabel} root is blocked; use an explicit project or subdirectory root`;
+    }
+    if (/\bwhere(?:\.exe)?\b/i.test(codeSegment) && /\/R\b/i.test(codeSegment)) {
+      return `recursive native search from broad ${rootLabel} root is blocked; use an explicit project or subdirectory root`;
+    }
+    if (/\bfindstr(?:\.exe)?\b/i.test(codeSegment) && /\/S\b/i.test(codeSegment)) {
+      return `recursive native search from broad ${rootLabel} root is blocked; use an explicit project or subdirectory root`;
+    }
+    if (/\bcmd(?:\.exe)?\b/i.test(codeSegment) && /\bdir\b/i.test(codeSegment) && /\/S\b/i.test(codeSegment)) {
+      return `recursive native enumeration from broad ${rootLabel} root is blocked; use an explicit project or subdirectory root`;
+    }
+    if (/\btree(?:\.com|\.exe)?\b/i.test(codeSegment)) {
+      return `tree enumeration from broad ${rootLabel} root is blocked; use an explicit project or subdirectory root`;
+    }
+  }
+
+  for (const [producerVariable, rootLabel] of producerVariables) {
+    const loop = new RegExp(`\\bforeach\\s*\\(\\s*\\$([A-Za-z_][A-Za-z0-9_]*)\\s+in\\s+\\$${producerVariable}\\b`, "gi");
+    for (const match of code.matchAll(loop)) {
+      const itemVariable = String(match[1] || "");
+      if (!itemVariable) continue;
+      const itemReference = `\\$${itemVariable}(?:\\.FullName)?\\b`;
+      const sameStatement = String.raw`[^};|\r\n]{0,1200}`;
+      const recurseAfterItem = new RegExp(`\\b(?:Get-ChildItem|gci|dir|ls)\\b${sameStatement}${itemReference}${sameStatement}-(?:Recurse|r)\\b`, "i");
+      const recurseBeforeItem = new RegExp(`\\b(?:Get-ChildItem|gci|dir|ls)\\b${sameStatement}-(?:Recurse|r)\\b${sameStatement}${itemReference}`, "i");
+      const loopRemainder = code.slice(match.index ?? 0);
+      if (recurseAfterItem.test(loopRemainder) || recurseBeforeItem.test(loopRemainder)) {
+        return `recursive broad ${rootLabel} fan-out is blocked; recurse one explicit project or subdirectory at a time`;
+      }
+    }
+  }
+  return undefined;
+}
+
 function tempRootMentioned(rawSegment: string): boolean {
   const roots = [
     process.env.TEMP || "",
@@ -1333,6 +1434,8 @@ function commandPolicyError(command: string, code = powershellCodeMask(command))
   if (encodedTransportError) return encodedTransportError;
   const rootScanError = driveRootRecursiveScanError(command, code);
   if (rootScanError) return rootScanError;
+  const broadRootScanError = broadRootRecursiveScanError(command, code);
+  if (broadRootScanError) return broadRootScanError;
   const vaultScanError = vaultRootRecursiveScanError(command, code);
   if (vaultScanError) return vaultScanError;
   const inertWaitError = inertFixedWaitError(command, code);
