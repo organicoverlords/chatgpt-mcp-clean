@@ -14,6 +14,8 @@ assert.equal(adaptiveReadWaitMs(99), 60_000);
 const manager = new ProcessManager();
 let started;
 let paged;
+let abortedRead;
+let abortedStart;
 try {
   started = manager.startStructured(process.execPath, ["-e", "setTimeout(()=>{console.log(\"ADAPTIVE_WAKE\");setTimeout(()=>{},5000)},4500)"], undefined, "caller_adaptive_read_test");
   const firstAt = Date.now();
@@ -51,8 +53,25 @@ try {
   assert.equal(pageTwo.output_page?.stdout_start, 200, JSON.stringify(pageTwo));
   assert.equal(pageTwo.stdout.length, 200);
   assert.ok(pageTwoMs < 500, `already-spooled next page must return immediately (${pageTwoMs}ms)`);
+  abortedRead = manager.startStructured(process.execPath, ["-e", "setTimeout(()=>{},10000)"], undefined, "caller_abort_read_test");
+  const readAbort = new AbortController();
+  const readAt = Date.now();
+  const readPending = manager.readOutput(abortedRead.process_id, 6_000, 20_000, readAbort.signal);
+  setTimeout(() => readAbort.abort(), 100);
+  const readResult = await readPending;
+  assert.ok(Date.now() - readAt < 1_000, "aborted read must release its wait promptly");
+  assert.equal(readResult.running, true, "aborting a read must not kill its child process");
+  const startAbort = new AbortController();
+  const startAt = Date.now();
+  const startPending = manager.startStructuredWithWait(process.execPath, ["-e", "setTimeout(()=>{},10000)"], undefined, "caller_abort_start_test", 20_000, undefined, undefined, undefined, undefined, startAbort.signal);
+  setTimeout(() => startAbort.abort(), 100);
+  abortedStart = await startPending;
+  assert.ok(Date.now() - startAt < 1_000, "aborted start must release its wait promptly");
+  assert.equal(abortedStart.running, true, "aborting a start wait must not kill its child process");
   console.log(`PASS adaptive_read first_ms=${firstMs} second_ms=${secondMs} reset_ms=${resetMs} explicit_ms=${explicitMs} buffered_page_ms=${pageTwoMs}`);
 } finally {
   if (started) await manager.kill(started.process_id).catch(() => undefined);
   if (paged) await manager.kill(paged.process_id).catch(() => undefined);
+  if (abortedRead) await manager.kill(abortedRead.process_id).catch(() => undefined);
+  if (abortedStart) await manager.kill(abortedStart.process_id).catch(() => undefined);
 }

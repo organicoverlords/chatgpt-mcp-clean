@@ -189,10 +189,21 @@ async function proxyRequest(request: IncomingMessage, response: ServerResponse, 
   activeRequests += 1;
   totalRequests += 1;
   let settled = false;
+  const cancelUpstream = () => {
+    if (settled) return;
+    if (requestId) frontDoorLog("front_backend_cancel", { request_id: requestId, backend_port: target.port, reason: "downstream_disconnected" });
+    upstream.destroy(new Error("downstream_disconnected"));
+    finish();
+  };
+  const onResponseClose = () => {
+    if (!response.writableEnded) cancelUpstream();
+  };
   const finish = () => {
     if (settled) return;
     settled = true;
     activeRequests -= 1;
+    request.off("aborted", cancelUpstream);
+    response.off("close", onResponseClose);
   };
   if (requestId) frontDoorLog("front_backend_dispatch", { request_id: requestId, backend_port: target.port, backend_generation: target.generation });
   const upstream = httpRequest({
@@ -231,6 +242,8 @@ async function proxyRequest(request: IncomingMessage, response: ServerResponse, 
     });
   });
   upstream.setTimeout(270_000, () => upstream.destroy(new Error("backend request timeout")));
+  request.once("aborted", cancelUpstream);
+  response.once("close", onResponseClose);
   upstream.on("error", (error) => {
     if (requestId) frontDoorLog("front_backend_error", { request_id: requestId, backend_port: target.port, error: error.message });
     if (!response.destroyed && !response.headersSent) {
@@ -243,7 +256,8 @@ async function proxyRequest(request: IncomingMessage, response: ServerResponse, 
     }
     finish();
   });
-  upstream.end(body);
+  if (request.aborted || response.destroyed) cancelUpstream();
+  else upstream.end(body);
 }
 
 async function readBody(request: IncomingMessage): Promise<Buffer> {

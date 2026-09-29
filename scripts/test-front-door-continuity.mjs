@@ -14,6 +14,10 @@ const requestLogPath = join(temporary, "front-door-request.jsonl");
 const processId = "11111111-1111-4111-8111-111111111111";
 let releaseSlow;
 const slowGate = new Promise((resolveSlow) => { releaseSlow = resolveSlow; });
+let backendDisconnected;
+const backendDisconnect = new Promise((resolveDisconnect) => { backendDisconnected = resolveDisconnect; });
+let backendReceived;
+const backendReceive = new Promise((resolveReceive) => { backendReceived = resolveReceive; });
 
 function jsonRpc(id, value) {
   return JSON.stringify({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(value) }] } });
@@ -51,6 +55,11 @@ async function backend(name) {
     const tool = rpc?.params?.name;
     const args = rpc?.params?.arguments || {};
     response.setHeader("content-type", "application/json");
+    if (tool === "read_output" && args.process_id === "cancel-test") {
+      backendReceived();
+      response.once("close", backendDisconnected);
+      return;
+    }
     if (tool === "start_process") response.end(jsonRpc(rpc.id, { process_id: processId, running: true, backend: name }));
     else if (tool === "read_output") response.end(jsonRpc(rpc.id, { process_id: args.process_id, running: true, stdout: name }));
     else response.end(JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { backend: name } }));
@@ -177,6 +186,19 @@ try {
   assert.ok(requestEvidence.some((entry) => entry.event === "front_backend_select" && entry.tool === "start_process" && entry.backend_port === first.port));
   assert.ok(requestEvidence.some((entry) => entry.event === "front_backend_dispatch" && entry.backend_port === first.port));
   assert.equal(readFileSync(requestLogPath, "utf8").includes('"command":"test"'), false, "front-door telemetry must not log tool arguments or request bodies");
+
+  const cancelled = new AbortController();
+  const abandoned = fetch(`${origin}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: "cancel-test", method: "tools/call", params: { name: "read_output", arguments: { process_id: "cancel-test" } } }),
+    signal: cancelled.signal,
+  }).catch(() => undefined);
+  await Promise.race([backendReceive, sleep(1_000).then(() => { throw new Error("cancel probe never reached backend"); })]);
+  cancelled.abort();
+  await abandoned;
+  await Promise.race([backendDisconnect, sleep(1_000).then(() => { throw new Error("upstream request survived downstream disconnect"); })]);
+  await waitForRequestLog((entries) => entries.some((entry) => entry.event === "front_backend_cancel"));
 
   const slow = fetch(`${origin}/slow`).then((response) => response.text());
   await sleep(30);
