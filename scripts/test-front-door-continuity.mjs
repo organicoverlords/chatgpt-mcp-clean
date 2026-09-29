@@ -12,8 +12,12 @@ const configPath = join(temporary, "active-backend.json");
 const routesPath = join(temporary, "process-routes.json");
 const requestLogPath = join(temporary, "front-door-request.jsonl");
 const processId = "11111111-1111-4111-8111-111111111111";
+const abortProcessId = "22222222-2222-4222-8222-222222222222";
 let releaseSlow;
 const slowGate = new Promise((resolveSlow) => { releaseSlow = resolveSlow; });
+let releaseAbortSlow;
+const abortSlowGate = new Promise((resolveSlow) => { releaseAbortSlow = resolveSlow; });
+let abortBackendClosed = false;
 
 function jsonRpc(id, value) {
   return JSON.stringify({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(value) }] } });
@@ -51,7 +55,11 @@ async function backend(name) {
     const tool = rpc?.params?.name;
     const args = rpc?.params?.arguments || {};
     response.setHeader("content-type", "application/json");
-    if (tool === "start_process") response.end(jsonRpc(rpc.id, { process_id: processId, running: true, backend: name }));
+    if (tool === "read_output" && args.process_id === abortProcessId) {
+      response.once("close", () => { abortBackendClosed = true; });
+      await abortSlowGate;
+      if (!response.destroyed) response.end(jsonRpc(rpc.id, { process_id: args.process_id, running: true, stdout: name }));
+    } else if (tool === "start_process") response.end(jsonRpc(rpc.id, { process_id: processId, running: true, backend: name }));
     else if (tool === "read_output") response.end(jsonRpc(rpc.id, { process_id: args.process_id, running: true, stdout: name }));
     else response.end(JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { backend: name } }));
   });
@@ -127,11 +135,12 @@ async function malformedConnectionCloses(port) {
   });
 }
 
-async function toolCall(origin, name, args, path = "/mcp") {
+async function toolCall(origin, name, args, path = "/mcp", signal) {
   return fetch(`${origin}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name, arguments: args } }),
+    ...(signal ? { signal } : {}),
   });
 }
 
@@ -178,6 +187,23 @@ try {
   assert.ok(requestEvidence.some((entry) => entry.event === "front_backend_dispatch" && entry.backend_port === first.port));
   assert.equal(readFileSync(requestLogPath, "utf8").includes('"command":"test"'), false, "front-door telemetry must not log tool arguments or request bodies");
 
+  const abortController = new AbortController();
+  const abortedCall = toolCall(origin, "read_output", { process_id: abortProcessId, wait_ms: 60_000 }, "/mcp", abortController.signal);
+  await waitForRequestLog((entries) => entries.some((entry) => entry.event === "front_backend_select" && entry.process_id === abortProcessId));
+  abortController.abort();
+  await abortedCall.catch(() => undefined);
+  let abortDrained = false;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const health = await (await fetch(`${origin}/health`, { cache: "no-store" })).json();
+    const entries = requestLogEntries();
+    if (abortBackendClosed && health.active_requests === 0 && entries.some((entry) => entry.event === "front_backend_cancel")) {
+      abortDrained = true;
+      break;
+    }
+    await sleep(10);
+  }
+  assert.equal(abortDrained, true, "aborted downstream request must cancel backend work and drain front-door active_requests promptly");
+
   const slow = fetch(`${origin}/slow`).then((response) => response.text());
   await sleep(30);
   writeTarget(second.port, "green-1");
@@ -207,6 +233,7 @@ try {
   assert.equal(frontDoor.exitCode, null, frontDoorError);
 } finally {
   releaseSlow?.();
+  releaseAbortSlow?.();
   if (frontDoor && frontDoor.exitCode === null) frontDoor.kill();
   if (first?.server.listening) await new Promise((resolveClose) => first.server.close(resolveClose));
   if (second?.server.listening) await new Promise((resolveClose) => second.server.close(resolveClose));
