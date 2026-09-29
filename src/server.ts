@@ -469,12 +469,13 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
     async ({ process_id, max_chars, wait_ms, conversation_id, expected_room_head }, extra) => {
       const boundedMaxChars = Math.max(1, Math.min(max_chars ?? 256_000, 256_000));
       const remoteId = localRemoteProcessId(process_id);
-      const value = remoteId !== undefined
+      const localId = nativeOmenHost ? remoteId ?? process_id : process_id;
+      const value = remoteId !== undefined && !nativeOmenHost
         ? remoteProcessResult(await callRemoteOmenTool("read_output", { process_id: remoteId, max_chars: boundedMaxChars, ...(wait_ms !== undefined ? { wait_ms } : {}) }, callerId, extra.signal))
-        : (isBootstrapSnapshot(process_id)
-          ? await readBootstrapSnapshot(boundedMaxChars, process_id, callerId, conversation_id, expected_room_head)
-          : await processManager.readOutput(process_id, boundedMaxChars, wait_ms, extra.signal));
-      return structuredTextResult(value, callerId, servingIdentity);
+        : (isBootstrapSnapshot(localId)
+          ? await readBootstrapSnapshot(boundedMaxChars, localId, callerId, conversation_id, expected_room_head)
+          : await processManager.readOutput(localId, boundedMaxChars, wait_ms, extra.signal));
+      return structuredTextResult(nativeOmenHost && remoteId !== undefined ? { ...value, process_id } : value, callerId, servingIdentity);
     },
   );
 
@@ -489,10 +490,10 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
     },
     async ({ process_id }) => {
       const remoteId = localRemoteProcessId(process_id);
-      const value = remoteId !== undefined
+      const value = remoteId !== undefined && !nativeOmenHost
         ? remoteProcessResult(await callRemoteOmenTool("kill_process", { process_id: remoteId }, callerId))
-        : await processManager.kill(process_id);
-      return structuredTextResult(value, callerId, servingIdentity);
+        : await processManager.kill(nativeOmenHost ? remoteId ?? process_id : process_id);
+      return structuredTextResult(nativeOmenHost && remoteId !== undefined ? { ...value, process_id } : value, callerId, servingIdentity);
     },
   );
 

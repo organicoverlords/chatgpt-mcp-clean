@@ -32,12 +32,18 @@ try {
   assert.equal(hostname.execution_transport, "native-mcp");
   assert.doesNotMatch(String(hostname.command || ""), /omen_exec|ssh/i);
   assert.ok(String(hostname.stdout || "").trim().length > 0);
+  const legacyId = `omen-mcp:${hostname.process_id}`;
+  const legacyRead = await call("read_output", { process_id: legacyId, max_chars: 1000, wait_ms: 0 });
+  assert.equal(legacyRead.process_id, legacyId);
+  assert.equal(legacyRead.exit_code, 0, JSON.stringify(legacyRead));
+  assert.equal(String(legacyRead.stdout).trim(), String(hostname.stdout).trim());
 
   const sleeper = await call("start_process", { executable: "bash", args: ["-lc", "sleep 30"], wait_ms: 0 });
   assert.equal(sleeper.execution_transport, "native-mcp");
-  const killed = await call("kill_process", { process_id: sleeper.process_id });
+  const killed = await call("kill_process", { process_id: `omen-mcp:${sleeper.process_id}` });
   assert.equal(killed.killed, true, JSON.stringify(killed));
-  console.log(`PASS native_omen_linux hostname=${String(hostname.stdout).trim()} transport=${hostname.execution_transport} kill=true`);
+  assert.equal(killed.process_id, `omen-mcp:${sleeper.process_id}`);
+  console.log(`PASS native_omen_linux hostname=${String(hostname.stdout).trim()} transport=${hostname.execution_transport} legacy_read=true legacy_kill=true`);
 } finally {
   rmSync(state, { recursive: true, force: true });
 }
