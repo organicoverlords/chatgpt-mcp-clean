@@ -60,13 +60,14 @@ $stageTarget = $target + ':' + $stage
 & $scp -q -o BatchMode=yes -o ConnectTimeout=5 -i $key $ObserverSourcePath $stageTarget
 if ($LASTEXITCODE -ne 0) { throw 'observer staging copy failed' }
 
-$remote = @"
+$remoteTemplate = @'
 set -eu
-remote='$remotePath'
-stage='$stage'
-backup='$backup'
+remote='__REMOTE__'
+stage='__STAGE__'
+backup='__BACKUP__'
+expected='__EXPECTED__'
 current=$(sha256sum "$remote" | awk '{print $1}')
-test "$current" = '$expected'
+test "$current" = "$expected"
 install -d -o root -g root -m 0755 /var/lib/mcp-edge/backups
 if [ ! -f "$backup" ]; then cp -a "$remote" "$backup"; fi
 rollback() {
@@ -84,7 +85,12 @@ grep -q '"machine_probes"' /var/lib/mcp-edge/status.json
 trap - ERR
 cat /var/lib/mcp-edge/status.json
 printf '\nbackup=%s\n' "$backup"
-"@
+'@
+
+$remote = $remoteTemplate.Replace('__REMOTE__',$remotePath).
+    Replace('__STAGE__',$stage).
+    Replace('__BACKUP__',$backup).
+    Replace('__EXPECTED__',$expected)
 
 $result = & $ssh -T -o BatchMode=yes -o ConnectTimeout=5 -i $key $target $remote
 if ($LASTEXITCODE -ne 0) { throw 'VPS observer install or live validation failed; rollback attempted remotely' }
