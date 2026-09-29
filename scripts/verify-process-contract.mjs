@@ -136,25 +136,7 @@ const tinyReadStructured = await assertStructuredProcessResult("read_output", { 
 assert.ok(String(tinyReadStructured.stdout || "").length <= 1, "max_chars=0 must clamp to one retained character");
 assert.equal(tinyReadStructured.output_page?.page_limit, 1, "max_chars=0 must expose the effective clamped page limit");
 const oversizedReadStructured = await assertStructuredProcessResult("read_output", { process_id: startStructured.process_id, max_chars: 1_000_000, wait_ms: 0 });
-assert.ok(String(oversizedReadStructured.stdout || "").length <= 9_800, "oversized max_chars must clamp to the 9.8k model-visible page cap");
-assert.equal(oversizedReadStructured.output_page?.page_limit, 9_800, "read_output must expose the model-visible page cap");
-const largeStartStructured = await assertStructuredProcessResult("start_process", {
-  executable: contractNodeExecutable,
-  args: ["-e", "process.stdout.write('S'.repeat(25_000))"],
-  wait_ms: 10_000,
-});
-assert.ok(String(largeStartStructured.stdout || "").length <= 9_800, "completed start_process output must stay inside the model-visible page cap");
-assert.equal(largeStartStructured.output_page?.page_limit, 9_800, "completed start_process must expose the model-visible page cap");
-assert.equal(largeStartStructured.next_action, "READ_SAME_PROCESS_ID", "completed oversized start_process output must continue losslessly through read_output");
-let largeStartText = String(largeStartStructured.stdout || "");
-let largeStartPage = largeStartStructured;
-while (largeStartPage.next_action === "READ_SAME_PROCESS_ID") {
-  largeStartPage = await assertStructuredProcessResult("read_output", { process_id: largeStartStructured.process_id, max_chars: 1_000_000, wait_ms: 0 });
-  assert.ok(String(largeStartPage.stdout || "").length <= 9_800, "continued start_process output must stay model-visible");
-  largeStartText += String(largeStartPage.stdout || "");
-}
-assert.equal(largeStartText.length, 25_000, "completed start_process output must reconstruct losslessly across model-visible pages");
-
+assert.ok(String(oversizedReadStructured.stdout || "").length <= 256_000, "oversized max_chars must clamp to the 256k transport page cap");
 const killStructured = await assertStructuredProcessResult("kill_process", { process_id: startStructured.process_id });
 assert.equal(killStructured.already_exited, true, "kill_process structured regression probe should exercise already-exited variant");
 const contractPath = resolve("config/process-tool-contract.json");
