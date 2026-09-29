@@ -26,7 +26,7 @@ const request = (origin, path, host, headers = {}) => new Promise((resolveReques
 const temp = mkdtempSync(join(tmpdir(), "mcp-local-edge-"));
 const port = await unusedPort();
 const loopback = `http://127.0.0.1:${port}`;
-const publicOrigin = "https://local-edge.test";
+const publicOrigin = "https://local-edge.test:4442";
 const publicHost = new URL(publicOrigin).host;
 const chatGptClientId = "11111111-1111-4111-8111-111111111111";
 const chatGptRedirect = "https://chatgpt.com/connector/oauth/reconnect-proof";
@@ -63,6 +63,14 @@ try {
   assert.equal(healthy, true, stderr);
   const metadata = await fetch(`${loopback}/.well-known/oauth-authorization-server`).then(r => r.json());
   assert.equal(metadata.authorization_endpoint, `${publicOrigin}/authorize`);
+  const protectedRoot = await fetch(`${loopback}/.well-known/oauth-protected-resource`).then(async (r) => ({ status: r.status, body: await r.json() }));
+  const protectedScoped = await fetch(`${loopback}/.well-known/oauth-protected-resource/mcp`).then(async (r) => ({ status: r.status, body: await r.json() }));
+  assert.equal(protectedRoot.status, 200);
+  assert.equal(protectedScoped.status, 200);
+  assert.equal(protectedRoot.body.resource, `${publicOrigin}/mcp`);
+  assert.deepEqual(protectedRoot.body.authorization_servers, [`${publicOrigin}/`]);
+  assert.deepEqual(protectedRoot.body.scopes_supported, ["mcp", "offline_access"]);
+  assert.deepEqual(protectedScoped.body, protectedRoot.body);
   const directPublicHost = await request(loopback, "/authorize", publicHost);
   assert.equal(directPublicHost.status, 403, directPublicHost.text);
   assert.match(directPublicHost.text, /Owner authorization required/);
@@ -96,7 +104,7 @@ try {
   const unknownChatGptReconnect = await request(loopback, reconnectPath.replace(chatGptClientId, "22222222-2222-4222-8222-222222222222"), publicHost, { "x-forwarded-for": "203.0.113.10" });
   assert.equal(unknownChatGptReconnect.status, 403, unknownChatGptReconnect.text);
   assert.match(unknownChatGptReconnect.text, /Owner authorization required/);
-  console.log("PASS local_edge_auth direct_public_host_blocked=true direct_loopback_allowed=true public_forwarded_blocked=true private_forwarded_allowed=true known_chatgpt_public_reconnect_allowed=true unknown_chatgpt_public_reconnect_blocked=true wrong_host_blocked=true");
+  console.log("PASS local_edge_auth root_protected_resource=true custom_https_port=true direct_public_host_blocked=true direct_loopback_allowed=true public_forwarded_blocked=true private_forwarded_allowed=true known_chatgpt_public_reconnect_allowed=true unknown_chatgpt_public_reconnect_blocked=true wrong_host_blocked=true");
 } finally {
   if (child.exitCode === null) child.kill();
   await new Promise(r => child.exitCode !== null ? r() : child.once("exit", r));

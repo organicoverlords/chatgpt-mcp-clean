@@ -288,6 +288,12 @@ const oauthMetadata = {
   code_challenge_methods_supported: ["S256"],
   scopes_supported: ["mcp", "offline_access"],
 };
+const protectedResourceMetadata = {
+  resource: resource.href,
+  authorization_servers: [publicOrigin.href],
+  scopes_supported: ["mcp", "offline_access"],
+  resource_name: "Shell MCP",
+};
 
 if (!publicBasePath) app.get("/.well-known/oauth-authorization-server", (_req, res) => res.json(oauthMetadata));
 app.get("/.well-known/openid-configuration", (_req, res) => res.json(oauthMetadata));
@@ -301,6 +307,7 @@ if (publicBasePath) {
 // Traycer probes the RFC 8414 path relative to the protected resource before
 // falling back to the issuer root. The root-origin compatibility route stays
 // available for the existing production connector.
+app.get("/.well-known/oauth-protected-resource", (_req, res) => res.json(protectedResourceMetadata));
 app.get("/.well-known/oauth-authorization-server/mcp", (_req, res) => res.json(oauthMetadata));
 app.use(mcpAuthRouter({ provider: oauth, issuerUrl: publicOrigin, resourceServerUrl: resource, scopesSupported: ["mcp", "offline_access"], resourceName: "Shell MCP", clientRegistrationOptions: { rateLimit: { windowMs: 60 * 60 * 1000, max: 300 } } }));
 
