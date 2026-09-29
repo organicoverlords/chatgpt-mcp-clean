@@ -838,7 +838,7 @@ function isProtectedControlPlaneProcessCommand(command: string): boolean {
 }
 function mcpProductionMutationError(command: string, code: string): string | undefined {
   const productionIngressError = "direct MCP production ingress mutation is blocked; use the documented redundant replacement/recovery scripts and prove the replacement off-path before changing serving production";
-  const rawProductionVpsTransportError = `${productionIngressError}; for read-only VPS diagnosis use the supported wrappers: node scripts/capture-edge-runtime.mjs, node scripts/capture-edge-fanout.mjs, or node scripts/capture-edge-backend-correlation.mjs`;
+  const rawProductionVpsTransportError = `${productionIngressError}; for read-only VPS diagnosis use the supported wrappers: node scripts/capture-edge-runtime.mjs, node scripts/capture-edge-fanout.mjs, or node scripts/capture-edge-backend-correlation.mjs; for bounded KONE/OMEN watchdog installation use scripts/install-vps-watchdog.ps1 rather than raw SSH`;
 
   const invokesObsoleteDatedCutoverHelper = /(?:^|[\\/])minimal-connectors[\\/]cutover-production-\d{8}\.ps1\b/i.test(command);
   if (invokesObsoleteDatedCutoverHelper) return productionIngressError;
