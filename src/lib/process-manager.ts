@@ -1462,8 +1462,20 @@ function sharedPowerShellWorker(): Worker {
   return worker;
 }
 
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function processResponseState(startedAt: string, running: boolean, finishedAt?: string | null): {
@@ -2571,17 +2583,24 @@ export class ProcessManager {
       process_id: request.process_id,
       responded_at: new Date().toISOString(),
     };
+    const controller = request.action === "read" ? new AbortController() : undefined;
+    const cancellationTimer = controller && setInterval(() => {
+      if (!existsSync(requestPath) || Date.now() > Date.parse(request.deadline_at)) controller.abort();
+    }, CONTROL_POLL_MS);
+    cancellationTimer?.unref();
     try {
-      response.result = await withTelemetryContext(observer, async () => request.action === "kill"
-        ? await this.kill(request.process_id)
-        : await this.readWithWait(request.process_id, request.max_chars, request.wait_ms));
-    } catch (error) {
-      response.error = error instanceof Error ? error.message : String(error);
-    }
-    response.responded_at = new Date().toISOString();
-    try {
+      try {
+        response.result = await withTelemetryContext(observer, async () => request.action === "kill"
+          ? await this.kill(request.process_id)
+          : await this.readWithWait(request.process_id, request.max_chars, request.wait_ms, controller?.signal));
+      } catch (error) {
+        response.error = error instanceof Error ? error.message : String(error);
+      }
+      if (controller?.signal.aborted || !existsSync(requestPath)) return;
+      response.responded_at = new Date().toISOString();
       await this.writeControlFileAsync(responsePath, response);
     } finally {
+      if (cancellationTimer) clearInterval(cancellationTimer);
       try { await unlinkAsync(requestPath); } catch { /* requester may have timed out */ }
     }
   }
@@ -2592,6 +2611,7 @@ export class ProcessManager {
     observer: TelemetryContext,
     maxChars = MAX_READ_CHARS,
     waitMs = 0,
+    signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     if (!this.controlRequestDirectory || !this.controlResponseDirectory || !PROCESS_ID_PATTERN.test(processId)) {
       throw new Error(`Unknown process_id: ${processId}`);
@@ -2614,6 +2634,7 @@ export class ProcessManager {
       deadline_at: new Date(deadlineMs).toISOString(),
       ...(action === "read" ? { max_chars: Math.max(1, Math.min(maxChars, MAX_READ_CHARS)), wait_ms: boundedWaitMs } : {}),
     };
+    signal?.throwIfAborted();
     await this.writeControlFileAsync(requestPath, request);
     emitTelemetry({
       event: "process_control_handoff_requested",
@@ -2623,6 +2644,7 @@ export class ProcessManager {
     }, observer);
     try {
       while (Date.now() <= deadlineMs) {
+        signal?.throwIfAborted();
         try {
           const response = JSON.parse(await readFileAsync(responsePath, "utf8")) as ProcessControlResponse;
           if (response.version !== 1 || response.request_id !== requestId || response.process_id !== processId) {
@@ -2645,7 +2667,7 @@ export class ProcessManager {
           const receipt = await this.readReceiptAsync(processId, maxChars);
           if (receipt) return receipt;
         }
-        await delay(CONTROL_POLL_MS);
+        await delay(CONTROL_POLL_MS, signal);
       }
       emitTelemetry({
         event: "process_control_handoff_timeout",
@@ -3211,7 +3233,7 @@ export class ProcessManager {
     if (!state) {
       const receipt = await this.readReceiptAsync(processId, maxChars);
       if (receipt) return receipt;
-      return await this.requestRemoteControl(processId, "read", currentTelemetryContext(), maxChars, boundedWaitMs);
+      return await this.requestRemoteControl(processId, "read", currentTelemetryContext(), maxChars, boundedWaitMs, signal);
     }
     if (boundedWaitMs === 0 || state.exitCode !== null) return this.read(processId, maxChars);
     const observer = currentTelemetryContext();
