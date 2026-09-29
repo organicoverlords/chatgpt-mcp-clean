@@ -214,7 +214,10 @@ assert.match(supportedRecoveryRequest.stdout, /SUPPORTED_WIREGUARD_RECOVERY_REQU
 const supportedReplacementInstaller = await run("if ($false) { & 'C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\install-production-replacement-task.ps1' }; Write-Output 'SUPPORTED_REPLACEMENT_TASK_INSTALLER_ALLOWED'");
 assert.equal(supportedReplacementInstaller.exit_code, 0);
 assert.match(supportedReplacementInstaller.stdout, /SUPPORTED_REPLACEMENT_TASK_INSTALLER_ALLOWED/);
-const supportedWatchdogInstaller = await run("if ($false) { & 'C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\install-vps-watchdog.ps1' -KonePublicKey 'ssh-ed25519 AAAA kone' -OmenPublicKey 'ssh-ed25519 BBBB omen' }; Write-Output 'SUPPORTED_VPS_WATCHDOG_INSTALLER_ALLOWED'");\nassert.equal(supportedWatchdogInstaller.exit_code, 0);\nassert.match(supportedWatchdogInstaller.stdout, /SUPPORTED_VPS_WATCHDOG_INSTALLER_ALLOWED/);\nconst supportedEdgeSnapshot = await run("if ($false) { node scripts/capture-edge-runtime.mjs }; Write-Output 'SUPPORTED_EDGE_SNAPSHOT_ALLOWED'");
+const supportedWatchdogInstaller = await run("if ($false) { & 'C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\install-vps-watchdog.ps1' -KonePublicKey 'ssh-ed25519 AAAA kone' -OmenPublicKey 'ssh-ed25519 BBBB omen' }; Write-Output 'SUPPORTED_VPS_WATCHDOG_INSTALLER_ALLOWED'");
+assert.equal(supportedWatchdogInstaller.exit_code, 0);
+assert.match(supportedWatchdogInstaller.stdout, /SUPPORTED_VPS_WATCHDOG_INSTALLER_ALLOWED/);
+const supportedEdgeSnapshot = await run("if ($false) { node scripts/capture-edge-runtime.mjs }; Write-Output 'SUPPORTED_EDGE_SNAPSHOT_ALLOWED'");
 assert.equal(supportedEdgeSnapshot.exit_code, 0);
 assert.match(supportedEdgeSnapshot.stdout, /SUPPORTED_EDGE_SNAPSHOT_ALLOWED/);
 
