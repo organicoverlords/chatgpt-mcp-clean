@@ -188,6 +188,9 @@ try {
   assert.equal(aProtected.response.status, 200, aProtected.text);
   assert.equal(aProtected.body.resource, "https://clone-a.test.ts.net/clone-a/mcp");
   assert.deepEqual(aProtected.body.authorization_servers, ["https://clone-a.test.ts.net/clone-a/"]);
+  const aProtectedRoot = await jsonFetch(`${cloneA.origin}/.well-known/oauth-protected-resource`);
+  assert.equal(aProtectedRoot.response.status, 200, aProtectedRoot.text);
+  assert.deepEqual(aProtectedRoot.body, aProtected.body, "root protected-resource alias must match the SDK path-scoped metadata");
 
   const [a1, a2, b1, b2] = await Promise.all([
     connect(cloneA, "clone-a-client-1"),

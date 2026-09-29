@@ -288,6 +288,12 @@ const oauthMetadata = {
   code_challenge_methods_supported: ["S256"],
   scopes_supported: ["mcp", "offline_access"],
 };
+const protectedResourceMetadata = {
+  resource: resource.href,
+  authorization_servers: [publicOrigin.href],
+  scopes_supported: ["mcp", "offline_access"],
+  resource_name: "Shell MCP",
+};
 
 if (!publicBasePath) app.get("/.well-known/oauth-authorization-server", (_req, res) => res.json(oauthMetadata));
 app.get("/.well-known/openid-configuration", (_req, res) => res.json(oauthMetadata));
@@ -298,6 +304,10 @@ if (publicBasePath) {
   app.get(`/.well-known/oauth-authorization-server${publicBasePath}`, (_req, res) => res.json(oauthMetadata));
   app.get(`/.well-known/openid-configuration${publicBasePath}`, (_req, res) => res.json(oauthMetadata));
 }
+// Some MCP clients probe the root RFC 9728 protected-resource metadata URL
+// before following the resource-specific challenge URL. Keep the SDK's
+// path-scoped route and publish an equivalent root alias for discovery.
+app.get("/.well-known/oauth-protected-resource", (_req, res) => res.json(protectedResourceMetadata));
 // Traycer probes the RFC 8414 path relative to the protected resource before
 // falling back to the issuer root. The root-origin compatibility route stays
 // available for the existing production connector.
