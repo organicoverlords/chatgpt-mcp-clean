@@ -362,7 +362,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       inputSchema: startProcessInputSchema,
       outputSchema: processOutputSchema,
     },
-    async (input) => {
+    async (input, extra) => {
       const { working_directory, execution_target, wait_ms, activity_target, action_class } = input;
       const target = execution_target ?? defaultExecutionTarget;
       let value: Record<string, unknown>;
@@ -381,6 +381,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
                 action_class,
                 input.stdin,
                 input.env,
+                extra.signal,
               )
             : await processManager.startScriptWithWait(
                 input.language!,
@@ -391,6 +392,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
                 activity_target,
                 action_class,
                 input.env,
+                extra.signal,
               );
           value = { ...value, execution_target: "omen", execution_transport: "native-mcp" };
         } else if (omenMcpUrl) {
@@ -427,13 +429,16 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
             wait_ms ?? 240_000,
             activity_target,
             action_class,
+            undefined,
+            undefined,
+            extra.signal,
           );
           value = { ...value, execution_target: "omen", execution_transport: "ssh-adapter" };
         }
       } else {
         value = input.executable !== undefined
-          ? await processManager.startStructuredWithWait(input.executable, input.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, input.stdin, input.env)
-          : await processManager.startScriptWithWait(input.language!, input.script!, working_directory, callerId, wait_ms ?? 750, activity_target, action_class, input.env);
+          ? await processManager.startStructuredWithWait(input.executable, input.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, input.stdin, input.env, extra.signal)
+          : await processManager.startScriptWithWait(input.language!, input.script!, working_directory, callerId, wait_ms ?? 750, activity_target, action_class, input.env, extra.signal);
       }
       return structuredTextResult(value, callerId, servingIdentity);
     },
@@ -461,14 +466,14 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       }),
       outputSchema: processOutputSchema,
     },
-    async ({ process_id, max_chars, wait_ms, conversation_id, expected_room_head }) => {
+    async ({ process_id, max_chars, wait_ms, conversation_id, expected_room_head }, extra) => {
       const boundedMaxChars = Math.max(1, Math.min(max_chars ?? 256_000, 256_000));
       const remoteId = localRemoteProcessId(process_id);
       const value = remoteId !== undefined
         ? remoteProcessResult(await callRemoteOmenTool("read_output", { process_id: remoteId, max_chars: boundedMaxChars, ...(wait_ms !== undefined ? { wait_ms } : {}) }, callerId))
         : (isBootstrapSnapshot(process_id)
           ? await readBootstrapSnapshot(boundedMaxChars, process_id, callerId, conversation_id, expected_room_head)
-          : await processManager.readOutput(process_id, boundedMaxChars, wait_ms));
+          : await processManager.readOutput(process_id, boundedMaxChars, wait_ms, extra.signal));
       return structuredTextResult(value, callerId, servingIdentity);
     },
   );

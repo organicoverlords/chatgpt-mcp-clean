@@ -42,6 +42,34 @@ try {
   assert.equal(explicit.running, true, JSON.stringify(explicit));
   assert.equal(explicit.no_change, true, JSON.stringify(explicit));
   assert.ok(explicitMs >= 100 && explicitMs < 1_000, `explicit wait_ms must bypass adaptive timing (${explicitMs}ms)`);
+
+  const abortReadController = new AbortController();
+  const abortReadAt = Date.now();
+  const abortedRead = manager.readOutput(started.process_id, 6_000, 60_000, abortReadController.signal);
+  setTimeout(() => abortReadController.abort(), 50);
+  await assert.rejects(abortedRead, /request_aborted/);
+  const abortReadMs = Date.now() - abortReadAt;
+  assert.ok(abortReadMs < 1_000, `aborted read must return promptly (${abortReadMs}ms)`);
+
+  const abortStartController = new AbortController();
+  const abortStartAt = Date.now();
+  const abortedStart = manager.startStructuredWithWait(
+    process.execPath,
+    ["-e", "setTimeout(()=>{},500)"],
+    undefined,
+    "caller_abort_start_test",
+    60_000,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    abortStartController.signal,
+  );
+  setTimeout(() => abortStartController.abort(), 50);
+  await assert.rejects(abortedStart, /request_aborted/);
+  const abortStartMs = Date.now() - abortStartAt;
+  assert.ok(abortStartMs < 1_000, `aborted start wait must return promptly without killing the child (${abortStartMs}ms)`);
+
   paged = manager.startStructured(process.execPath, ["-e", "process.stdout.write('X'.repeat(10000)); setTimeout(()=>{},10000)"], undefined, "caller_adaptive_page_test");
   const pageOne = await manager.readWithWait(paged.process_id, 200, 2_000);
   assert.equal(pageOne.output_page?.more, true, JSON.stringify(pageOne));
@@ -51,7 +79,7 @@ try {
   assert.equal(pageTwo.output_page?.stdout_start, 200, JSON.stringify(pageTwo));
   assert.equal(pageTwo.stdout.length, 200);
   assert.ok(pageTwoMs < 500, `already-spooled next page must return immediately (${pageTwoMs}ms)`);
-  console.log(`PASS adaptive_read first_ms=${firstMs} second_ms=${secondMs} reset_ms=${resetMs} explicit_ms=${explicitMs} buffered_page_ms=${pageTwoMs}`);
+  console.log(`PASS adaptive_read first_ms=${firstMs} second_ms=${secondMs} reset_ms=${resetMs} explicit_ms=${explicitMs} abort_read_ms=${abortReadMs} abort_start_ms=${abortStartMs} buffered_page_ms=${pageTwoMs}`);
 } finally {
   if (started) await manager.kill(started.process_id).catch(() => undefined);
   if (paged) await manager.kill(paged.process_id).catch(() => undefined);

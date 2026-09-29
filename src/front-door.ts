@@ -230,6 +230,16 @@ async function proxyRequest(request: IncomingMessage, response: ServerResponse, 
       finish();
     });
   });
+  const cancelUpstream = (reason: string) => {
+    if (settled) return;
+    if (requestId) frontDoorLog("front_backend_cancel", { request_id: requestId, backend_port: target.port, backend_generation: target.generation, reason });
+    upstream.destroy(new Error(reason));
+    finish();
+  };
+  request.once("aborted", () => cancelUpstream("downstream_request_aborted"));
+  response.once("close", () => {
+    if (!response.writableEnded) cancelUpstream("downstream_response_closed");
+  });
   upstream.setTimeout(270_000, () => upstream.destroy(new Error("backend request timeout")));
   upstream.on("error", (error) => {
     if (requestId) frontDoorLog("front_backend_error", { request_id: requestId, backend_port: target.port, error: error.message });

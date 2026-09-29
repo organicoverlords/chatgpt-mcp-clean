@@ -2592,7 +2592,9 @@ export class ProcessManager {
     observer: TelemetryContext,
     maxChars = MAX_READ_CHARS,
     waitMs = 0,
+    signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
+    if (signal?.aborted) throw new Error("request_aborted");
     if (!this.controlRequestDirectory || !this.controlResponseDirectory || !PROCESS_ID_PATTERN.test(processId)) {
       throw new Error(`Unknown process_id: ${processId}`);
     }
@@ -2623,6 +2625,7 @@ export class ProcessManager {
     }, observer);
     try {
       while (Date.now() <= deadlineMs) {
+        if (signal?.aborted) throw new Error("request_aborted");
         try {
           const response = JSON.parse(await readFileAsync(responsePath, "utf8")) as ProcessControlResponse;
           if (response.version !== 1 || response.request_id !== requestId || response.process_id !== processId) {
@@ -3094,6 +3097,30 @@ export class ProcessManager {
       : legacy;
   }
 
+
+  private async waitForDoneOrTimeout(state: ProcessState, waitMs: number, signal?: AbortSignal): Promise<void> {
+    if (!signal) {
+      await Promise.race([state.done, delay(waitMs)]);
+      return;
+    }
+    if (signal.aborted) throw new Error("request_aborted");
+    await new Promise<void>((resolveWait, rejectWait) => {
+      let settled = false;
+      let timer: NodeJS.Timeout;
+      const finish = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        callback();
+      };
+      const onAbort = () => finish(() => rejectWait(new Error("request_aborted")));
+      timer = setTimeout(() => finish(resolveWait), waitMs);
+      signal.addEventListener("abort", onAbort, { once: true });
+      void state.done.then(() => finish(resolveWait), (error) => finish(() => rejectWait(error)));
+    });
+  }
+
   async startScriptWithWait(
     language: StructuredScriptLanguage,
     script: string,
@@ -3103,6 +3130,7 @@ export class ProcessManager {
     activityTarget?: ActivityTarget,
     actionClass?: string,
     environment?: Record<string, string>,
+    signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
     const started = this.startScript(language, script, cwd, callerId, activityTarget, actionClass, environment);
@@ -3111,7 +3139,7 @@ export class ProcessManager {
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
     if (!state || state.exitCode !== null) return this.read(started.process_id, MAX_READ_CHARS);
-    await Promise.race([state.done, delay(boundedWaitMs)]);
+    await this.waitForDoneOrTimeout(state, boundedWaitMs, signal);
     return this.read(started.process_id, MAX_READ_CHARS);
   }
 
@@ -3125,6 +3153,7 @@ export class ProcessManager {
     actionClass?: string,
     stdin?: string,
     environment?: Record<string, string>,
+    signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
     const started = this.startStructured(executable, args, cwd, callerId, activityTarget, actionClass, stdin, environment);
@@ -3133,21 +3162,21 @@ export class ProcessManager {
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
     if (!state || state.exitCode !== null) return this.read(started.process_id, MAX_READ_CHARS);
-    await Promise.race([state.done, delay(boundedWaitMs)]);
+    await this.waitForDoneOrTimeout(state, boundedWaitMs, signal);
     return this.read(started.process_id, MAX_READ_CHARS);
   }
 
-  async readOutput(processId: string, maxChars = MAX_READ_CHARS, waitMs?: number): Promise<Record<string, unknown>> {
+  async readOutput(processId: string, maxChars = MAX_READ_CHARS, waitMs?: number, signal?: AbortSignal): Promise<Record<string, unknown>> {
     const observerCallerId = currentTelemetryContext().caller_id ?? "caller_unknown";
     const adaptiveKey = `${processId}:${observerCallerId}`;
     if (waitMs !== undefined) {
       this.adaptiveReadQuietStreaks.delete(adaptiveKey);
-      return await this.readWithWait(processId, maxChars, waitMs);
+      return await this.readWithWait(processId, maxChars, waitMs, signal);
     }
     const quietStreak = this.adaptiveReadQuietStreaks.get(adaptiveKey) ?? 0;
     const adaptiveWaitMs = adaptiveReadWaitMs(quietStreak);
     try {
-      const result = await this.readWithWait(processId, maxChars, adaptiveWaitMs);
+      const result = await this.readWithWait(processId, maxChars, adaptiveWaitMs, signal);
       if (result.running === true && result.no_change === true) {
         this.adaptiveReadQuietStreaks.set(adaptiveKey, Math.min(quietStreak + 1, ADAPTIVE_READ_WAIT_MS.length - 1));
       } else {
@@ -3160,23 +3189,30 @@ export class ProcessManager {
     }
   }
 
-  private async waitForProcessChange(state: ProcessState, waitMs: number): Promise<void> {
-    await new Promise<void>((resolve) => {
+  private async waitForProcessChange(state: ProcessState, waitMs: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new Error("request_aborted");
+    await new Promise<void>((resolve, reject) => {
       let settled = false;
       let timer: NodeJS.Timeout;
-      const finish = () => {
+      const finish = (error?: Error) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        state.waiters.delete(finish);
-        resolve();
+        state.waiters.delete(onProcessChange);
+        signal?.removeEventListener("abort", onAbort);
+        if (error) reject(error);
+        else resolve();
       };
-      state.waiters.add(finish);
-      timer = setTimeout(finish, waitMs);
+      const onProcessChange = () => finish();
+      const onAbort = () => finish(new Error("request_aborted"));
+      state.waiters.add(onProcessChange);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      timer = setTimeout(onProcessChange, waitMs);
     });
   }
 
-  async readWithWait(processId: string, maxChars = MAX_READ_CHARS, waitMs = 0): Promise<Record<string, unknown>> {
+  async readWithWait(processId: string, maxChars = MAX_READ_CHARS, waitMs = 0, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    if (signal?.aborted) throw new Error("request_aborted");
     const boundedWaitMs = boundReadWaitMs(waitMs);
     emitTelemetry({
       event: "process_wait_requested",
@@ -3188,7 +3224,7 @@ export class ProcessManager {
     if (!state) {
       const receipt = await this.readReceiptAsync(processId, maxChars);
       if (receipt) return receipt;
-      return await this.requestRemoteControl(processId, "read", currentTelemetryContext(), maxChars, boundedWaitMs);
+      return await this.requestRemoteControl(processId, "read", currentTelemetryContext(), maxChars, boundedWaitMs, signal);
     }
     if (boundedWaitMs === 0 || state.exitCode !== null) return this.read(processId, maxChars);
     const observer = currentTelemetryContext();
@@ -3200,7 +3236,7 @@ export class ProcessManager {
     const lastReadRevision = state.lastReadRevisionByCaller.get(observerCallerId) ?? 0;
     if (state.revision > lastReadRevision) return this.read(processId, maxChars);
 
-    await this.waitForProcessChange(state, boundedWaitMs);
+    await this.waitForProcessChange(state, boundedWaitMs, signal);
     if (state.exitCode === null && state.revision <= lastReadRevision) {
       return {
         ...processResponseState(state.startedAt, true),
