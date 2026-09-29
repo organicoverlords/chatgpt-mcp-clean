@@ -97,8 +97,11 @@ if(-not $TaskName){ $TaskName="McpV4FrozenStable${Port}-${short}" }
 if(-not $DeploymentRoot){ $DeploymentRoot=Join-Path $env:LOCALAPPDATA ("ChatGPTMcpFrozen\\{0}" -f $short) }
 $DeploymentRoot=[IO.Path]::GetFullPath($DeploymentRoot)
 $root=Assert-Candidate $CandidateRoot $commit
-$sourceBranch=(& git.exe -C $root branch --show-current).Trim()
-if([string]::IsNullOrWhiteSpace($sourceBranch)){ $sourceBranch='(detached)' }
+$deployOwnerFreshnessScript=Join-Path $root 'scripts\assert-deploy-owner-fresh.ps1'
+if(-not (Test-Path -LiteralPath $deployOwnerFreshnessScript -PathType Leaf)){ Fail "candidate deploy owner freshness guard missing: $deployOwnerFreshnessScript" }
+$deployOwner=(& $deployOwnerFreshnessScript -Root $root)
+if($null -eq $deployOwner -or [string]$deployOwner.status -ne 'FRESH'){ Fail 'candidate deploy owner freshness proof missing' }
+$sourceBranch=[string]$deployOwner.branch
 $omenExecPath=[IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($OmenExecPath))
 $omenMcpUrl=$OmenMcpUrl.Trim()
 if($omenMcpUrl){
@@ -122,6 +125,7 @@ if(Test-Path -LiteralPath $DeploymentRoot){ Fail "deployment root already exists
 $planResult=[ordered]@{
     status='PLAN'; commit=$commit; source_root=$root; deployment_root=$DeploymentRoot; runtime_root=(Join-Path $DeploymentRoot 'runtime');
     task_name=$TaskName; port=$Port; instance_id=$InstanceId; public_origin=$PublicOrigin; oauth_store_relative=$OAuthStoreRelative; receipt_store_relative=$ReceiptStoreRelative; default_execution_target=$DefaultExecutionTarget; omen_exec_path=$(if($omenMcpUrl){$null}else{$omenExecPath}); omen_mcp_url=$omenMcpUrl; owner_login_source=$ownerLoginSource;
+    deploy_owner_remote=[string]$deployOwner.remote; deploy_owner_upstream_tip=[string]$deployOwner.upstream_tip;
     current_serving_listen=[string]$topology.serving.backend.listen; current_frozen_root=$currentFrozen; rollback_port=$rollbackPort; rollback_instance=$rollbackInstance; route_mutation=$false
 }
 if($Plan){ $planResult | ConvertTo-Json -Depth 5 -Compress; exit 0 }
@@ -156,7 +160,7 @@ try {
     }
     Copy-Item -LiteralPath $ownerLoginSource -Destination (Join-Path $staging 'owner-login.txt')
     $manifest=[ordered]@{
-        schema='mcp-frozen-deployment.v1'; frozen_at=[DateTimeOffset]::UtcNow.ToString('o'); source_repo='organicoverlords/chatgpt-mcp-clean'; canonical_branch=$sourceBranch; merge_commit=$commit;
+        schema='mcp-frozen-deployment.v1'; frozen_at=[DateTimeOffset]::UtcNow.ToString('o'); source_repo='organicoverlords/chatgpt-mcp-clean'; canonical_branch=$sourceBranch; merge_commit=$commit; source_upstream_remote=[string]$deployOwner.remote; source_upstream_tip=[string]$deployOwner.upstream_tip;
         runtime_root=(Join-Path $DeploymentRoot 'runtime'); runtime_tracked_clean=$true; hashes=[ordered]@{dist_index_sha256=$hashes.dist_index_sha256;dist_server_sha256=$hashes.dist_server_sha256};
         routes=[ordered]@{stable=[ordered]@{public_origin=$PublicOrigin;port=$Port;instance=$InstanceId;oauth_store=(Join-Path $env:LOCALAPPDATA ("ChatGPTMcpClean\\minimal-connectors\\$OAuthStoreRelative"));rollback_port=$rollbackPort;rollback_instance=$rollbackInstance}};
         tool_contract=$toolContract; self_contained_runtime=(Join-Path $DeploymentRoot 'runtime'); runtime_commit=$commit; default_execution_target=$DefaultExecutionTarget; omen_exec_path=$(if($omenMcpUrl){$null}else{$omenExecPath}); omen_mcp_url=$omenMcpUrl;
