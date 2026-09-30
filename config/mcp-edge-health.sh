@@ -18,6 +18,27 @@ metadata=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 8 https://5-61-91-
 kone_public=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 https://91-159-12-133.sslip.io/health || true)
 omen_supertest=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 https://supertest9000.91-159-12-133.sslip.io/health || true)
 
+# The KONE collector publishes the aggregate fleet snapshot here every minute.
+# Freshness is an independent liveness signal: if KONE or its collector stops,
+# the VPS can detect that without relying on KONE to report its own failure.
+fleet_snapshot=/srv/mcp-artifacts/monitoring/fleet-status.json
+fleet_snapshot_present=false
+fleet_snapshot_age_seconds=-1
+fleet_snapshot_fresh=false
+fleet_reported_state=unknown
+now_epoch=$(date +%s)
+if [ -f "$fleet_snapshot" ]; then
+  fleet_snapshot_present=true
+  fleet_snapshot_mtime=$(stat -c %Y "$fleet_snapshot" 2>/dev/null || printf '0')
+  case "$fleet_snapshot_mtime" in ''|*[!0-9]*) fleet_snapshot_mtime=0 ;; esac
+  if [ "$fleet_snapshot_mtime" -gt 0 ]; then
+    fleet_snapshot_age_seconds=$((now_epoch - fleet_snapshot_mtime))
+    if [ "$fleet_snapshot_age_seconds" -ge 0 ] && [ "$fleet_snapshot_age_seconds" -le 180 ]; then fleet_snapshot_fresh=true; fi
+  fi
+  fleet_reported_state=$(sed -n 's/^[[:space:]]*"state":[[:space:]]*"\([^"]*\)".*/\1/p' "$fleet_snapshot" | head -1)
+  [ -n "$fleet_reported_state" ] || fleet_reported_state=unknown
+fi
+
 normalize_http() {
   case "$1" in
     ''|000|*[!0-9]*) printf '0' ;;
@@ -46,6 +67,16 @@ if [ "$kone_public" = 200 ]; then
   else
     omen_supertest_state=unhealthy
   fi
+fi
+
+fleet_healthy=false
+fleet_state=unhealthy
+if [ "$fleet_snapshot_fresh" = true ] && [ "$kone_public" = 200 ] && [ "$omen_supertest_state" = healthy ]; then
+  case "$fleet_reported_state" in
+    OK) fleet_healthy=true; fleet_state=healthy ;;
+    WARNING) fleet_state=warning ;;
+    *) fleet_state=unhealthy ;;
+  esac
 fi
 
 caddy=$(systemctl is-active caddy 2>/dev/null || true)
@@ -96,8 +127,12 @@ printf '"fallback_3101_http":%s,"fallback_3102_http":%s,"fallback_3103_http":%s,
   "$fallback_3101_json" "$fallback_3102_json" "$fallback_3103_json" "$fallback_3104_json" "$fallback_healthy" "$metadata_json" "$caddy" "${artifacts:-0}" "$disk" >> "$tmp"
 printf '"vps":{"load1":%s,"load5":%s,"load15":%s,"memory_total_mb":%s,"memory_available_mb":%s,"root_free_gb":%s,"uptime_seconds":%s},' \
   "$load1" "$load5" "$load15" "$mem_total_mb" "$mem_available_mb" "$root_free_gb" "$uptime_seconds" >> "$tmp"
-printf '"machine_probes":{"kone":{"public_mcp_http":%s,"state":"%s"},"omen":{"supertest_via_kone_http":%s,"state":"%s","dependency":"kone_public_ingress"}},"github_runner":{"service":"%s","listener_count":%s,"healthy":%s}}\n' \
-  "$kone_public_json" "$kone_public_state" "$omen_supertest_json" "$omen_supertest_state" "$runner_service" "$runner_listener_count" "$runner_healthy" >> "$tmp"
+printf '"machine_probes":{"kone":{"public_mcp_http":%s,"state":"%s"},"omen":{"supertest_via_kone_http":%s,"state":"%s","dependency":"kone_public_ingress"}},' \
+  "$kone_public_json" "$kone_public_state" "$omen_supertest_json" "$omen_supertest_state" >> "$tmp"
+printf '"fleet_monitor":{"healthy":%s,"state":"%s","snapshot_present":%s,"snapshot_age_seconds":%s,"snapshot_fresh":%s,"reported_state":"%s","alert_delivery_configured":false},' \
+  "$fleet_healthy" "$fleet_state" "$fleet_snapshot_present" "$fleet_snapshot_age_seconds" "$fleet_snapshot_fresh" "$fleet_reported_state" >> "$tmp"
+printf '"github_runner":{"service":"%s","listener_count":%s,"healthy":%s}}\n' \
+  "$runner_service" "$runner_listener_count" "$runner_healthy" >> "$tmp"
 
 chmod 0644 "$tmp"
 mv -f "$tmp" "$state/status.json"
