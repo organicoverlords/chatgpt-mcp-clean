@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { mkdir as mkdirAsync, readFile as readFileAsync, readdir as readdirAsync, rename as renameAsync, stat as statAsync, unlink as unlinkAsync, writeFile as writeFileAsync } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { Worker } from "node:worker_threads";
 import { currentTelemetryContext, emitTelemetry, withTelemetryContext, type TelemetryContext } from "./transport-telemetry.js";
@@ -1426,6 +1426,55 @@ function encodedCommandTransportError(command: string): string | undefined {
   if (hasPythonLauncher && /(?:^|\s)-c(?:\s|$)/i.test(command) && lower.includes("exec(") && (lower.includes("base64.b64decode(") || lower.includes("base64.urlsafe_b64decode("))) {
     return "encoded_command_transport_disallowed";
   }
+  return undefined;
+}
+
+
+const V3_RUST_FAST_VALIDATION_ERROR = "raw Cargo check/test/build in v3-rust is blocked; use v3-rust execution validate --repo-root <repo> --mode check|test|build so the owned fast profile and warm cache are used";
+
+function cargoPackageName(cargoTomlPath: string): string | undefined {
+  try {
+    const raw = readFileSync(cargoTomlPath, "utf8");
+    const packageSection = raw.match(/(?:^|\r?\n)\[package\]\s*\r?\n([\s\S]*?)(?=\r?\n\[[^\]]+\]|$)/);
+    return packageSection?.[1]?.match(/(?:^|\r?\n)\s*name\s*=\s*["']([^"']+)["']/)?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
+function isV3RustRepoPath(candidate: string): boolean {
+  let current = resolve(candidate);
+  try {
+    if (statSync(current).isFile()) current = dirname(current);
+  } catch {
+    if (/Cargo\.toml$/i.test(current)) current = dirname(current);
+  }
+  for (let depth = 0; depth < 12; depth += 1) {
+    const cargoToml = join(current, "Cargo.toml");
+    if (existsSync(cargoToml) && cargoPackageName(cargoToml) === "v3-rust") return true;
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return false;
+}
+
+function explicitFilesystemPaths(command: string): string[] {
+  const paths = new Set<string>();
+  for (const match of command.matchAll(/["']([A-Za-z]:[\\/][^"'\r\n]+|\/mnt\/ue\/[^"'\r\n]+)["']/g)) {
+    paths.add(match[1]!);
+  }
+  for (const match of command.matchAll(/(?:^|[\s=])([A-Za-z]:[\\/][^\s;|]+|\/mnt\/ue\/[^\s;|]+)/g)) {
+    paths.add(match[1]!.replace(/[),]+$/, ""));
+  }
+  return [...paths];
+}
+
+export function replayV3RustValidationPreflightError(command: string, workingDirectory?: string): string | undefined {
+  const code = powershellCodeMask(command);
+  if (!/\bcargo(?:\.exe)?\s+(?:\+[A-Za-z0-9._-]+\s+)?(?:check|test|build)\b/i.test(code)) return undefined;
+  if (workingDirectory && isV3RustRepoPath(workingDirectory)) return V3_RUST_FAST_VALIDATION_ERROR;
+  if (explicitFilesystemPaths(command).some(isV3RustRepoPath)) return V3_RUST_FAST_VALIDATION_ERROR;
   return undefined;
 }
 
@@ -2986,9 +3035,12 @@ export class ProcessManager {
     dedupeIdentity: string = effectiveCommand,
     runtimeRepairAllowed = true,
   ): StartResult {
-    const preflightError = transportPreflightError ?? (preflightMode === "policy"
+    const commandPreflightError = preflightMode === "policy"
       ? commandPolicyError(preflightCommand)
-      : commandExecutionPreflightError(preflightCommand, executionPlan));
+      : commandExecutionPreflightError(preflightCommand, executionPlan);
+    const preflightError = transportPreflightError
+      ?? commandPreflightError
+      ?? replayV3RustValidationPreflightError(preflightCommand, workingDirectory);
     if (preflightError) {
       const rejectionId = randomUUID();
       void this.persistPreflightRejectionAsync(rejectionId, submittedCommand ?? effectiveCommand, workingDirectory, callerId, preflightError);

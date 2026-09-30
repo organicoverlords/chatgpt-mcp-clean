@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProcessManager, replayCurrentPreflightError, replayFailureDiagnostic, replayNormalizeStartProcessCommand } from "../dist/lib/process-manager.js";
+import { ProcessManager, replayCurrentPreflightError, replayFailureDiagnostic, replayNormalizeStartProcessCommand, replayV3RustValidationPreflightError } from "../dist/lib/process-manager.js";
 
 const manager = new ProcessManager();
 const commandWaitMs = 30_000;
@@ -31,6 +31,31 @@ function rejects(command, expected) {
 
 assert.equal(replayCurrentPreflightError(`$args=@('ONE'); Write-Output ($args -join ',')`), undefined);
 assert.match(replayCurrentPreflightError(`Get-ChildItem C:\\ -Recurse`) || "", /recursive|drive-root/i);
+
+const v3RustGuardDirectory = mkdtempSync(join(tmpdir(), "mcp-v3-rust-fast-guard-"));
+const otherRustGuardDirectory = mkdtempSync(join(tmpdir(), "mcp-other-rust-fast-guard-"));
+try {
+  writeFileSync(join(v3RustGuardDirectory, "Cargo.toml"), "[package]\nname = \"v3-rust\"\nversion = \"0.1.0\"\n", "utf8");
+  writeFileSync(join(otherRustGuardDirectory, "Cargo.toml"), "[package]\nname = \"other-rust\"\nversion = \"0.1.0\"\n", "utf8");
+  assert.match(replayV3RustValidationPreflightError("cargo test --locked", v3RustGuardDirectory) || "", /execution validate/);
+  assert.match(replayV3RustValidationPreflightError("cargo.exe +stable check --all-targets", v3RustGuardDirectory) || "", /execution validate/);
+  assert.equal(replayV3RustValidationPreflightError("cargo fmt --all", v3RustGuardDirectory), undefined);
+  assert.equal(replayV3RustValidationPreflightError("cargo test --locked", otherRustGuardDirectory), undefined);
+  const indirectV3Cargo = "$wt='" + psQuote(v3RustGuardDirectory) + "'; Set-Location $wt; cargo build --release";
+  assert.match(replayV3RustValidationPreflightError(indirectV3Cargo) || "", /execution validate/);
+  assert.throws(
+    () => manager.startStructured("cargo.exe", ["test", "--locked"], v3RustGuardDirectory, "caller_v3_raw_cargo_structured"),
+    /start_process_preflight_failed: raw Cargo check\/test\/build in v3-rust is blocked/,
+  );
+  assert.throws(
+    () => manager.startScript("powershell", "cargo check --locked", v3RustGuardDirectory, "caller_v3_raw_cargo_script"),
+    /start_process_preflight_failed: raw Cargo check\/test\/build in v3-rust is blocked/,
+  );
+} finally {
+  rmSync(v3RustGuardDirectory, { recursive: true, force: true });
+  rmSync(otherRustGuardDirectory, { recursive: true, force: true });
+}
+
 
 const silentProbeSubmitted = `Get-Command __mcp_definitely_missing_command__ -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source`;
 const silentProbe = await run(silentProbeSubmitted, "caller_silent_observation_probe");
