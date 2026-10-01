@@ -108,6 +108,7 @@ try {
   utimesSync(hotReceiptPath, expiredHotReceiptTime, expiredHotReceiptTime);
 
   const afterHotExpiry = new ProcessManager({ receiptDirectory });
+  await afterHotExpiry.receiptPruneInFlight;
   assert.equal(existsSync(hotReceiptPath), false, "expired hot receipt should leave the flat directory only after archival");
   assert.equal(existsSync(archivedPath), true, "legacy flat receipt must be migrated to the durable archive");
   const recovered = afterHotExpiry.read(started.process_id);
@@ -141,7 +142,8 @@ try {
   const staleArchiveDirectory = join(receiptDirectory, "archive", "2000-01-01");
   mkdirSync(staleArchiveDirectory, { recursive: true });
   writeFileSync(join(staleArchiveDirectory, "stale.json"), "{}", "utf8");
-  new ProcessManager({ receiptDirectory });
+  const afterArchiveExpiry = new ProcessManager({ receiptDirectory });
+  await afterArchiveExpiry.receiptPruneInFlight;
   assert.equal(existsSync(staleArchiveDirectory), false, "stale day shards must be pruned by durable retention");
 } finally {
   setTelemetrySink(undefined);

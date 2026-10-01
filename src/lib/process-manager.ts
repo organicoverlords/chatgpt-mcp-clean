@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, watch, writeFileSync, type FSWatcher } from "node:fs";
-import { mkdir as mkdirAsync, readFile as readFileAsync, readdir as readdirAsync, rename as renameAsync, stat as statAsync, unlink as unlinkAsync, writeFile as writeFileAsync } from "node:fs/promises";
+import { mkdir as mkdirAsync, readFile as readFileAsync, readdir as readdirAsync, rename as renameAsync, rm as rmAsync, stat as statAsync, unlink as unlinkAsync, writeFile as writeFileAsync } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { Worker } from "node:worker_threads";
@@ -29,7 +29,7 @@ const RECEIPT_ARCHIVE_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 const MAX_COMPLETED_PROCESSES = 64;
 const TASKKILL_TIMEOUT_MS = 5_000;
 const KILL_SETTLE_MS = 1_000;
-const DEFAULT_MAX_LIVE_PER_CALLER = 4;
+const DEFAULT_MAX_LIVE_PER_CALLER = 6;
 // Shared-host concurrency is opt-in only; normal isolation is per caller/GPT.
 const MAX_CONFIGURED_LIVE_TOTAL = 80;
 const HOST_ADMISSION_DIRECTORY = ".host-admission";
@@ -1999,6 +1999,7 @@ export class ProcessManager {
   private controlSweepScheduled = false;
   private readonly launcherWorker: Worker;
   private lastReceiptPruneAt = 0;
+  private receiptPruneInFlight?: Promise<void>;
   private lastReceiptArchivePruneAt = 0;
   private lastRetrievalStopPruneAt = 0;
   private lastControlPruneAt = 0;
@@ -2016,7 +2017,7 @@ export class ProcessManager {
       ? join(this.receiptDirectory, ".output")
       : join(tmpdir(), "chatgpt-mcp-process-output", String(process.pid));
     mkdirSync(this.outputSpoolDirectory, { recursive: true });
-    this.pruneOutputSpools();
+    void this.pruneOutputSpools();
     if (this.receiptDirectory) {
       mkdirSync(this.receiptDirectory, { recursive: true });
       if (this.maxLiveTotal !== undefined) {
@@ -2513,10 +2514,10 @@ export class ProcessManager {
     return result;
   }
 
-  private pruneOutputSpools(now = Date.now()): void {
+  private async pruneOutputSpools(now = Date.now()): Promise<void> {
     let entries;
     try {
-      entries = readdirSync(this.outputSpoolDirectory, { withFileTypes: true });
+      entries = await readdirAsync(this.outputSpoolDirectory, { withFileTypes: true });
     } catch {
       return;
     }
@@ -2524,7 +2525,7 @@ export class ProcessManager {
       if (!entry.isFile() || !/^[0-9a-f-]{36}\.(?:stdout|stderr)\.utf16le$/i.test(entry.name)) continue;
       const path = join(this.outputSpoolDirectory, entry.name);
       try {
-        if (now - statSync(path).mtimeMs > RECEIPT_ARCHIVE_RETENTION_MS) unlinkSync(path);
+        if (now - (await statAsync(path)).mtimeMs > RECEIPT_ARCHIVE_RETENTION_MS) await unlinkAsync(path);
       } catch {
         // best-effort retention cleanup
       }
@@ -2537,35 +2538,14 @@ export class ProcessManager {
     return join(this.receiptDirectory, `${processId}.json`);
   }
 
-  private receiptArchivePath(processId: string, finishedAt: string): string | undefined {
-    if (!this.receiptArchiveDirectory || !PROCESS_ID_PATTERN.test(processId)) return undefined;
-    const finishedMs = Date.parse(finishedAt);
-    if (!Number.isFinite(finishedMs)) return undefined;
-    const day = new Date(finishedMs).toISOString().slice(0, 10);
-    const dayDirectory = join(this.receiptArchiveDirectory, day);
-    mkdirSync(dayDirectory, { recursive: true });
-    return join(dayDirectory, `${processId}.json`);
-  }
-
-  private persistArchivedReceipt(receipt: CompletedProcessReceipt): void {
-    const path = this.receiptArchivePath(receipt.process_id, receipt.finished_at);
-    if (!path || existsSync(path)) return;
-    const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    try {
-      writeFileSync(temporaryPath, JSON.stringify(receipt), { encoding: "utf8", flag: "wx" });
-      renameSync(temporaryPath, path);
-    } finally {
-      try { unlinkSync(temporaryPath); } catch { /* already renamed or never created */ }
-    }
-  }
-
   private async persistArchivedReceiptAsync(receipt: CompletedProcessReceipt): Promise<void> {
-    if (!this.receiptArchiveDirectory) return;
+    if (!this.receiptArchiveDirectory || !PROCESS_ID_PATTERN.test(receipt.process_id)) throw new Error("invalid archive receipt identity");
     const finishedMs = Date.parse(receipt.finished_at);
-    if (!Number.isFinite(finishedMs)) return;
+    if (!Number.isFinite(finishedMs)) throw new Error("invalid archive receipt timestamp");
     const dayDirectory = join(this.receiptArchiveDirectory, new Date(finishedMs).toISOString().slice(0, 10));
     await mkdirAsync(dayDirectory, { recursive: true });
     const path = join(dayDirectory, `${receipt.process_id}.json`);
+    try { await statAsync(path); return; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
     try {
       await writeFileAsync(temporaryPath, JSON.stringify(receipt), { encoding: "utf8", flag: "wx" });
@@ -2589,14 +2569,14 @@ export class ProcessManager {
     } finally { try { await unlinkAsync(temporaryPath); } catch {} }
   }
 
-  private pruneReceiptArchive(now = Date.now()): void {
+  private async pruneReceiptArchive(now = Date.now()): Promise<void> {
     if (!this.receiptArchiveDirectory) return;
     if (now - this.lastReceiptArchivePruneAt < RECEIPT_ARCHIVE_PRUNE_INTERVAL_MS) return;
     this.lastReceiptArchivePruneAt = now;
     const cutoff = now - RECEIPT_ARCHIVE_RETENTION_MS;
     let entries;
     try {
-      entries = readdirSync(this.receiptArchiveDirectory, { withFileTypes: true });
+      entries = await readdirAsync(this.receiptArchiveDirectory, { withFileTypes: true });
     } catch {
       return;
     }
@@ -2604,18 +2584,25 @@ export class ProcessManager {
       if (!entry.isDirectory() || !/^\d{4}-\d{2}-\d{2}$/.test(entry.name)) continue;
       const endOfDay = Date.parse(`${entry.name}T23:59:59.999Z`);
       if (!Number.isFinite(endOfDay) || endOfDay >= cutoff) continue;
-      try { rmSync(join(this.receiptArchiveDirectory, entry.name), { recursive: true, force: true }); } catch { /* best-effort retention cleanup */ }
+      try { await rmAsync(join(this.receiptArchiveDirectory, entry.name), { recursive: true, force: true }); } catch { /* best-effort retention cleanup */ }
     }
   }
 
   private pruneReceipts(): void {
-    if (!this.receiptDirectory) return;
+    if (!this.receiptDirectory || this.receiptPruneInFlight) return;
     const now = Date.now();
     if (now - this.lastReceiptPruneAt < RECEIPT_PRUNE_INTERVAL_MS) return;
     this.lastReceiptPruneAt = now;
+    this.receiptPruneInFlight = this.pruneReceiptsAsync(now).catch((error) => {
+      emitTelemetry({ event: "process_receipt_prune_error", error_message: error instanceof Error ? error.message : String(error) });
+    }).finally(() => { this.receiptPruneInFlight = undefined; });
+  }
+
+  private async pruneReceiptsAsync(now: number): Promise<void> {
+    if (!this.receiptDirectory) return;
     let entries;
     try {
-      entries = readdirSync(this.receiptDirectory, { withFileTypes: true });
+      entries = await readdirAsync(this.receiptDirectory, { withFileTypes: true });
     } catch {
       return;
     }
@@ -2625,19 +2612,19 @@ export class ProcessManager {
       let modifiedAt = now;
       let archived = false;
       try {
-        modifiedAt = statSync(path).mtimeMs;
-        const receipt = JSON.parse(readFileSync(path, "utf8")) as CompletedProcessReceipt;
-        this.persistArchivedReceipt(receipt);
+        modifiedAt = (await statAsync(path)).mtimeMs;
+        const receipt = JSON.parse(await readFileAsync(path, "utf8")) as CompletedProcessReceipt;
+        await this.persistArchivedReceiptAsync(receipt);
         archived = true;
       } catch {
         // Preserve unreadable or unarchived evidence instead of deleting it.
       }
       if (archived && now - modifiedAt > COMPLETED_RETENTION_MS) {
-        try { unlinkSync(path); } catch { /* another clone may already have pruned it */ }
+        try { await unlinkAsync(path); } catch { /* another clone may already have pruned it */ }
       }
     }
-    this.pruneOutputSpools(now);
-    this.pruneReceiptArchive(now);
+    await this.pruneOutputSpools(now);
+    await this.pruneReceiptArchive(now);
   }
 
   private receiptReadPaths(processId: string): string[] {
@@ -3191,7 +3178,7 @@ export class ProcessManager {
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
     const started = this.start(command, cwd, callerId, activityTarget, actionClass);
-    const boundedWaitMs = Math.max(0, Math.min(waitMs, 240_000));
+    const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
     emitTelemetry({
       event: "process_wait_requested",
       action: "start",
@@ -3308,7 +3295,7 @@ export class ProcessManager {
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
     const started = this.startScript(language, script, cwd, callerId, activityTarget, actionClass, environment);
-    const boundedWaitMs = Math.max(0, Math.min(waitMs, 240_000));
+    const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
     emitTelemetry({ event: "process_wait_requested", action: "start_script", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
@@ -3332,7 +3319,7 @@ export class ProcessManager {
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
     const started = this.startStructured(executable, args, cwd, callerId, activityTarget, actionClass, stdin, environment);
-    const boundedWaitMs = Math.max(0, Math.min(waitMs, 240_000));
+    const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
     emitTelemetry({ event: "process_wait_requested", action: "start_structured", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
