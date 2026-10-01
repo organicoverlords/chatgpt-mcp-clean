@@ -58,7 +58,12 @@ try {
   assert.equal((await refresh(refreshToken)).status, 400, "already advanced parent must not mint a stale successor");
   assert.equal((await refresh(next.tokens.refresh_token)).status, 200, "short-window late retry must not revoke the active family");
   const disk = await readFile(oauthPath, "utf8");
-  const log = await readFile(logPath, "utf8");
+  let log = await readFile(logPath, "utf8");
+  const logDeadline = Date.now() + 2_000;
+  while (!log.includes("successor_already_rotated") && Date.now() < logDeadline) {
+    await new Promise(resolveWait => setTimeout(resolveWait, 10));
+    log = await readFile(logPath, "utf8");
+  }
   for (const token of [refreshToken, successor, ...results.map((result) => result.tokens.access_token)]) {
     assert.equal(disk.includes(token), false, "store must contain hashes only");
     assert.equal(log.includes(token), false, "telemetry must not contain tokens");
