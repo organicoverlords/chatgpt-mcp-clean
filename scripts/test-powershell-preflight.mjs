@@ -281,6 +281,28 @@ rejects("where.exe /R C:\\ *.txt", /drive[- ]root/);
 rejects("findstr.exe /S needle C:\\*", /drive[- ]root/);
 rejects("cmd.exe /c dir C:\\ /s", /drive[- ]root/);
 rejects("tree.exe C:\\ /F", /drive[- ]root/);
+
+// Raw filesystem discovery/search tools are intentionally disabled on MCP process starts.
+// Known-repo search must use the Git index instead; stack/history discovery uses V3/Stack Surface.
+rejects("grep -n needle known.txt", /raw_discovery_tool_blocked: grep/);
+rejects("rg needle src", /raw_discovery_tool_blocked: rg/);
+rejects("find . -type f", /raw_discovery_tool_blocked: find/);
+rejects("findstr needle known.txt", /raw_discovery_tool_blocked: findstr/);
+assert.equal(replayCurrentPreflightError("git grep -n needle -- src"), undefined);
+assert.equal(replayCurrentPreflightError("git ls-files -- src"), undefined);
+assert.equal(replayCurrentPreflightError("Get-ChildItem -LiteralPath '.\known-subtree' -Recurse -File"), undefined);
+assert.throws(
+  () => manager.startStructured("bash", ["-lc", "grep -Rni needle ."], undefined, "caller_structured_raw_grep"),
+  (error) => error instanceof Error && /raw_discovery_tool_blocked: grep/.test(error.message),
+);
+assert.throws(
+  () => manager.start("python C:\\Users\\Lauri\\Desktop\\vault\\tools\\omen_exec.py -- bash -lc \"grep -Rni needle .\"", undefined, "caller_legacy_nested_raw_grep"),
+  (error) => error instanceof Error && /raw_discovery_tool_blocked: grep/.test(error.message),
+);
+assert.throws(
+  () => manager.startStructured("python", ["C:\\Users\\Lauri\\Desktop\\vault\\tools\\omen_exec.py", "--", "bash", "-lc", "find . -type f"], undefined, "caller_nested_shell_find"),
+  (error) => error instanceof Error && /raw_discovery_tool_blocked: find/.test(error.message),
+);
 rejects(`Get-ChildItem -LiteralPath '${psQuote(localAppDataRoot)}' -Recurse -File -Filter 'transport.jsonl'`, /broad LOCALAPPDATA root/);
 rejects(`rg needle '${psQuote(localAppDataRoot)}'`, /broad LOCALAPPDATA root/);
 const incidentBroadRoots = `$roots=@('${psQuote(aiRoot)}','${psQuote(pipelineResultsRoot)}'); $rows=@(); foreach($root in $roots){Get-ChildItem -LiteralPath $root -Recurse -File -Filter 'trellis-decode-replay.exe' -ErrorAction SilentlyContinue | ForEach-Object {$rows += $_.FullName}}`;
