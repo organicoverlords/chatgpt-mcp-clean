@@ -101,9 +101,11 @@ function structuredPolicyText(base: string, environment?: Record<string, string>
   return `${base}\n${values}`;
 }
 
-function structuredArgvTransportError(executable: string, args: string[]): string | undefined {
+function structuredArgvTransportError(executable: string, args: string[], stdin?: string): string | undefined {
+  const discoveryError = structuredRawDiscoveryToolError(executable, args, stdin);
+  if (discoveryError) return discoveryError;
   if (!args.some((value) => /[\r\n]/.test(value))) return undefined;
-  const base = executable.replaceAll("/", "\\").split("\\").at(-1)?.toLowerCase() ?? executable.toLowerCase();
+  const base = commandBase(executable);
   const commandShim = /\.(?:cmd|bat)$/i.test(base) || ["npm", "npx", "pnpm", "yarn"].includes(base);
   return commandShim ? "windows_command_shim_multiline_argument_not_lossless" : undefined;
 }
@@ -1416,6 +1418,69 @@ function normalizePowerShellControlStatementPipelines(command: string): PowerShe
   return { command: normalized, changed: normalized !== command };
 }
 
+function discoveryReplacementError(tool: string): string {
+  return `raw_discovery_tool_blocked: ${tool} is disabled on MCP process starts; use V3/Stack Surface for stack/history/owner discovery, git grep for content search in a known Git repository, git ls-files for repository file discovery, or direct reads of exact known paths`;
+}
+
+function rawDiscoveryToolError(command: string, code = powershellCodeMask(command)): string | undefined {
+  const segmentTool = /(?:^|[;&|]\s*)\b(grep|rg|ripgrep|fd|findstr)(?:\.exe)?\b/i.exec(code);
+  if (segmentTool) return discoveryReplacementError(segmentTool[1]!.toLowerCase());
+  const shellFind = /(?:^|[;&|]\s*)\bfind(?:\.exe)?\s+/i.exec(code);
+  if (shellFind) return discoveryReplacementError("find");
+  if (/(?:^|[;&|]\s*)\bwhere(?:\.exe)?\b[^\r\n;|]{0,500}\/R\b/i.test(code)) return discoveryReplacementError("where /R");
+  return undefined;
+}
+
+function commandBase(executable: string): string {
+  return executable.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase() ?? executable.toLowerCase();
+}
+
+function shellPayload(args: string[]): string | undefined {
+  const commandIndex = args.findIndex((arg) => /^-[A-Za-z]*c[A-Za-z]*$/i.test(arg.trim()) || /^-{1,2}command$/i.test(arg.trim()));
+  if (commandIndex < 0 || commandIndex + 1 >= args.length) return undefined;
+  return args[commandIndex + 1]?.trim() || undefined;
+}
+
+function nestedShellPayload(args: string[]): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const base = commandBase(args[index]!);
+    if (!/^(?:bash|sh|zsh|pwsh|powershell)(?:\.exe)?$/i.test(base)) continue;
+    const payload = shellPayload(args.slice(index + 1));
+    if (payload) return payload;
+  }
+  return undefined;
+}
+
+function structuredRawDiscoveryToolError(executable: string, args: string[], stdin?: string): string | undefined {
+  const base = commandBase(executable);
+  if (/^(?:grep|rg|ripgrep|fd|findstr)(?:\.exe)?$/i.test(base)) return discoveryReplacementError(base.replace(/\.exe$/i, ""));
+  if (/^find(?:\.exe)?$/i.test(base)) return discoveryReplacementError("find");
+  if (/^where(?:\.exe)?$/i.test(base) && args.some((arg) => /^\/R$/i.test(arg))) return discoveryReplacementError("where /R");
+
+  if (/^(?:bash|sh|zsh|pwsh|powershell)(?:\.exe)?$/i.test(base)) {
+    const payload = shellPayload(args) ?? stdin;
+    if (payload) {
+      const nestedError = rawDiscoveryToolError(payload, powershellCodeMask(payload));
+      if (nestedError) return nestedError;
+    }
+  }
+
+  const nestedPayload = nestedShellPayload(args);
+  if (nestedPayload) {
+    const nestedError = rawDiscoveryToolError(nestedPayload, powershellCodeMask(nestedPayload));
+    if (nestedError) return nestedError;
+  }
+
+  if (/^(?:python(?:3)?|py)(?:\.exe)?$/i.test(base)) {
+    const commandIndex = args.findIndex((arg) => arg === "-c");
+    if (commandIndex >= 0 && commandIndex + 1 < args.length) {
+      const inlineError = rawDiscoveryToolError(args[commandIndex + 1]!, args[commandIndex + 1]!);
+      if (inlineError) return inlineError;
+    }
+  }
+  return undefined;
+}
+
 function encodedCommandTransportError(command: string): string | undefined {
   const lower = command.toLowerCase();
   const hasPowerShellLauncher = /\b(?:pwsh|powershell)(?:\.exe)?\b/i.test(command);
@@ -1442,6 +1507,8 @@ function commandPolicyError(command: string, code = powershellCodeMask(command))
   if (inertWaitError) return inertWaitError;
   const tempScanError = tempRootRecursiveScanError(command, code);
   if (tempScanError) return tempScanError;
+  const discoveryError = rawDiscoveryToolError(command, code);
+  if (discoveryError) return discoveryError;
   const p3BuildWaitError = p3BuildSlotWaitError(command, code);
   if (p3BuildWaitError) return p3BuildWaitError;
   const swarmRouteError = swarmRouteDecisionIsolationError(command, code);
@@ -1506,6 +1573,8 @@ function explicitPowerShellCommandPayload(executionPlan: CommandExecutionPlan): 
 function commandExecutionPreflightError(command: string, executionPlan: CommandExecutionPlan): string | undefined {
   const outerError = commandPreflightError(command, executionPlan.mode);
   if (outerError) return outerError;
+  const plannedDiscoveryError = structuredRawDiscoveryToolError(executionPlan.executable, executionPlan.args, executionPlan.stdin);
+  if (plannedDiscoveryError) return plannedDiscoveryError;
   const payload = explicitPowerShellCommandPayload(executionPlan);
   if (!payload) return undefined;
   return commandPreflightError(payload, "powershell");
@@ -3076,7 +3145,7 @@ export class ProcessManager {
     const inputText = stdin === undefined ? displayCommand : `${displayCommand}\n${stdin}`;
     const preflightCommand = structuredPolicyText(inputText, environment);
     const transportPreflightError =
-      structuredArgvTransportError(executable, args)
+      structuredArgvTransportError(executable, args, stdin)
       ?? structuredHostPreflightError(executable);
     return this.startPrepared(displayCommand, executionPlan, workingDirectory, callerId, activityTarget, actionClass, undefined, ["structured_argv", ...(stdin !== undefined ? ["structured_stdin"] : [])], preflightCommand, "full", transportPreflightError, this.executionDedupeIdentity(executionPlan), false);
   }
