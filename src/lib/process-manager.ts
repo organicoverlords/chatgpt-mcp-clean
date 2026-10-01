@@ -3191,7 +3191,7 @@ export class ProcessManager {
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
     const started = this.start(command, cwd, callerId, activityTarget, actionClass);
-    const boundedWaitMs = Math.max(0, Math.min(waitMs, 240_000));
+    const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
     emitTelemetry({
       event: "process_wait_requested",
       action: "start",
@@ -3308,7 +3308,7 @@ export class ProcessManager {
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
     const started = this.startScript(language, script, cwd, callerId, activityTarget, actionClass, environment);
-    const boundedWaitMs = Math.max(0, Math.min(waitMs, 240_000));
+    const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
     emitTelemetry({ event: "process_wait_requested", action: "start_script", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
@@ -3332,7 +3332,7 @@ export class ProcessManager {
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
     const started = this.startStructured(executable, args, cwd, callerId, activityTarget, actionClass, stdin, environment);
-    const boundedWaitMs = Math.max(0, Math.min(waitMs, 240_000));
+    const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
     emitTelemetry({ event: "process_wait_requested", action: "start_structured", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
