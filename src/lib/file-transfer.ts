@@ -14,6 +14,7 @@ const MCP_APP_MIME_TYPE = "text/html;profile=mcp-app";
 const LOCAL_TRANSFER_TTL_MS = 5 * 60 * 1000;
 const LOCAL_RESOURCE_TTL_MS = 8 * 60 * 60 * 1000;
 const DEFAULT_MAX_FILE_BYTES = 512 * 1024 * 1024;
+const MAX_INLINE_IMAGE_BYTES_EXCLUSIVE = 10 * 1024 * 1024;
 const ZSTD_MIN_BYTES = 64 * 1024;
 const MAX_REVIEW_ZIP_ENTRIES = 512;
 const MAX_REVIEW_ZIP_DIRECTORY_BYTES = 8 * 1024 * 1024;
@@ -327,6 +328,9 @@ async function directImageHandoff(path: string, mimeType: string): Promise<{ con
   const info = await stat(path);
   const maxBytes = maxFileBytes();
   if (!info.isFile() || info.size <= 0 || info.size > maxBytes) throw new Error(`artifact must name a 1..${maxBytes} byte file`);
+  if (info.size >= MAX_INLINE_IMAGE_BYTES_EXCLUSIVE) {
+    return { content: [{ type: "text" as const, text: `image not attached: ${info.size} bytes; inline inspection requires < ${MAX_INLINE_IMAGE_BYTES_EXCLUSIVE} bytes` }] };
+  }
   const data = await readFile(path);
   return { content: inlineImageContent(data, mimeType) };
 }
@@ -552,6 +556,7 @@ async function visualReviewZipResources(item: LocalFileTransfer): Promise<LocalI
 }
 
 async function localImageResourceBytes(image: LocalImageResource): Promise<Buffer> {
+  if (image.bytes >= MAX_INLINE_IMAGE_BYTES_EXCLUSIVE) throw new Error(`inline image must be smaller than ${MAX_INLINE_IMAGE_BYTES_EXCLUSIVE} bytes`);
   const current = await stat(image.source_path).catch(() => null);
   if (!current?.isFile() || current.size !== image.source_bytes || current.mtimeMs !== image.source_mtime_ms) {
     localImageResources.delete(image.token);
@@ -646,6 +651,10 @@ export async function localFileTransferHandoff(item: LocalFileTransfer) {
   const reviewImages = item.mime_type === "application/zip" ? await visualReviewZipResources(item) : [];
   const content: any[] = [localFileResourceLink(item)];
   for (const image of reviewImages) {
+    if (image.bytes >= MAX_INLINE_IMAGE_BYTES_EXCLUSIVE) {
+      content.push({ type: "text" as const, text: `review image not attached: ${image.bytes} bytes; inline inspection requires < ${MAX_INLINE_IMAGE_BYTES_EXCLUSIVE} bytes` });
+      continue;
+    }
     content.push(...inlineImageContent(await localImageResourceBytes(image), image.mime_type));
   }
   return { item, content, summary: localTransferSummary(item) };

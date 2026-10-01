@@ -9,9 +9,13 @@ const local = await mkdtemp(join(tmpdir(), "mcp-inline-artifact-"));
 const pngA = join(local, "frame-a.png");
 const pngB = join(local, "frame-b.png");
 const video = join(local, "capture.mp4");
+const oversizedPng = join(local, "oversized.png");
 await writeFile(pngA, PNG_1X1);
 await writeFile(pngB, PNG_1X1);
 await writeFile(video, Buffer.from("000000186674797069736F6D", "hex"));
+const oversizedBytes = Buffer.alloc(10 * 1024 * 1024);
+PNG_1X1.copy(oversizedBytes);
+await writeFile(oversizedPng, oversizedBytes);
 
 const server = createServer("inline-artifact-test", { backend_generation: "inline-test", source_commit: "0123456789abcdef0123456789abcdef01234567" });
 assert.deepEqual(Object.keys(server._registeredTools).sort(), ["kill_process", "read_output", "start_process"]);
@@ -34,6 +38,11 @@ assert.deepEqual(Buffer.from(imageEntries(direct)[0].data, "base64"), PNG_1X1, "
 assert.deepEqual(resolutionEntries(direct).map((entry) => entry.text), ["resolution: 1x1"]);
 assert.equal(mediaEntries(direct).some((entry) => entry.type === "resource_link"), false, "direct image must not require a second resource read");
 assert.equal(mediaEntries(direct).some((entry) => entry.type === "text" && /sha256/i.test(entry.text)), false, "image handoff must not report hashes");
+
+const oversizedCode = `console.log('CHATGPT_ARTIFACT='+${JSON.stringify(oversizedPng)})`;
+const oversizedResult = await server._registeredTools.start_process.handler({ executable: process.execPath, args: ["-e", oversizedCode], wait_ms: 2000 }, {});
+assert.equal(imageEntries(oversizedResult).length, 0, "an image at the 10 MiB boundary must never be handed to model vision");
+assert.equal(mediaEntries(oversizedResult).some((entry) => entry.type === "text" && /inline inspection requires < 10485760 bytes/.test(entry.text)), true, "oversized image rejection must state the strict inspection cap");
 
 const legacyCode = `console.log('CHATGPT_LIBRARY_UPLOAD='+${JSON.stringify(pngA)})`;
 const legacy = await server._registeredTools.start_process.handler({ executable: process.execPath, args: ["-e", legacyCode], wait_ms: 2000 }, {});
@@ -61,4 +70,4 @@ assert.equal(imageEntries(videoResult).length, 0, "video must not masquerade as 
 assert.equal(mediaEntries(videoResult).filter((entry) => entry.type === "resource_link").length, 1, "video remains an ordinary artifact while keyframes/contact sheets are marked separately");
 
 await rm(local, { recursive: true, force: true });
-console.log("PASS inline_artifact_handoff three_tools=true direct_fullres=true read_output_stream=true multi_keyframe=true legacy_marker=true video_resource=true");
+console.log("PASS inline_artifact_handoff three_tools=true direct_under_cap=true oversized_rejected=true read_output_stream=true multi_keyframe=true legacy_marker=true video_resource=true");
