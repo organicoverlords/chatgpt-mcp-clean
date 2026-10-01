@@ -23,6 +23,7 @@ if (configuredDefaultExecutionTarget !== "local" && configuredDefaultExecutionTa
 const defaultExecutionTarget = configuredDefaultExecutionTarget as "local" | "omen";
 const nativeOmenHost = process.env.MCP_NATIVE_OMEN_HOST === "1";
 const omenMcpUrl = process.env.MCP_OMEN_MCP_URL?.trim() || undefined;
+const allowOmenSshFallback = process.env.MCP_ALLOW_OMEN_SSH_FALLBACK === "1";
 const OMEN_MCP_PROCESS_PREFIX = "omen-mcp:";
 type OmenClientEntry = { promise: Promise<Client>; active: number; lastUsedAt: number };
 const omenMcpClients = new Map<string, OmenClientEntry>();
@@ -126,7 +127,9 @@ const processManager = new ProcessManager({
 const defaultOmenExecPath = process.platform === "win32" && process.env.USERPROFILE
   ? resolve(process.env.USERPROFILE, "Desktop", "vault", "tools", "omen_exec.py")
   : undefined;
-const omenExecPath = process.env.MCP_OMEN_EXEC_PATH?.trim() || defaultOmenExecPath;
+const configuredOmenExecPath = process.env.MCP_OMEN_EXEC_PATH?.trim() || defaultOmenExecPath;
+const omenExecPath = allowOmenSshFallback ? configuredOmenExecPath : undefined;
+const DEFAULT_INITIAL_WAIT_MS = 750;
 const omenPython = process.env.MCP_OMEN_PYTHON?.trim() || "python";
 const activityToken = /^[A-Za-z0-9._/:_-]+$/;
 const activityTargetSchema = z.object({
@@ -377,7 +380,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
                 input.args ?? [],
                 nativeWorkingDirectory,
                 callerId,
-                wait_ms ?? 240_000,
+                wait_ms ?? DEFAULT_INITIAL_WAIT_MS,
                 activity_target,
                 action_class,
                 input.stdin,
@@ -390,7 +393,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
                 input.script!,
                 nativeWorkingDirectory,
                 callerId,
-                wait_ms ?? 240_000,
+                wait_ms ?? DEFAULT_INITIAL_WAIT_MS,
                 activity_target,
                 action_class,
                 input.env,
@@ -420,7 +423,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
             ...(action_class ? { action_class } : {}),
           }, callerId));
         } else {
-          if (!omenExecPath) throw new Error("omen_execution_unavailable: MCP_OMEN_EXEC_PATH is not configured and no Windows default is available");
+          if (!omenExecPath) throw new Error("omen_native_mcp_required: SSH fallback is disabled; use the native OMEN MCP/Supertest route or explicitly set MCP_ALLOW_OMEN_SSH_FALLBACK=1 for rollback/bootstrap recovery");
           if (input.executable === undefined || input.stdin !== undefined || input.env !== undefined) {
             throw new Error("omen_ssh_adapter_structured_fields_unsupported: native OMEN MCP is required for script, stdin, or env transport");
           }
@@ -429,7 +432,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
             [omenExecPath, "--invocation-source", "mcp", "--cwd", working_directory ?? "/home/aatuska", "--", input.executable, ...(input.args ?? [])],
             undefined,
             callerId,
-            wait_ms ?? 240_000,
+            wait_ms ?? DEFAULT_INITIAL_WAIT_MS,
             activity_target,
             action_class,
             undefined,
@@ -441,8 +444,8 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
         }
       } else {
         value = input.executable !== undefined
-          ? await processManager.startStructuredWithWait(input.executable, input.args ?? [], working_directory, callerId, wait_ms ?? 750, activity_target, action_class, input.stdin, input.env, extra.signal, MODEL_VISIBLE_PAGE_MAX_CHARS)
-          : await processManager.startScriptWithWait(input.language!, input.script!, working_directory, callerId, wait_ms ?? 750, activity_target, action_class, input.env, extra.signal, MODEL_VISIBLE_PAGE_MAX_CHARS);
+          ? await processManager.startStructuredWithWait(input.executable, input.args ?? [], working_directory, callerId, wait_ms ?? DEFAULT_INITIAL_WAIT_MS, activity_target, action_class, input.stdin, input.env, extra.signal, MODEL_VISIBLE_PAGE_MAX_CHARS)
+          : await processManager.startScriptWithWait(input.language!, input.script!, working_directory, callerId, wait_ms ?? DEFAULT_INITIAL_WAIT_MS, activity_target, action_class, input.env, extra.signal, MODEL_VISIBLE_PAGE_MAX_CHARS);
       }
       return structuredTextResult(value, callerId, servingIdentity);
     },
