@@ -29,7 +29,7 @@ const RECEIPT_ARCHIVE_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 const MAX_COMPLETED_PROCESSES = 64;
 const TASKKILL_TIMEOUT_MS = 5_000;
 const KILL_SETTLE_MS = 1_000;
-const DEFAULT_MAX_LIVE_PER_CALLER = 4;
+const DEFAULT_MAX_LIVE_PER_CALLER = 6;
 // Shared-host concurrency is opt-in only; normal isolation is per caller/GPT.
 const MAX_CONFIGURED_LIVE_TOTAL = 80;
 const HOST_ADMISSION_DIRECTORY = ".host-admission";
