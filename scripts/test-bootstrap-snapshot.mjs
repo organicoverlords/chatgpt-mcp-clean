@@ -276,7 +276,7 @@ try {
       ...paged,
       caller_id: "caller_paging_regression",
       serving_identity: {
-        tool_contract_version: "process-tools.v4",
+        tool_contract_version: "process-tools.v5",
         backend_generation: "backend-paging-regression",
         source_commit: "a".repeat(40),
       },
