@@ -21,6 +21,7 @@ writeFileSync(omenFixture, [
   "",
 ].join("\n"), "utf8");
 process.env.MCP_OMEN_EXEC_PATH = omenFixture;
+process.env.MCP_ALLOW_OMEN_SSH_FALLBACK = "1";
 const { createServer } = await import("../dist/server.js");
 const contractSourceCommit = "0123456789abcdef0123456789abcdef01234567";
 const server = createServer("contract-verifier", { backend_generation: "backend-contract-test", source_commit: contractSourceCommit });
