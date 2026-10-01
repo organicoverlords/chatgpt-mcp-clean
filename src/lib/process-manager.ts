@@ -11,15 +11,11 @@ const MAX_CAPTURE_CHARS = 256_000;
 // The in-memory capture is only a diagnostic tail. Complete output is spooled to disk.
 const MAX_READ_CHARS = 256_000;
 export const MAX_READ_WAIT_MS = 240_000;
-export const ADAPTIVE_READ_WAIT_MS = [2_000, 5_000, 10_000, 30_000, 60_000] as const;
 
 export function boundReadWaitMs(waitMs: number): number {
   return Math.max(0, Math.min(waitMs, MAX_READ_WAIT_MS));
 }
 
-export function adaptiveReadWaitMs(quietStreak: number): number {
-  return ADAPTIVE_READ_WAIT_MS[Math.min(Math.max(0, quietStreak), ADAPTIVE_READ_WAIT_MS.length - 1)]!;
-}
 const MAX_COMMAND_REPORT_CHARS = 4_000;
 const COMPLETED_RETENTION_MS = 30 * 60 * 1000;
 const RECEIPT_ARCHIVE_RETENTION_DAYS = 7;
@@ -1982,7 +1978,6 @@ export function replayCurrentPolicyError(command: string): string | undefined {
 export class ProcessManager {
   private readonly processes = new Map<string, ProcessState>();
   private readonly outputCursors = new Map<string, OutputCursor>();
-  private readonly adaptiveReadQuietStreaks = new Map<string, number>();
   private readonly maxLivePerCaller: number;
   private readonly maxLiveTotal?: number;
   private readonly maxCompletedProcesses: number;
@@ -3342,26 +3337,9 @@ export class ProcessManager {
   }
 
   async readOutput(processId: string, maxChars = MAX_READ_CHARS, waitMs?: number, signal?: AbortSignal): Promise<Record<string, unknown>> {
-    const observerCallerId = currentTelemetryContext().caller_id ?? "caller_unknown";
-    const adaptiveKey = `${processId}:${observerCallerId}`;
-    if (waitMs !== undefined) {
-      this.adaptiveReadQuietStreaks.delete(adaptiveKey);
-      return await this.readWithWait(processId, maxChars, waitMs, signal);
-    }
-    const quietStreak = this.adaptiveReadQuietStreaks.get(adaptiveKey) ?? 0;
-    const adaptiveWaitMs = adaptiveReadWaitMs(quietStreak);
-    try {
-      const result = await this.readWithWait(processId, maxChars, adaptiveWaitMs, signal);
-      if (result.running === true && result.no_change === true) {
-        this.adaptiveReadQuietStreaks.set(adaptiveKey, Math.min(quietStreak + 1, ADAPTIVE_READ_WAIT_MS.length - 1));
-      } else {
-        this.adaptiveReadQuietStreaks.delete(adaptiveKey);
-      }
-      return result;
-    } catch (error) {
-      this.adaptiveReadQuietStreaks.delete(adaptiveKey);
-      throw error;
-    }
+    // Omitted wait_ms is intentionally non-blocking. MCP calls are transport operations,
+    // not polling loops: callers that truly need a bounded long-poll must ask for it.
+    return await this.readWithWait(processId, maxChars, waitMs ?? 0, signal);
   }
 
   private async waitForProcessChange(state: ProcessState, waitMs: number, signal?: AbortSignal): Promise<void> {
