@@ -5,11 +5,12 @@ import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { BoundedJsonlWriter } from "./lib/bounded-jsonl.js";
+import { backendRequestTimeoutMs, type FrontDoorMcpCall } from "./lib/front-door-timeout.js";
 
 type BackendTarget = { version: 1; port: number; generation: string };
 type ProcessRoute = { port: number; generation: string; created_at: string };
 type ProcessRouteFile = { version: 1; routes: Record<string, ProcessRoute> };
-type McpCall = { tool?: string; processId?: string };
+type McpCall = FrontDoorMcpCall;
 
 const HOST = process.env.FRONT_DOOR_HOST || "127.0.0.1";
 const PORT = Number(process.env.FRONT_DOOR_PORT || 3003);
@@ -85,7 +86,10 @@ function parseMcpCall(body: Buffer): McpCall {
     const args = request.params.arguments || {};
     let processId = typeof args.process_id === "string" ? args.process_id : undefined;
     if (!processId && typeof args.scope === "string" && args.scope.startsWith("process:")) processId = args.scope.slice("process:".length);
-    return { tool, processId };
+    const waitMs = typeof args.wait_ms === "number" && Number.isFinite(args.wait_ms)
+      ? Math.max(0, Math.min(240_000, Math.trunc(args.wait_ms)))
+      : undefined;
+    return { tool, processId, ...(waitMs !== undefined ? { waitMs } : {}) };
   } catch {
     return {};
   }
@@ -194,7 +198,8 @@ async function proxyRequest(request: IncomingMessage, response: ServerResponse, 
     settled = true;
     activeRequests -= 1;
   };
-  if (requestId) frontDoorLog("front_backend_dispatch", { request_id: requestId, backend_port: target.port, backend_generation: target.generation });
+  const backendTimeoutMs = backendRequestTimeoutMs(call);
+  if (requestId) frontDoorLog("front_backend_dispatch", { request_id: requestId, backend_port: target.port, backend_generation: target.generation, timeout_ms: backendTimeoutMs });
   const upstream = httpRequest({
     host: "127.0.0.1",
     port: target.port,
@@ -240,7 +245,7 @@ async function proxyRequest(request: IncomingMessage, response: ServerResponse, 
   response.once("close", () => {
     if (!response.writableEnded) cancelUpstream("downstream_response_closed");
   });
-  upstream.setTimeout(270_000, () => upstream.destroy(new Error("backend request timeout")));
+  upstream.setTimeout(backendTimeoutMs, () => upstream.destroy(new Error("backend request timeout")));
   upstream.on("error", (error) => {
     if (requestId) frontDoorLog("front_backend_error", { request_id: requestId, backend_port: target.port, error: error.message });
     if (!response.destroyed && !response.headersSent) {
@@ -324,8 +329,8 @@ server.listen(PORT, HOST, () => {
   console.error(`shell-mcp front door listening on http://${HOST}:${PORT}; backend=127.0.0.1:${target.port} generation=${target.generation}`);
 });
 server.keepAliveTimeout = 0;
-server.headersTimeout = 275_000;
-server.requestTimeout = 270_000;
+server.headersTimeout = 40_000;
+server.requestTimeout = 35_000;
 server.timeout = 0;
 const stop = () => {
   server.close(() => {
