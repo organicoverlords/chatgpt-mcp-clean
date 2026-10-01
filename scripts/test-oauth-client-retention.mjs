@@ -116,17 +116,15 @@ try {
 
   const retried = await reloaded.exchangeRefreshToken(persistedClient, tokens.refresh_token, ["mcp", "offline_access"], resourceUrl);
   assert.ok(retried.access_token);
-  assert.notEqual(retried.refresh_token, tokens.refresh_token);
-  assert.notEqual(retried.refresh_token, refreshed.refresh_token);
-  await assert.rejects(
-    reloaded.exchangeRefreshToken(persistedClient, tokens.refresh_token, ["mcp", "offline_access"], resourceUrl),
-    /Refresh token replay detected/,
-  );
+  assert.equal(retried.refresh_token, refreshed.refresh_token, "retry must return the same successor");
+  for (let index = 0; index < 30; index += 1) {
+    const concurrent = await reloaded.exchangeRefreshToken(persistedClient, tokens.refresh_token, ["mcp", "offline_access"], resourceUrl);
+    assert.equal(concurrent.refresh_token, refreshed.refresh_token, "parallel refresh must not invalidate a successful successor");
+  }
   const afterReplay = new LocalOAuthProvider(resourceUrl, "owner@example.com", storePath);
-  await assert.rejects(
-    afterReplay.exchangeRefreshToken(persistedClient, retried.refresh_token, ["mcp", "offline_access"], resourceUrl),
-    /Invalid refresh token/,
-  );
+  await assert.rejects(afterReplay.exchangeRefreshToken(persistedClient, tokens.refresh_token, ["mcp", "offline_access"], resourceUrl), /Refresh retry unavailable after restart/);
+  const stillValid = await afterReplay.exchangeRefreshToken(persistedClient, refreshed.refresh_token, ["mcp", "offline_access"], resourceUrl);
+  assert.ok(stillValid.refresh_token, "restart retry must not revoke the first successor");
 
   const agedTokens = await issueTokens(afterReplay, persistedClient);
   const agedSuccessor = await afterReplay.exchangeRefreshToken(persistedClient, agedTokens.refresh_token, undefined, resourceUrl);
@@ -136,10 +134,8 @@ try {
     agedReplay.exchangeRefreshToken(persistedClient, agedTokens.refresh_token, undefined, resourceUrl),
     /Refresh token replay detected/,
   );
-  await assert.rejects(
-    new LocalOAuthProvider(resourceUrl, "owner@example.com", storePath).exchangeRefreshToken(persistedClient, agedSuccessor.refresh_token, undefined, resourceUrl),
-    /Invalid refresh token/,
-  );
+  await assert.rejects(new LocalOAuthProvider(resourceUrl, "owner@example.com", storePath)
+    .exchangeRefreshToken(persistedClient, agedSuccessor.refresh_token, undefined, resourceUrl), /Invalid refresh token/);
 
   const expiringTokens = await issueTokens(new LocalOAuthProvider(resourceUrl, "owner@example.com", storePath), persistedClient);
   await mutateRefreshRecord(expiringTokens.refresh_token, (record) => { record.expiresAt = Date.now() - 1; });
@@ -193,7 +189,7 @@ try {
   const recoveredAgain = new LocalOAuthProvider(resourceUrl, "owner@example.com", storePath);
   assert.deepEqual((await recoveredAgain.clientsStore.getClient(staleClientId))?.redirect_uris, [redirectUri]);
 
-  console.log("PASS oauth_client_retention restart_mid_authorization=true churn=96 public_refresh_rotation=true retry_grace_bounded=true replay_revokes_family=true expiry_enforced=true scope_resource_client_bound=true confidential_refresh_compatible=true orphan_refresh_recovered=true stale_chatgpt_authorize_recovered=true secrets=not_printed");
+  console.log("PASS oauth_client_retention restart_mid_authorization=true churn=96 public_refresh_rotation=true concurrent_retry_idempotent=true restart_retry_preserves_successor=true aged_replay_revokes_family=true expiry_enforced=true scope_resource_client_bound=true confidential_refresh_compatible=true orphan_refresh_recovered=true stale_chatgpt_authorize_recovered=true secrets=not_printed");
 } finally {
   await rm(tempDir, { recursive: true, force: true });
 }
