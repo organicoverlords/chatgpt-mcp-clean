@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, watch, writeFileSync, type FSWatcher } from "node:fs";
-import { mkdir as mkdirAsync, readFile as readFileAsync, readdir as readdirAsync, rename as renameAsync, stat as statAsync, unlink as unlinkAsync, writeFile as writeFileAsync } from "node:fs/promises";
+import { mkdir as mkdirAsync, opendir as opendirAsync, readFile as readFileAsync, readdir as readdirAsync, rename as renameAsync, rm as rmAsync, stat as statAsync, unlink as unlinkAsync, writeFile as writeFileAsync } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { Worker } from "node:worker_threads";
@@ -1851,6 +1851,8 @@ export class ProcessManager {
   private lastReceiptArchivePruneAt = 0;
   private lastRetrievalStopPruneAt = 0;
   private lastControlPruneAt = 0;
+  private outputSpoolPruneInFlight = false;
+  private receiptPruneInFlight = false;
 
   constructor(options: ProcessManagerOptions = {}) {
     this.maxLivePerCaller = options.maxLivePerCaller ?? DEFAULT_MAX_LIVE_PER_CALLER;
@@ -2382,20 +2384,27 @@ export class ProcessManager {
   }
 
   private pruneOutputSpools(now = Date.now()): void {
-    let entries;
+    if (this.outputSpoolPruneInFlight) return;
+    this.outputSpoolPruneInFlight = true;
+    void this.pruneOutputSpoolsAsync(now).finally(() => {
+      this.outputSpoolPruneInFlight = false;
+    });
+  }
+
+  private async pruneOutputSpoolsAsync(now: number): Promise<void> {
     try {
-      entries = readdirSync(this.outputSpoolDirectory, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (!entry.isFile() || !/^[0-9a-f-]{36}\.(?:stdout|stderr)\.utf16le$/i.test(entry.name)) continue;
-      const path = join(this.outputSpoolDirectory, entry.name);
-      try {
-        if (now - statSync(path).mtimeMs > RECEIPT_ARCHIVE_RETENTION_MS) unlinkSync(path);
-      } catch {
-        // best-effort retention cleanup
+      const directory = await opendirAsync(this.outputSpoolDirectory);
+      for await (const entry of directory) {
+        if (!entry.isFile() || !/^[0-9a-f-]{36}\.(?:stdout|stderr)\.utf16le$/i.test(entry.name)) continue;
+        const path = join(this.outputSpoolDirectory, entry.name);
+        try {
+          if (now - (await statAsync(path)).mtimeMs > RECEIPT_ARCHIVE_RETENTION_MS) await unlinkAsync(path);
+        } catch {
+          // best-effort retention cleanup
+        }
       }
+    } catch {
+      // Retention cleanup must never block process-manager construction or reads.
     }
   }
 
@@ -2457,55 +2466,60 @@ export class ProcessManager {
     } finally { try { await unlinkAsync(temporaryPath); } catch {} }
   }
 
-  private pruneReceiptArchive(now = Date.now()): void {
+  private async pruneReceiptArchiveAsync(now: number): Promise<void> {
     if (!this.receiptArchiveDirectory) return;
     if (now - this.lastReceiptArchivePruneAt < RECEIPT_ARCHIVE_PRUNE_INTERVAL_MS) return;
     this.lastReceiptArchivePruneAt = now;
     const cutoff = now - RECEIPT_ARCHIVE_RETENTION_MS;
     let entries;
     try {
-      entries = readdirSync(this.receiptArchiveDirectory, { withFileTypes: true });
+      entries = await readdirAsync(this.receiptArchiveDirectory, { withFileTypes: true });
     } catch {
       return;
     }
     for (const entry of entries) {
       if (!entry.isDirectory() || !/^\d{4}-\d{2}-\d{2}$/.test(entry.name)) continue;
-      const endOfDay = Date.parse(`${entry.name}T23:59:59.999Z`);
+      const endOfDay = Date.parse(entry.name + "T23:59:59.999Z");
       if (!Number.isFinite(endOfDay) || endOfDay >= cutoff) continue;
-      try { rmSync(join(this.receiptArchiveDirectory, entry.name), { recursive: true, force: true }); } catch { /* best-effort retention cleanup */ }
+      try { await rmAsync(join(this.receiptArchiveDirectory, entry.name), { recursive: true, force: true }); } catch { /* best-effort retention cleanup */ }
     }
   }
 
   private pruneReceipts(): void {
     if (!this.receiptDirectory) return;
     const now = Date.now();
-    if (now - this.lastReceiptPruneAt < RECEIPT_PRUNE_INTERVAL_MS) return;
+    if (now - this.lastReceiptPruneAt < RECEIPT_PRUNE_INTERVAL_MS || this.receiptPruneInFlight) return;
     this.lastReceiptPruneAt = now;
+    this.receiptPruneInFlight = true;
+    void this.pruneReceiptsAsync(now).finally(() => {
+      this.receiptPruneInFlight = false;
+    });
+  }
+
+  private async pruneReceiptsAsync(now: number): Promise<void> {
+    if (!this.receiptDirectory) return;
     let entries;
     try {
-      entries = readdirSync(this.receiptDirectory, { withFileTypes: true });
+      entries = await readdirAsync(this.receiptDirectory, { withFileTypes: true });
     } catch {
       return;
     }
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(".json") || !PROCESS_ID_PATTERN.test(entry.name.slice(0, -5))) continue;
       const path = join(this.receiptDirectory, entry.name);
-      let modifiedAt = now;
-      let archived = false;
       try {
-        modifiedAt = statSync(path).mtimeMs;
-        const receipt = JSON.parse(readFileSync(path, "utf8")) as CompletedProcessReceipt;
-        this.persistArchivedReceipt(receipt);
-        archived = true;
+        const modifiedAt = (await statAsync(path)).mtimeMs;
+        const receipt = JSON.parse(await readFileAsync(path, "utf8")) as CompletedProcessReceipt;
+        await this.persistArchivedReceiptAsync(receipt);
+        if (now - modifiedAt > COMPLETED_RETENTION_MS) {
+          try { await unlinkAsync(path); } catch { /* another clone may already have pruned it */ }
+        }
       } catch {
         // Preserve unreadable or unarchived evidence instead of deleting it.
       }
-      if (archived && now - modifiedAt > COMPLETED_RETENTION_MS) {
-        try { unlinkSync(path); } catch { /* another clone may already have pruned it */ }
-      }
     }
     this.pruneOutputSpools(now);
-    this.pruneReceiptArchive(now);
+    await this.pruneReceiptArchiveAsync(now);
   }
 
   private receiptReadPaths(processId: string): string[] {
