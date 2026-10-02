@@ -87,7 +87,7 @@ async function assertStructuredProcessResult(name, args) {
   const result = await tool.handler(args, {});
   assert.ok(result.structuredContent, `${name} must return structuredContent`);
   assert.deepEqual(result.structuredContent.serving_identity, {
-    tool_contract_version: "process-tools.v5",
+    tool_contract_version: "process-tools.v6",
     backend_generation: "backend-contract-test",
     source_commit: contractSourceCommit,
   }, `${name} must expose exact serving backend/source/contract identity`);
