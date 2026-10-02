@@ -6,7 +6,6 @@ import { isBootstrapSnapshot, readBootstrapSnapshot } from "./lib/bootstrap-snap
 import { z } from "zod";
 import { BusyStore } from "./lib/busy-store.js";
 import { ProcessManager } from "./lib/process-manager.js";
-import { inspectLocalImage } from "./lib/image-inspection.js";
 
 // The deployed ChatGPT connector surface is the process profile. Keep the broader
 // full profile explicit-only for internal/local tests so repo inspection without a
@@ -104,30 +103,6 @@ async function callRemoteOmenTool(name: "start_process" | "read_output" | "kill_
   }
 }
 
-async function callRemoteOmenImageTool(args: Record<string, unknown>, callerId: string, signal?: AbortSignal): Promise<any[]> {
-  const entry = remoteOmenClient(callerId);
-  let transportFailed = false;
-  try {
-    const client = await entry.promise;
-    const reply = await client.callTool(
-      { name: "inspect_image", arguments: args },
-      undefined,
-      { signal, timeout: 20_000, maxTotalTimeout: 20_000 },
-    ).catch((error) => { transportFailed = true; throw error; });
-    if (reply.isError) throw remoteOmenToolError("inspect_image", reply);
-    if (!Array.isArray(reply.content)) throw new Error("omen_mcp_invalid_content_result:inspect_image");
-    return reply.content as any[];
-  } catch (error) {
-    if (transportFailed && omenMcpClients.get(callerId) === entry) {
-      omenMcpClients.delete(callerId);
-      void entry.promise.then((client) => client.close()).catch(() => undefined);
-    }
-    throw error;
-  } finally {
-    entry.active -= 1;
-    entry.lastUsedAt = Date.now();
-  }
-}
 function remoteProcessId(processId: string): string { return `${OMEN_MCP_PROCESS_PREFIX}${processId}`; }
 function localRemoteProcessId(processId: string): string | undefined { return processId.startsWith(OMEN_MCP_PROCESS_PREFIX) ? processId.slice(OMEN_MCP_PROCESS_PREFIX.length) : undefined; }
 function remoteProcessResult(value: Record<string, unknown>): Record<string, unknown> {
@@ -352,13 +327,7 @@ function textResult(value: unknown, id: string) {
 
 async function structuredTextResult(value: unknown, id: string, servingIdentity: Record<string, unknown>) {
   const data = resultData(value, id, servingIdentity);
-  return {
-    // Process tools never attach files/resources to ChatGPT. Artifact delivery belongs to
-    // an explicit delivery owner; visual inspection uses inspect_image below. This keeps
-    // process execution free of file-materialization permission prompts.
-    content: [],
-    structuredContent: data,
-  };
+  return { content: [], structuredContent: data };
 }
 
 export function processRuntimeStatus(): { live_process_count: number } {
@@ -379,34 +348,6 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
   const server = new McpServer({ name: "shell-mcp", version: "0.1.0" });
 
 
-  server.registerTool(
-    "inspect_image",
-    {
-      description: "Inspect one local image from KONE or OMEN directly in model vision without file materialization.",
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-      inputSchema: z.object({
-        path: z.string().min(1),
-        execution_target: z.enum(["local", "omen"]).optional(),
-      }).strict(),
-    },
-    async ({ path, execution_target }, extra) => {
-      const target = execution_target ?? defaultExecutionTarget;
-      if (target === "omen" && !nativeOmenHost) {
-        if (!omenMcpUrl) throw new Error("omen_mcp_unavailable: native OMEN MCP is required for inspect_image");
-        return { content: await callRemoteOmenImageTool({ path, execution_target: "omen" }, callerId, extra.signal) };
-      }
-      if (target === "omen" && process.platform === "win32") {
-        throw new Error("native_omen_host_misconfigured: MCP_NATIVE_OMEN_HOST requires a non-Windows host");
-      }
-      const inspected = await inspectLocalImage(path);
-      return {
-        content: [
-          { type: "text" as const, text: JSON.stringify({ caller_id: callerId, execution_target: target, bytes: inspected.bytes, mime_type: inspected.mimeType }) },
-          { type: "image" as const, data: inspected.data, mimeType: inspected.mimeType },
-        ],
-      };
-    },
-  );
   server.registerTool(
     "start_process",
     {
