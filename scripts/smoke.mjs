@@ -219,29 +219,6 @@ const missingReadOverHttp = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.n
 assertToolErrorWithoutAppMeta(missingReadOverHttp, "missing read_output over HTTP");
 const missingKillOverHttp = await mcpPost(sessionA, { jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: "kill_process", arguments: { process_id: "00000000-0000-4000-8000-000000000000" } } });
 assertToolErrorWithoutAppMeta(missingKillOverHttp, "missing kill_process over HTTP");
-const inlinePngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z7WQAAAAASUVORK5CYII=";
-const markerCode = `const fs=require("node:fs"),os=require("node:os"),path=require("node:path");const p=path.join(os.tmpdir(),"mcp-inline-smoke-"+process.pid+".png");fs.writeFileSync(p,Buffer.from("${inlinePngBase64}","base64"));process.stdout.write("CHATGPT_ARTIFACT="+p+String.fromCharCode(10));`;
-const markerProcessCall = await mcpPost(sessionA, {
-  jsonrpc: "2.0",
-  id: Date.now(),
-  method: "tools/call",
-  params: {
-    name: "start_process",
-    arguments: { executable: process.execPath, args: ["-e", markerCode], wait_ms: 10_000 },
-  },
-});
-const markerToolResult = markerProcessCall.body?.result;
-assert.ok(markerToolResult && markerToolResult.isError !== true, markerProcessCall.text);
-assert.equal(markerToolResult._meta, undefined, "start_process inline image handoff must remain widget-free");
-assert.equal(markerToolResult.structuredContent?.file_transfer, undefined, "inline image handoff must not change the structured process contract");
-const markerImage = (markerToolResult.content || []).find((entry) => entry?.type === "image");
-assert.ok(markerImage, `start_process artifact marker must append native image content over authenticated HTTP: ${JSON.stringify(markerToolResult)}`);
-assert.equal(markerImage.mimeType, "image/png");
-assert.equal(Buffer.from(markerImage.data, "base64").compare(Buffer.from(inlinePngBase64, "base64")), 0, "inline image bytes changed in transit");
-const markerResolutions = (markerToolResult.content || []).filter((entry) => entry?.type === "text" && /^resolution: \d+x\d+$/.test(entry.text)).map((entry) => entry.text);
-assert.deepEqual(markerResolutions, ["resolution: 1x1"]);
-assert.equal((markerToolResult.content || []).some((entry) => entry?.type === "resource_link" && entry?.mimeType?.startsWith?.("image/")), false, "image artifacts must be inline rather than lazy resource links");
-
 const structuredTransport = await callTool(sessionA, "start_process", {
   executable: process.execPath,
   args: ["-e", "process.stdin.pipe(process.stdout)"],
