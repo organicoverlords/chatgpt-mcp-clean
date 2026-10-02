@@ -147,7 +147,7 @@ const processEnvironmentSchema = z.record(
 const startProcessCommonShape = {
   working_directory: z.string().describe("Working directory on the selected execution target.").optional(),
   execution_target: z.enum(["local", "omen"]).describe("Execution target; local by default, or OMEN. On a native OMEN MCP host, OMEN executes locally without SSH.").optional(),
-  wait_ms: z.number().int().min(0).max(240_000).describe("Optional initial-read wait. Omit to use the 750 ms owner default; 0 returns the launch receipt immediately; positive values request a longer initial wait, with execution clamped to 10 s.").optional(),
+  wait_ms: z.number().int().min(0).max(240_000).describe("Optional initial-read wait. Omit to use the 750 ms owner default; 0 returns the launch receipt immediately; positive values are honored up to 240 s and return early when the process exits.").optional(),
   activity_target: activityTargetSchema.optional(),
   action_class: actionClassSchema.optional(),
 };

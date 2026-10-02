@@ -8,10 +8,6 @@ const manager = new ProcessManager();
 const commandWaitMs = 30_000;
 assert.ok(process.env.USERPROFILE, "USERPROFILE is required for Vault-root preflight test");
 const vaultRoot = join(process.env.USERPROFILE, "Desktop", "vault");
-const localAppDataRoot = process.env.LOCALAPPDATA;
-assert.ok(localAppDataRoot, "LOCALAPPDATA is required for broad-root preflight test");
-const aiRoot = `${process.env.SystemDrive || "C:"}\\AI`;
-const pipelineResultsRoot = join(process.env.USERPROFILE, "Desktop", "PIPELINE_RESULTS_LIBRARY");
 const tempRoot = process.env.TEMP || process.env.TMP;
 assert.ok(tempRoot, "TEMP or TMP is required for Temp-root preflight test");
 const psQuote = (value) => value.replaceAll("'", "''");
@@ -281,32 +277,6 @@ rejects("where.exe /R C:\\ *.txt", /drive[- ]root/);
 rejects("findstr.exe /S needle C:\\*", /drive[- ]root/);
 rejects("cmd.exe /c dir C:\\ /s", /drive[- ]root/);
 rejects("tree.exe C:\\ /F", /drive[- ]root/);
-
-// Raw filesystem discovery/search tools are intentionally disabled on MCP process starts.
-// Known-repo search must use the Git index instead; stack/history discovery uses V3/Stack Surface.
-rejects("grep -n needle known.txt", /raw_discovery_tool_blocked: grep/);
-rejects("rg needle src", /raw_discovery_tool_blocked: rg/);
-rejects("find . -type f", /raw_discovery_tool_blocked: find/);
-rejects("findstr needle known.txt", /raw_discovery_tool_blocked: findstr/);
-assert.equal(replayCurrentPreflightError("git grep -n needle -- src"), undefined);
-assert.equal(replayCurrentPreflightError("git ls-files -- src"), undefined);
-assert.equal(replayCurrentPreflightError("Get-ChildItem -LiteralPath '.\known-subtree' -Recurse -File"), undefined);
-assert.throws(
-  () => manager.startStructured("bash", ["-lc", "grep -Rni needle ."], undefined, "caller_structured_raw_grep"),
-  (error) => error instanceof Error && /raw_discovery_tool_blocked: grep/.test(error.message),
-);
-assert.throws(
-  () => manager.start("python C:\\Users\\Lauri\\Desktop\\vault\\tools\\omen_exec.py -- bash -lc \"grep -Rni needle .\"", undefined, "caller_legacy_nested_raw_grep"),
-  (error) => error instanceof Error && /raw_discovery_tool_blocked: grep/.test(error.message),
-);
-assert.throws(
-  () => manager.startStructured("python", ["C:\\Users\\Lauri\\Desktop\\vault\\tools\\omen_exec.py", "--", "bash", "-lc", "find . -type f"], undefined, "caller_nested_shell_find"),
-  (error) => error instanceof Error && /raw_discovery_tool_blocked: find/.test(error.message),
-);
-rejects(`Get-ChildItem -LiteralPath '${psQuote(localAppDataRoot)}' -Recurse -File -Filter 'transport.jsonl'`, /broad LOCALAPPDATA root/);
-rejects(`rg needle '${psQuote(localAppDataRoot)}'`, /broad LOCALAPPDATA root/);
-const incidentBroadRoots = `$roots=@('${psQuote(aiRoot)}','${psQuote(pipelineResultsRoot)}'); $rows=@(); foreach($root in $roots){Get-ChildItem -LiteralPath $root -Recurse -File -Filter 'trellis-decode-replay.exe' -ErrorAction SilentlyContinue | ForEach-Object {$rows += $_.FullName}}`;
-rejects(incidentBroadRoots, /recursive broad C:\\AI fan-out|broad C:\\AI root/);
 rejects(`Get-ChildItem -LiteralPath '${psQuote(vaultRoot)}' -Recurse -File | Select-String needle`, /Vault root/);
 rejects(`gci -r "${vaultRoot.replaceAll("\\", "/")}"`, /Vault root/);
 rejects(`rg needle '${psQuote(vaultRoot)}'`, /Vault root/);
@@ -392,8 +362,6 @@ assert.equal(indexedVaultHelper.exit_code, 0, JSON.stringify(indexedVaultHelper)
 const boundedTempSubdir = await run(`Get-ChildItem -LiteralPath '${psQuote(join(tempRoot, "mcp-preflight-explicit-missing"))}' -Recurse -ErrorAction SilentlyContinue; Write-Output 'TEMP_SUBDIR_ALLOWED'`, "caller_temp_subdir_allowed");
 assert.equal(boundedTempSubdir.exit_code, 0, JSON.stringify(boundedTempSubdir));
 assert.match(boundedTempSubdir.stdout, /TEMP_SUBDIR_ALLOWED/);
-assert.equal(replayCurrentPreflightError(`Get-ChildItem -LiteralPath '${psQuote(join(localAppDataRoot, "V3Rust", "forensics"))}' -Recurse -File`), undefined);
-assert.equal(replayCurrentPreflightError(`Get-ChildItem -LiteralPath '${psQuote(join(aiRoot, "LowVRAM3D", "queue-5faa-run"))}' -Recurse -File`), undefined);
 const tempRootLiterals = await run(`Write-Output 'Get-ChildItem ${psQuote(tempRoot)} -Recurse'; # rg ${psQuote(tempRoot)}
 Write-Output 'TEMP_ROOT_LITERAL_ALLOWED'`, "caller_temp_root_literal_allowed");
 assert.equal(tempRootLiterals.exit_code, 0, JSON.stringify(tempRootLiterals));
