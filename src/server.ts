@@ -6,7 +6,6 @@ import { isBootstrapSnapshot, readBootstrapSnapshot } from "./lib/bootstrap-snap
 import { z } from "zod";
 import { BusyStore } from "./lib/busy-store.js";
 import { ProcessManager } from "./lib/process-manager.js";
-import { prepareMarkedArtifactHandoffs, registerArtifactFileResource } from "./lib/file-transfer.js";
 
 // The deployed ChatGPT connector surface is the process profile. Keep the broader
 // full profile explicit-only for internal/local tests so repo inspection without a
@@ -328,15 +327,7 @@ function textResult(value: unknown, id: string) {
 
 async function structuredTextResult(value: unknown, id: string, servingIdentity: Record<string, unknown>) {
   const data = resultData(value, id, servingIdentity);
-  const handoffs = await prepareMarkedArtifactHandoffs(value);
-  return {
-    // structuredContent is the canonical model-visible process result. Do not mirror the
-    // same JSON into text content: ChatGPT may treat that duplicate channel as a second
-    // result/resource path, which adds avoidable tool-card churn. Native artifact blocks
-    // still ride CallToolResult content because they are not representable in the schema.
-    content: handoffs.flatMap((handoff) => handoff.content || []),
-    structuredContent: data,
-  };
+  return { content: [], structuredContent: data };
 }
 
 export function processRuntimeStatus(): { live_process_count: number } {
@@ -355,7 +346,6 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
     ...(runtimeIdentity.source_commit ? { source_commit: runtimeIdentity.source_commit } : {}),
   };
   const server = new McpServer({ name: "shell-mcp", version: "0.1.0" });
-  registerArtifactFileResource(server, callerId);
 
 
   server.registerTool(
