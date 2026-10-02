@@ -13,7 +13,7 @@ param(
     [string]$OmenExecPath = (Join-Path $env:USERPROFILE 'Desktop\vault\tools\omen_exec.py'),
     [string]$OmenMcpUrl = '',
     [string]$OwnerLoginSourcePath = '',
-    [string]$CurrentTopologyPath = (Join-Path $env:USERPROFILE 'Desktop\vault\04 Operating Contracts\mcp-current-topology.json'),
+    [string]$CurrentTopologyPath = (Join-Path $env:LOCALAPPDATA 'ChatGPTMcpRust\admin\mcp-restorer\state\mcp-current-topology.json'),
     [switch]$ExplicitUserAuthorization,
     [switch]$Plan
 )
