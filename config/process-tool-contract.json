@@ -31,7 +31,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v5"
+              "const": "process-tools.v6"
             },
             "backend_generation": {
               "type": "string",
@@ -52,7 +52,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v5"
+              "const": "process-tools.v6"
             },
             "backend_generation": {
               "type": "string",
@@ -194,7 +194,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v5"
+              "const": "process-tools.v6"
             },
             "backend_generation": {
               "type": "string",
@@ -215,7 +215,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v5"
+              "const": "process-tools.v6"
             },
             "backend_generation": {
               "type": "string",
@@ -868,7 +868,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v5"
+              "const": "process-tools.v6"
             },
             "backend_generation": {
               "type": "string",
@@ -889,7 +889,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v5"
+              "const": "process-tools.v6"
             },
             "backend_generation": {
               "type": "string",
