@@ -141,7 +141,7 @@ $completionGate = @(
     'reconcile current topology, recovery metadata, Atlas/Vault and current install/restore/update documentation'
 )
 $actions = @(
-    "install MCP runtime on loopback 127.0.0.1:$Port with exactly four connector tools",
+    "install MCP runtime on loopback 127.0.0.1:$Port with exactly three connector tools",
     "install local Caddy $($caddySpec.version) on TCP $CaddyHttpsPort for $($origin.Host)",
     'use local-edge owner authorization; no VPS, WireGuard, or Tailscale owner-auth path',
     "install standalone BusyCoordinator into $BusyRoot",
@@ -153,7 +153,7 @@ $actions = @(
     $(if ($NoStart -or $NoAutostart) { 'do not start MCP/Caddy now' } else { 'start MCP and local Caddy now' })
 )
 if ($Plan) {
-    [ordered]@{ ok=$true; plan_only=$true; topology='local-home-direct'; tool_count=3; media_delivery='process-result inline images plus ordinary artifact resources'; source_commit=$sourceCommit; actions=$actions; completion_gate=$completionGate; reconciliation_required=$true; no_mutation=$true } | ConvertTo-Json -Depth 4
+    [ordered]@{ ok=$true; plan_only=$true; topology='local-home-direct'; tool_count=3; media_delivery='none'; source_commit=$sourceCommit; actions=$actions; completion_gate=$completionGate; reconciliation_required=$true; no_mutation=$true } | ConvertTo-Json -Depth 4
     exit 0
 }
 
@@ -264,7 +264,7 @@ $config = [ordered]@{
     owner_login = $OwnerLogin
     tool_profile = 'process'
     tool_count = 3
-    media_delivery = 'process-result inline images plus ordinary artifact resources'
+    media_delivery = 'none'
     caddy_exe = $caddyExe
     caddy_config = $caddyFile
     caddy_https_port = $CaddyHttpsPort
@@ -305,7 +305,7 @@ $doctor = Join-Path $InstallRoot 'mcp\scripts\stack-doctor.ps1'
 if ($LASTEXITCODE -ne 0) { throw 'stack doctor reported an installation failure' }
 [ordered]@{
     ok=$true; topology='local-home-direct'; tool_count=3; tools=@('start_process','read_output','kill_process')
-    media_delivery='process-result inline images plus ordinary artifact resources'; source_commit=$sourceCommit; install_root=$InstallRoot
+    media_delivery='none'; source_commit=$sourceCommit; install_root=$InstallRoot
     config_path=$configPath; mcp_url=$mcpUrl; local_health=("http://127.0.0.1:{0}/health" -f $Port); local_https_port=$CaddyHttpsPort
     busy_command=(Join-Path $BusyRoot 'busy-python.cmd'); rules_root=$RulesRoot; plan_only_profile=$planProfile
     agent_entrypoints=[bool]$WithAgentEntrypoints; autostart=(-not $NoAutostart)
