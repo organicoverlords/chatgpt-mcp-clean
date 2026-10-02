@@ -163,7 +163,8 @@
         "wait_ms": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 240000
+          "maximum": 240000,
+          "description": "Optional output wait. Omit to use adaptive 2/5/10/30/60 s long-polling; 0 reads immediately; a positive value requests that bounded wait and wakes on output or process exit."
         },
         "conversation_id": {
           "type": "string",
@@ -812,7 +813,8 @@
         "wait_ms": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 240000
+          "maximum": 240000,
+          "description": "Optional initial-read wait. Omit to use the 750 ms owner default; 0 returns the launch receipt immediately; positive values request a longer initial wait, with execution clamped to 10 s."
         },
         "activity_target": {
           "type": "object",

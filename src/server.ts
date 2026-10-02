@@ -147,7 +147,7 @@ const processEnvironmentSchema = z.record(
 const startProcessCommonShape = {
   working_directory: z.string().describe("Working directory on the selected execution target.").optional(),
   execution_target: z.enum(["local", "omen"]).describe("Execution target; local by default, or OMEN. On a native OMEN MCP host, OMEN executes locally without SSH.").optional(),
-  wait_ms: z.number().int().min(0).max(240_000).optional(),
+  wait_ms: z.number().int().min(0).max(240_000).describe("Optional initial-read wait. Omit to use the 750 ms owner default; 0 returns the launch receipt immediately; positive values request a longer initial wait, with execution clamped to 10 s.").optional(),
   activity_target: activityTargetSchema.optional(),
   action_class: actionClassSchema.optional(),
 };
@@ -449,7 +449,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       inputSchema: z.object({
         process_id: z.string().min(1),
         max_chars: z.number().int().optional(),
-        wait_ms: z.number().int().min(0).max(240_000).optional(),
+        wait_ms: z.number().int().min(0).max(240_000).describe("Optional output wait. Omit to use adaptive 2/5/10/30/60 s long-polling; 0 reads immediately; a positive value requests that bounded wait and wakes on output or process exit.").optional(),
         conversation_id: z.string().min(1).optional(),
         expected_room_head: z.string().min(1).optional(),
       }).strict().superRefine((value, ctx) => {
