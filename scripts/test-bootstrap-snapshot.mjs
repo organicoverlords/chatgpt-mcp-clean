@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { writeFile, rename } from "node:fs/promises";
@@ -72,6 +72,24 @@ function writeBootstrap(overrides = {}) {
   }));
 }
 
+function callerBootstrapPath(callerId) {
+  const hash = createHash("sha256")
+    .update("v3-rust.bootstrap-caller.v1\0", "utf8")
+    .update(callerId.trim(), "utf8")
+    .digest("hex");
+  return join(root, "callers", hash + ".json");
+}
+
+function writeCallerBootstrap(callerId, overrides = {}) {
+  const path = callerBootstrapPath(callerId);
+  const directory = join(root, "callers");
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(path, JSON.stringify({
+    schema: "bootstrap.v1", generated_at: new Date().toISOString(), nonce: randomUUID(),
+    bootstrap_end: { status: "COMPLETE", schema: "bootstrap.v1" }, ...overrides,
+  }));
+}
+
 function writeBootstrapEnvelope(overrides = {}) {
   writeFileSync(process.env.MCP_BOOTSTRAP_SNAPSHOT_PATH, JSON.stringify({
     schema: "bootstrap.v1", generated_at: new Date().toISOString(),
@@ -110,6 +128,13 @@ try {
   assert.equal(envelopePayload.orientation.conversation.conversation_context.messages[0].text, "message-first-envelope");
   writeBootstrapEnvelope({ bootstrap_end: { status: "COMPLETE", schema: "bootstrap.v1" } });
   await assert.rejects(readBootstrapSnapshot(100_000, "bootstrap", "ambiguous-envelope-caller"), /ambiguous bootstrap envelope/);
+  writeBootstrap({ marker: "global-fallback" });
+  writeCallerBootstrap("caller-scoped", { marker: "caller-scoped" });
+  const callerScoped = await readBootstrapSnapshot(100_000, "bootstrap", "caller-scoped");
+  assert.equal(JSON.parse(callerScoped.stdout).marker, "caller-scoped");
+  const callerFallback = await readBootstrapSnapshot(100_000, "bootstrap", "caller-without-snapshot");
+  assert.equal(JSON.parse(callerFallback.stdout).marker, "global-fallback");
+
   writeBootstrap();
   const tinyPage = await readBootstrapSnapshot(1, "bootstrap", "tiny-page-caller");
   assert.equal(tinyPage.next_action, "READ_SAME_PROCESS_ID");
