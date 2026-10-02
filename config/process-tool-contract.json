@@ -146,7 +146,7 @@
   },
   {
     "name": "read_output",
-    "description": "Read bounded stdout/stderr from an existing process or supported snapshot alias.",
+    "description": "Read bounded process output or fixed read-only aliases: bootstrap, rules, agents, contracts, routes, timeline, checkup.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -728,6 +728,26 @@
         "bootstrap_alias": {
           "type": "boolean",
           "const": true
+        },
+        "shared_policy_alias": {
+          "type": "boolean",
+          "const": true
+        },
+        "read_mode": {
+          "type": "string",
+          "const": "FIXED_SHARED_POLICY_FILE"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "BOOTSTRAP_RULES.md",
+              "AGENTS.md",
+              "CONTRACTS.json",
+              "ROUTES.json"
+            ]
+          }
         }
       },
       "required": [
@@ -1403,6 +1423,26 @@
         "bootstrap_alias": {
           "type": "boolean",
           "const": true
+        },
+        "shared_policy_alias": {
+          "type": "boolean",
+          "const": true
+        },
+        "read_mode": {
+          "type": "string",
+          "const": "FIXED_SHARED_POLICY_FILE"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "BOOTSTRAP_RULES.md",
+              "AGENTS.md",
+              "CONTRACTS.json",
+              "ROUTES.json"
+            ]
+          }
         }
       },
       "required": [

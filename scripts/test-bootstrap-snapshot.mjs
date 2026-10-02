@@ -23,6 +23,14 @@ const root = mkdtempSync(join(tmpdir(), "mcp-bootstrap-snapshot-"));
 process.env.MCP_BOOTSTRAP_SNAPSHOT_PATH = join(root, "bootstrap.json");
 process.env.MCP_TIMELINE_SNAPSHOT_PATH = join(root, "timeline.json");
 process.env.MCP_PROCESS_RECEIPT_DIR = join(root, "receipts");
+process.env.MCP_SHARED_RULES_PATH = join(root, "BOOTSTRAP_RULES.md");
+process.env.MCP_SHARED_AGENTS_PATH = join(root, "AGENTS.md");
+process.env.MCP_SHARED_CONTRACTS_PATH = join(root, "CONTRACTS.json");
+process.env.MCP_SHARED_ROUTES_PATH = join(root, "ROUTES.json");
+writeFileSync(process.env.MCP_SHARED_RULES_PATH, "RULES_BEGIN\n" + "r".repeat(35_000) + "\nRULES_END\n");
+writeFileSync(process.env.MCP_SHARED_AGENTS_PATH, "# Agents\nagent-contract\n");
+writeFileSync(process.env.MCP_SHARED_CONTRACTS_PATH, '{"contracts":["owner"]}\n');
+writeFileSync(process.env.MCP_SHARED_ROUTES_PATH, '{"routes":["bootstrap"]}\n');
 process.env.MCP_V3_BOOTSTRAP_EXECUTABLE = process.execPath;
 process.env.MCP_V3_BOOTSTRAP_CWD = root;
 writeFileSync(join(root, "bootstrap"), [
@@ -75,8 +83,24 @@ function writeBootstrapEnvelope(overrides = {}) {
   }));
 }
 try {
-  for (const id of ["bootstrap", "231b7e74-4cc8-43d0-9702-fd6dfa2215b3", "timeline", "checkup"]) assert.equal(isBootstrapSnapshot(id), true);
+  for (const id of ["bootstrap", "231b7e74-4cc8-43d0-9702-fd6dfa2215b3", "timeline", "checkup", "rules", "agents", "contracts", "routes"]) assert.equal(isBootstrapSnapshot(id), true);
   assert.equal(isBootstrapSnapshot(randomUUID()), false);
+
+  const rulePieces = [];
+  let rulePage = await readBootstrapSnapshot(30_000, "rules", "policy-caller");
+  while (true) {
+    assert.equal(rulePage.shared_policy_alias, true);
+    assert.deepEqual(rulePage.sources, ["BOOTSTRAP_RULES.md"]);
+    rulePieces.push(rulePage.stdout);
+    if (rulePage.next_action === "STOP_READING") break;
+    rulePage = await readBootstrapSnapshot(30_000, "rules", "policy-caller");
+  }
+  assert.match(rulePieces.join(""), /^RULES_BEGIN\n/);
+  assert.match(rulePieces.join(""), /RULES_END\n$/);
+  assert.equal((await readBootstrapSnapshot(30_000, "agents", "agents-caller")).stdout, "# Agents\nagent-contract\n");
+  assert.equal((await readBootstrapSnapshot(30_000, "contracts", "contracts-caller")).stdout, '{"contracts":["owner"]}\n');
+  assert.equal((await readBootstrapSnapshot(30_000, "routes", "routes-caller")).stdout, '{"routes":["bootstrap"]}\n');
+
   await assert.rejects(readBootstrapSnapshot(), { code: "ENOENT" });
   writeBootstrapEnvelope();
   const envelopeSnapshot = await readBootstrapSnapshot(100_000, "bootstrap", "envelope-caller");
@@ -344,12 +368,15 @@ try {
       assert.equal(roomPayload.proof_expected_room_head, "turn-tool-room");
     });
 
-    for (const id of ["231b7e74-4cc8-43d0-9702-fd6dfa2215b3", "bootstrap", "timeline", "checkup"]) {
+    for (const id of ["231b7e74-4cc8-43d0-9702-fd6dfa2215b3", "bootstrap", "timeline", "checkup", "rules", "agents", "contracts", "routes"]) {
       const started = performance.now();
-      const reply = await client.callTool({ name: "read_output", arguments: { process_id: id, max_chars: 256000, wait_ms: 0 } });
+      const reply = await client.callTool({ name: "read_output", arguments: { process_id: id, max_chars: 30000, wait_ms: 0 } });
       assert.equal(reply.isError, undefined, JSON.stringify(reply));
       assert.equal(reply.structuredContent.snapshot_alias, true);
-      console.log(`PASS local MCP read_output ${id}: ${Math.round(performance.now() - started)} ms, no subprocess`);
+      if (["rules", "agents", "contracts", "routes"].includes(id)) {
+        assert.equal(reply.structuredContent.shared_policy_alias, true);
+      }
+      console.log("PASS local MCP read_output " + id + ": " + Math.round(performance.now() - started) + " ms, no subprocess");
     }
   } finally { await client.close(); await server.close(); }
   console.log("PASS materialized reads: concurrency, 30k model-visible paging, readable large bootstrap, freshness, missing/invalid files, failure recovery");

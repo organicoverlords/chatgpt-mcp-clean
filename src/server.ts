@@ -286,6 +286,9 @@ const processOutputSchema = z.object({
   freshness: snapshotFreshnessSchema.optional(),
   snapshot_alias: z.literal(true).optional(),
   bootstrap_alias: z.literal(true).optional(),
+  shared_policy_alias: z.literal(true).optional(),
+  read_mode: z.literal("FIXED_SHARED_POLICY_FILE").optional(),
+  sources: z.array(z.enum(["BOOTSTRAP_RULES.md", "AGENTS.md", "CONTRACTS.json", "ROUTES.json"])).optional(),
 }).strict();
 
 const killProcessOutputSchema = z.object({
@@ -444,7 +447,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
   server.registerTool(
     "read_output",
     {
-      description: "Read bounded stdout/stderr from an existing process or supported snapshot alias.",
+      description: "Read bounded process output or fixed read-only aliases: bootstrap, rules, agents, contracts, routes, timeline, checkup.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: z.object({
         process_id: z.string().min(1),
