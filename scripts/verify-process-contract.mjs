@@ -71,6 +71,12 @@ assert.equal((await startInputSchema.safeParseAsync({ execution_target: "mars", 
 
 const readInputSchema = server._registeredTools.read_output?.inputSchema;
 assert.ok(readInputSchema, "read_output input schema missing");
+const startInputJson = z.toJSONSchema(startInputSchema);
+const readInputJson = z.toJSONSchema(readInputSchema);
+assert.match(startInputJson.properties?.wait_ms?.description || "", /750 ms owner default/, "start_process wait_ms schema must expose the owner default needed for correct invocation");
+assert.match(startInputJson.properties?.wait_ms?.description || "", /clamped to 10 s/, "start_process wait_ms schema must expose the synchronous clamp");
+assert.match(readInputJson.properties?.wait_ms?.description || "", /adaptive 2\/5\/10\/30\/60 s/, "read_output wait_ms schema must expose adaptive omitted-wait semantics");
+assert.match(readInputJson.properties?.wait_ms?.description || "", /0 reads immediately/, "read_output wait_ms schema must expose the nonblocking form");
 assert.equal((await startInputSchema.safeParseAsync({ executable: process.execPath, wait_ms: 240_000 })).success, true, "start_process must accept 240s explicit waits");
 assert.equal((await startInputSchema.safeParseAsync({ executable: process.execPath, wait_ms: 240_001 })).success, false, "start_process must bound waits above 240s");
 assert.equal((await readInputSchema.safeParseAsync({ process_id: "probe", wait_ms: 240_000 })).success, true, "read_output must accept 240s explicit waits");
@@ -103,6 +109,16 @@ const startStructured = await assertStructuredProcessResult("start_process", nat
   ? { language: "node", script: "console.log(\"process-contract-structured\")", wait_ms: 10_000 }
   : { language: "powershell", script: "Write-Output process-contract-structured", wait_ms: 10_000 });
 assert.match(startStructured.stdout || "", /process-contract-structured/, "start_process structured output should preserve stdout");
+const defaultInitialReadAt = Date.now();
+const defaultInitialRead = await assertStructuredProcessResult("start_process", {
+  executable: process.execPath,
+  args: ["-e", "console.log('default-initial-read'); setTimeout(()=>{},5000)"],
+});
+const defaultInitialReadMs = Date.now() - defaultInitialReadAt;
+assert.equal(defaultInitialRead.running, true, JSON.stringify(defaultInitialRead));
+assert.match(String(defaultInitialRead.stdout || ""), /default-initial-read/, "omitted wait_ms must return the automatic initial read");
+assert.ok(defaultInitialReadMs >= 500 && defaultInitialReadMs < 2_000, `default start_process initial read should be about 750ms (${defaultInitialReadMs}ms)`);
+await assertStructuredProcessResult("kill_process", { process_id: defaultInitialRead.process_id });
 const trickyArg = String.raw`space ; $dollar \"quote\" ` + "`tick";
 const argvStructured = await assertStructuredProcessResult("start_process", {
   executable: contractNodeExecutable,
@@ -164,7 +180,7 @@ const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "d80a3b59bbe90139a0d5a3613e3a6274a681377bd01e0b09f6efb548427ac076";
+const acceptedContractSha256 = "df5cd460d8749260503345cd2424df7f44677e8b2e73548bc9865966887679ad";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 const expectedTools = [...baseExpectedTools].sort((a, b) => a.name.localeCompare(b.name));
