@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, rename } from "node:fs/promises";
+import { mkdir, open, rename, stat } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
@@ -132,7 +132,16 @@ export class BoundedJsonlWriter {
   }
 
   private async ensureOpen(): Promise<void> {
-    if (this.handle) return;
+    if (this.handle) {
+      try {
+        const [handleStats, pathStats] = await Promise.all([this.handle.stat(), stat(this.path)]);
+        if (handleStats.dev === pathStats.dev && handleStats.ino === pathStats.ino) return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      await this.handle.close();
+      this.handle = undefined;
+    }
     await mkdir(dirname(this.path), { recursive: true });
     this.handle = await open(this.path, "a");
     const stats = await this.handle.stat();
