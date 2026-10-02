@@ -50,7 +50,7 @@ if ($config) {
     Add-Check 'three-tool-profile' (([string]$config.tool_profile -eq 'process') -and ([int]$config.tool_count -eq 3)) ("profile={0} count={1}" -f $config.tool_profile,$config.tool_count)
     $mediaProperty = $config.PSObject.Properties['media_delivery']
     $mediaDelivery = if ($mediaProperty) { [string]$mediaProperty.Value } else { '' }
-    Add-Check 'media-delivery' ($mediaDelivery -eq 'process-result inline images plus ordinary artifact resources') $mediaDelivery
+    Add-Check 'media-delivery' ($mediaDelivery -eq 'none') $mediaDelivery
     $caddyExe = [string]$config.caddy_exe
     $caddyConfig = [string]$config.caddy_config
     Add-Check 'caddy-exe' (Test-Path -LiteralPath $caddyExe -PathType Leaf) $caddyExe
