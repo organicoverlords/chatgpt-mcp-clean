@@ -121,11 +121,9 @@ function structuredPolicyText(base: string, environment?: Record<string, string>
   return `${base}\n${values}`;
 }
 
-function structuredArgvTransportError(executable: string, args: string[], stdin?: string): string | undefined {
-  const discoveryError = structuredRawDiscoveryToolError(executable, args, stdin);
-  if (discoveryError) return discoveryError;
+function structuredArgvTransportError(executable: string, args: string[]): string | undefined {
   if (!args.some((value) => /[\r\n]/.test(value))) return undefined;
-  const base = commandBase(executable);
+  const base = executable.replaceAll("/", "\\").split("\\").at(-1)?.toLowerCase() ?? executable.toLowerCase();
   const commandShim = /\.(?:cmd|bat)$/i.test(base) || ["npm", "npx", "pnpm", "yarn"].includes(base);
   return commandShim ? "windows_command_shim_multiline_argument_not_lossless" : undefined;
 }
@@ -486,107 +484,6 @@ function driveRootRecursiveScanError(command: string, code: string): string | un
     }
     if (/\btree(?:\.com|\.exe)?\b/i.test(codeSegment)) {
       return "drive-root tree enumeration is blocked; use an explicit project or subdirectory root";
-    }
-  }
-  return undefined;
-}
-
-
-function broadRecursiveRootMention(rawSegment: string): string | undefined {
-  const roots: Array<{ label: string; values: string[] }> = [
-    {
-      label: "LOCALAPPDATA",
-      values: [
-        process.env.LOCALAPPDATA || "",
-        String.raw`$env:LOCALAPPDATA`,
-        String.raw`%LOCALAPPDATA%`,
-      ],
-    },
-    {
-      label: "C:\\AI",
-      values: [
-        `${process.env.SystemDrive || "C:"}\\AI`,
-      ],
-    },
-    {
-      label: "PIPELINE_RESULTS_LIBRARY",
-      values: [
-        process.env.USERPROFILE ? join(process.env.USERPROFILE, "Desktop", "PIPELINE_RESULTS_LIBRARY") : "",
-        String.raw`$env:USERPROFILE\Desktop\PIPELINE_RESULTS_LIBRARY`,
-        String.raw`%USERPROFILE%\Desktop\PIPELINE_RESULTS_LIBRARY`,
-      ],
-    },
-  ];
-  const normalized = rawSegment.replaceAll("/", "\\").toLowerCase();
-  const delimiter = (char: string | undefined) => !char || /[\s,;)|"'`=]/.test(char);
-  for (const root of roots) {
-    for (const value of new Set(root.values.filter(Boolean).map((item) => item.replaceAll("/", "\\").toLowerCase()))) {
-      let offset = 0;
-      while (offset < normalized.length) {
-        const index = normalized.indexOf(value, offset);
-        if (index < 0) break;
-        const before = index > 0 ? normalized[index - 1] : undefined;
-        const afterIndex = index + value.length;
-        const after = normalized[afterIndex];
-        const exactBoundary = delimiter(before) && (delimiter(after) || (after === "\\" && (delimiter(normalized[afterIndex + 1]) || normalized[afterIndex + 1] === "*")));
-        if (exactBoundary) return root.label;
-        offset = index + value.length;
-      }
-    }
-  }
-  return undefined;
-}
-
-function broadRootRecursiveScanError(command: string, code: string): string | undefined {
-  const boundaries = [...code.matchAll(/[;\r\n]/g)].map((match) => match.index ?? 0);
-  const starts = [0, ...boundaries.map((index) => index + 1)];
-  const ends = [...boundaries, command.length];
-  const producerVariables = new Map<string, string>();
-
-  for (let segmentIndex = 0; segmentIndex < starts.length; segmentIndex += 1) {
-    const start = starts[segmentIndex]!;
-    const end = ends[segmentIndex]!;
-    const rawSegment = command.slice(start, end);
-    const codeSegment = code.slice(start, end);
-    const rootLabel = broadRecursiveRootMention(rawSegment);
-    if (!rootLabel) continue;
-
-    const producer = /\$([A-Za-z_][A-Za-z0-9_]*)\s*=/i.exec(codeSegment);
-    if (producer) producerVariables.set(producer[1]!.toLowerCase(), rootLabel);
-
-    if (/\b(?:Get-ChildItem|gci|dir|ls)\b/i.test(codeSegment) && /-(?:Recurse|r)\b/i.test(codeSegment)) {
-      return `recursive enumeration from broad ${rootLabel} root is blocked; use an explicit project or subdirectory root`;
-    }
-    if (/\b(?:rg|rg\.exe|ripgrep|fd|fd\.exe)\b/i.test(codeSegment)) {
-      return `recursive native search from broad ${rootLabel} root is blocked; use an explicit project or subdirectory root`;
-    }
-    if (/\bwhere(?:\.exe)?\b/i.test(codeSegment) && /\/R\b/i.test(codeSegment)) {
-      return `recursive native search from broad ${rootLabel} root is blocked; use an explicit project or subdirectory root`;
-    }
-    if (/\bfindstr(?:\.exe)?\b/i.test(codeSegment) && /\/S\b/i.test(codeSegment)) {
-      return `recursive native search from broad ${rootLabel} root is blocked; use an explicit project or subdirectory root`;
-    }
-    if (/\bcmd(?:\.exe)?\b/i.test(codeSegment) && /\bdir\b/i.test(codeSegment) && /\/S\b/i.test(codeSegment)) {
-      return `recursive native enumeration from broad ${rootLabel} root is blocked; use an explicit project or subdirectory root`;
-    }
-    if (/\btree(?:\.com|\.exe)?\b/i.test(codeSegment)) {
-      return `tree enumeration from broad ${rootLabel} root is blocked; use an explicit project or subdirectory root`;
-    }
-  }
-
-  for (const [producerVariable, rootLabel] of producerVariables) {
-    const loop = new RegExp(`\\bforeach\\s*\\(\\s*\\$([A-Za-z_][A-Za-z0-9_]*)\\s+in\\s+\\$${producerVariable}\\b`, "gi");
-    for (const match of code.matchAll(loop)) {
-      const itemVariable = String(match[1] || "");
-      if (!itemVariable) continue;
-      const itemReference = `\\$${itemVariable}(?:\\.FullName)?\\b`;
-      const sameStatement = String.raw`[^};|\r\n]{0,1200}`;
-      const recurseAfterItem = new RegExp(`\\b(?:Get-ChildItem|gci|dir|ls)\\b${sameStatement}${itemReference}${sameStatement}-(?:Recurse|r)\\b`, "i");
-      const recurseBeforeItem = new RegExp(`\\b(?:Get-ChildItem|gci|dir|ls)\\b${sameStatement}-(?:Recurse|r)\\b${sameStatement}${itemReference}`, "i");
-      const loopRemainder = code.slice(match.index ?? 0);
-      if (recurseAfterItem.test(loopRemainder) || recurseBeforeItem.test(loopRemainder)) {
-        return `recursive broad ${rootLabel} fan-out is blocked; recurse one explicit project or subdirectory at a time`;
-      }
     }
   }
   return undefined;
@@ -1438,69 +1335,6 @@ function normalizePowerShellControlStatementPipelines(command: string): PowerShe
   return { command: normalized, changed: normalized !== command };
 }
 
-function discoveryReplacementError(tool: string): string {
-  return `raw_discovery_tool_blocked: ${tool} is disabled on MCP process starts; use V3/Stack Surface for stack/history/owner discovery, git grep for content search in a known Git repository, git ls-files for repository file discovery, or direct reads of exact known paths`;
-}
-
-function rawDiscoveryToolError(command: string, code = powershellCodeMask(command)): string | undefined {
-  const segmentTool = /(?:^|[;&|]\s*)\b(grep|rg|ripgrep|fd|findstr)(?:\.exe)?\b/i.exec(code);
-  if (segmentTool) return discoveryReplacementError(segmentTool[1]!.toLowerCase());
-  const shellFind = /(?:^|[;&|]\s*)\bfind(?:\.exe)?\s+/i.exec(code);
-  if (shellFind) return discoveryReplacementError("find");
-  if (/(?:^|[;&|]\s*)\bwhere(?:\.exe)?\b[^\r\n;|]{0,500}\/R\b/i.test(code)) return discoveryReplacementError("where /R");
-  return undefined;
-}
-
-function commandBase(executable: string): string {
-  return executable.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase() ?? executable.toLowerCase();
-}
-
-function shellPayload(args: string[]): string | undefined {
-  const commandIndex = args.findIndex((arg) => /^-[A-Za-z]*c[A-Za-z]*$/i.test(arg.trim()) || /^-{1,2}command$/i.test(arg.trim()));
-  if (commandIndex < 0 || commandIndex + 1 >= args.length) return undefined;
-  return args[commandIndex + 1]?.trim() || undefined;
-}
-
-function nestedShellPayload(args: string[]): string | undefined {
-  for (let index = 0; index < args.length; index += 1) {
-    const base = commandBase(args[index]!);
-    if (!/^(?:bash|sh|zsh|pwsh|powershell)(?:\.exe)?$/i.test(base)) continue;
-    const payload = shellPayload(args.slice(index + 1));
-    if (payload) return payload;
-  }
-  return undefined;
-}
-
-function structuredRawDiscoveryToolError(executable: string, args: string[], stdin?: string): string | undefined {
-  const base = commandBase(executable);
-  if (/^(?:grep|rg|ripgrep|fd|findstr)(?:\.exe)?$/i.test(base)) return discoveryReplacementError(base.replace(/\.exe$/i, ""));
-  if (/^find(?:\.exe)?$/i.test(base)) return discoveryReplacementError("find");
-  if (/^where(?:\.exe)?$/i.test(base) && args.some((arg) => /^\/R$/i.test(arg))) return discoveryReplacementError("where /R");
-
-  if (/^(?:bash|sh|zsh|pwsh|powershell)(?:\.exe)?$/i.test(base)) {
-    const payload = shellPayload(args) ?? stdin;
-    if (payload) {
-      const nestedError = rawDiscoveryToolError(payload, powershellCodeMask(payload));
-      if (nestedError) return nestedError;
-    }
-  }
-
-  const nestedPayload = nestedShellPayload(args);
-  if (nestedPayload) {
-    const nestedError = rawDiscoveryToolError(nestedPayload, powershellCodeMask(nestedPayload));
-    if (nestedError) return nestedError;
-  }
-
-  if (/^(?:python(?:3)?|py)(?:\.exe)?$/i.test(base)) {
-    const commandIndex = args.findIndex((arg) => arg === "-c");
-    if (commandIndex >= 0 && commandIndex + 1 < args.length) {
-      const inlineError = rawDiscoveryToolError(args[commandIndex + 1]!, args[commandIndex + 1]!);
-      if (inlineError) return inlineError;
-    }
-  }
-  return undefined;
-}
-
 function encodedCommandTransportError(command: string): string | undefined {
   const lower = command.toLowerCase();
   const hasPowerShellLauncher = /\b(?:pwsh|powershell)(?:\.exe)?\b/i.test(command);
@@ -1519,16 +1353,12 @@ function commandPolicyError(command: string, code = powershellCodeMask(command))
   if (encodedTransportError) return encodedTransportError;
   const rootScanError = driveRootRecursiveScanError(command, code);
   if (rootScanError) return rootScanError;
-  const broadRootScanError = broadRootRecursiveScanError(command, code);
-  if (broadRootScanError) return broadRootScanError;
   const vaultScanError = vaultRootRecursiveScanError(command, code);
   if (vaultScanError) return vaultScanError;
   const inertWaitError = inertFixedWaitError(command, code);
   if (inertWaitError) return inertWaitError;
   const tempScanError = tempRootRecursiveScanError(command, code);
   if (tempScanError) return tempScanError;
-  const discoveryError = rawDiscoveryToolError(command, code);
-  if (discoveryError) return discoveryError;
   const p3BuildWaitError = p3BuildSlotWaitError(command, code);
   if (p3BuildWaitError) return p3BuildWaitError;
   const swarmRouteError = swarmRouteDecisionIsolationError(command, code);
@@ -1593,8 +1423,6 @@ function explicitPowerShellCommandPayload(executionPlan: CommandExecutionPlan): 
 function commandExecutionPreflightError(command: string, executionPlan: CommandExecutionPlan): string | undefined {
   const outerError = commandPreflightError(command, executionPlan.mode);
   if (outerError) return outerError;
-  const plannedDiscoveryError = structuredRawDiscoveryToolError(executionPlan.executable, executionPlan.args, executionPlan.stdin);
-  if (plannedDiscoveryError) return plannedDiscoveryError;
   const payload = explicitPowerShellCommandPayload(executionPlan);
   if (!payload) return undefined;
   return commandPreflightError(payload, "powershell");
@@ -3185,7 +3013,7 @@ export class ProcessManager {
     const inputText = stdin === undefined ? displayCommand : `${displayCommand}\n${stdin}`;
     const preflightCommand = structuredPolicyText(inputText, environment);
     const transportPreflightError =
-      structuredArgvTransportError(executable, args, stdin)
+      structuredArgvTransportError(executable, args)
       ?? structuredHostPreflightError(executable);
     return this.startPrepared(displayCommand, executionPlan, workingDirectory, callerId, activityTarget, actionClass, undefined, ["structured_argv", ...(stdin !== undefined ? ["structured_stdin"] : [])], preflightCommand, "full", transportPreflightError, this.executionDedupeIdentity(executionPlan), false);
   }
@@ -3231,7 +3059,7 @@ export class ProcessManager {
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
     const started = this.start(command, cwd, callerId, activityTarget, actionClass);
-    const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
+    const boundedWaitMs = Math.max(0, Math.min(waitMs, 240_000));
     emitTelemetry({
       event: "process_wait_requested",
       action: "start",
@@ -3348,7 +3176,7 @@ export class ProcessManager {
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
     const started = this.startScript(language, script, cwd, callerId, activityTarget, actionClass, environment);
-    const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
+    const boundedWaitMs = Math.max(0, Math.min(waitMs, 240_000));
     emitTelemetry({ event: "process_wait_requested", action: "start_script", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
@@ -3372,7 +3200,7 @@ export class ProcessManager {
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
     const started = this.startStructured(executable, args, cwd, callerId, activityTarget, actionClass, stdin, environment);
-    const boundedWaitMs = Math.max(0, Math.min(waitMs, 10_000));
+    const boundedWaitMs = Math.max(0, Math.min(waitMs, 240_000));
     emitTelemetry({ event: "process_wait_requested", action: "start_structured", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);

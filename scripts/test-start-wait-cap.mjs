@@ -11,10 +11,11 @@ const result = await manager.startStructuredWithWait(
   60_000,
 );
 const elapsed = performance.now() - startedAt;
-assert.equal(result.running, true, JSON.stringify(result));
-assert.equal(result.next_action, "READ_SAME_PROCESS_ID", JSON.stringify(result));
+assert.equal(result.running, false, JSON.stringify(result));
+assert.equal(result.next_action, "STOP_READING", JSON.stringify(result));
+assert.match(result.stdout || "", /LATE_DONE/, JSON.stringify(result));
 assert.ok(typeof result.process_id === "string" && result.process_id.length > 0);
-assert.ok(elapsed >= 9_000 && elapsed < 11_500, `requested 60s start wait must clamp to ~10s, got ${elapsed.toFixed(1)}ms`);
+assert.ok(elapsed >= 11_000 && elapsed < 16_000, `requested 60s start wait must remain active through process completion, got ${elapsed.toFixed(1)}ms`);
 await manager.kill(result.process_id);
-console.log(`PASS start_wait_cap requested_ms=60000 elapsed_ms=${elapsed.toFixed(1)} resumable=true`);
+console.log(`PASS start_wait_contract requested_ms=60000 elapsed_ms=${elapsed.toFixed(1)} completed=true`);
 process.exit(0);

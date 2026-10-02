@@ -814,7 +814,7 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 240000,
-          "description": "Optional initial-read wait. Omit to use the 750 ms owner default; 0 returns the launch receipt immediately; positive values request a longer initial wait, with execution clamped to 10 s."
+          "description": "Optional initial-read wait. Omit to use the 750 ms owner default; 0 returns the launch receipt immediately; positive values are honored up to 240 s and return early when the process exits."
         },
         "activity_target": {
           "type": "object",

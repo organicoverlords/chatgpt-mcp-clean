@@ -74,7 +74,7 @@ assert.ok(readInputSchema, "read_output input schema missing");
 const startInputJson = z.toJSONSchema(startInputSchema);
 const readInputJson = z.toJSONSchema(readInputSchema);
 assert.match(startInputJson.properties?.wait_ms?.description || "", /750 ms owner default/, "start_process wait_ms schema must expose the owner default needed for correct invocation");
-assert.match(startInputJson.properties?.wait_ms?.description || "", /clamped to 10 s/, "start_process wait_ms schema must expose the synchronous clamp");
+assert.match(startInputJson.properties?.wait_ms?.description || "", /honored up to 240 s/, "start_process wait_ms schema must expose the explicit wait contract");
 assert.match(readInputJson.properties?.wait_ms?.description || "", /adaptive 2\/5\/10\/30\/60 s/, "read_output wait_ms schema must expose adaptive omitted-wait semantics");
 assert.match(readInputJson.properties?.wait_ms?.description || "", /0 reads immediately/, "read_output wait_ms schema must expose the nonblocking form");
 assert.equal((await startInputSchema.safeParseAsync({ executable: process.execPath, wait_ms: 240_000 })).success, true, "start_process must accept 240s explicit waits");
@@ -180,7 +180,7 @@ const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "df5cd460d8749260503345cd2424df7f44677e8b2e73548bc9865966887679ad";
+const acceptedContractSha256 = "4e5413c45b547b2a9991c42dc7392d055c57a6540704aba79db4005301c43f71";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 const expectedTools = [...baseExpectedTools].sort((a, b) => a.name.localeCompare(b.name));
