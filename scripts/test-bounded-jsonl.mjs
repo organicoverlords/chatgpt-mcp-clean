@@ -50,6 +50,23 @@ try {
   assert.deepEqual(jsonLines(flushPath).map((row) => row.sequence), Array.from({ length: 25 }, (_, i) => i), "flush must persist a queued batch without waiting for the timer");
   await delayed.close();
 
+  const reopenedPath = join(root, "reopened.jsonl");
+  const selfHealing = new BoundedJsonlWriter(reopenedPath, {
+    maxBytes: 10_000,
+    maxAgeMs: 60_000,
+    batchDelayMs: 0,
+  });
+  selfHealing.writeJson({ event: "before-external-delete" });
+  await selfHealing.flush();
+  assert.ok(existsSync(reopenedPath), "writer must create the active path before external deletion");
+  rmSync(reopenedPath, { force: true });
+  assert.equal(existsSync(reopenedPath), false, "fixture must remove the active path while the writer handle remains open");
+  selfHealing.writeJson({ event: "after-external-delete" });
+  await selfHealing.flush();
+  await selfHealing.close();
+  assert.ok(existsSync(reopenedPath), "writer must recreate an externally deleted active path");
+  assert.deepEqual(jsonLines(reopenedPath), [{ event: "after-external-delete" }]);
+
   const agedPath = join(root, "aged.jsonl");
   writeFileSync(agedPath, `${JSON.stringify({ event: "before-restart" })}\n`, "utf8");
   const old = new Date(Date.now() - 10_000);
