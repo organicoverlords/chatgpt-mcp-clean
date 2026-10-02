@@ -213,7 +213,7 @@ const snapshotFreshnessSchema = z.object({
   read_mode: z.enum(["MATERIALIZED_ONLY", "V3_ROOM_BOUND_READ"]),
 }).strict();
 
-export const PROCESS_TOOL_CONTRACT_VERSION = "process-tools.v5" as const;
+export const PROCESS_TOOL_CONTRACT_VERSION = "process-tools.v6" as const;
 
 export type ProcessServingIdentity = {
   backend_generation?: string;
