@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { ProcessManager } from "../dist/lib/process-manager.js";
 
 const manager = new ProcessManager();
 const payloadChars = 400_000;
 const expectedStdout = `BEGIN_${"A".repeat(payloadChars)}_END`;
 const expectedStderr = `ERR_${"B".repeat(payloadChars)}_END`;
-const first = await manager.startWithWait(
-  `[Console]::Out.Write('BEGIN_' + ('A' * ${payloadChars}) + '_END'); [Console]::Error.Write('ERR_' + ('B' * ${payloadChars}) + '_END')`,
+const first = await manager.startStructuredWithWait(
+  process.execPath,
+  ["-e", `process.stdout.write("BEGIN_" + "A".repeat(${payloadChars}) + "_END"); process.stderr.write("ERR_" + "B".repeat(${payloadChars}) + "_END");`],
   undefined,
   "paging-test",
   10_000,
@@ -24,8 +26,13 @@ for (const page of pages) {
   assert.ok(page.output_page.page_chars <= 256_000, "logical page never exceeds 256k");
   assert.equal(page.output_page.page_limit, 256_000, "page uses current 256k read contract");
 }
-assert.equal(pages.map((page) => page.stdout).join(""), expectedStdout, "stdout is returned losslessly in order");
-assert.equal(pages.map((page) => page.stderr).join(""), expectedStderr, "stderr is returned losslessly in order");
+const stdout = pages.map((page) => page.stdout || "").join("");
+const stderr = pages.map((page) => page.stderr || "").join("");
+const digest = (value) => createHash("sha256").update(value).digest("hex");
+assert.equal(stdout.length, expectedStdout.length, "stdout length is preserved");
+assert.equal(stderr.length, expectedStderr.length, "stderr length is preserved");
+assert.equal(digest(stdout), digest(expectedStdout), "stdout is returned losslessly in order");
+assert.equal(digest(stderr), digest(expectedStderr), "stderr is returned losslessly in order");
 assert.equal(pages.at(-1).next_action, "STOP_READING");
 assert.equal(pages.at(-1).output_page.more, false);
 assert.ok(pages.length >= 4, "combined output must exercise multi-page delivery at the 256k cap");
