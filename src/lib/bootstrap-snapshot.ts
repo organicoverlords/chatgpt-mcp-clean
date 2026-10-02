@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { open, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 export const BOOTSTRAP_PROCESS_ALIAS = "bootstrap";
 const LEGACY_BOOTSTRAP_PROCESS_ID = "231b7e74-4cc8-43d0-9702-fd6dfa2215b3";
@@ -215,6 +216,26 @@ function snapshotPath(timeline: boolean): string {
     : join(userProfile, "Desktop", "vault", ".state", "bootstrap", "latest.json");
 }
 
+function callerBootstrapSnapshotPath(callerId: string): string {
+  const hash = createHash("sha256")
+    .update("v3-rust.bootstrap-caller.v1\0", "utf8")
+    .update(callerId.trim(), "utf8")
+    .digest("hex");
+  return join(dirname(snapshotPath(false)), "callers", hash + ".json");
+}
+
+async function readMaterializedBootstrap(callerId: string): Promise<unknown> {
+  const globalPath = snapshotPath(false);
+  if (callerId && callerId !== "caller_unknown") {
+    try {
+      return JSON.parse((await readFile(callerBootstrapSnapshotPath(callerId), "utf8")).replace(/^\uFEFF/, ""));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+    }
+  }
+  return JSON.parse((await readFile(globalPath, "utf8")).replace(/^\uFEFF/, ""));
+}
+
 function protectTopLevelSnapshotField(key: string): boolean {
   return key === "rules"
     || key === "bootstrap_end"
@@ -335,7 +356,7 @@ export async function readBootstrapSnapshot(
     // same alias ask the current V3 owner for that room without changing bootstrap content.
     payload = roomBound
       ? await roomBoundV3BootstrapPayload(conversationId!, expectedRoomHead!)
-      : JSON.parse((await readFile(snapshotPath(false), "utf8")).replace(/^\uFEFF/, ""));
+      : await readMaterializedBootstrap(callerId);
   } else {
     // Timeline remains independently bounded because it is a different materialized product.
     const file = await open(snapshotPath(true), "r");
