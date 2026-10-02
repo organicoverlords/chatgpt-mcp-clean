@@ -10,6 +10,26 @@ import { planCommandExecution, planStructuredExecution, planStructuredScript, ty
 const MAX_CAPTURE_CHARS = 256_000;
 // The in-memory capture is only a diagnostic tail. Complete output is spooled to disk.
 const MAX_READ_CHARS = 256_000;
+const OPAQUE_BASE64_MIN_CHARS = 64_000;
+const OPAQUE_BASE64_SAMPLE_CHARS = 8_192;
+const OPAQUE_BASE64_GENERIC_MIN_CHARS = 1_000_000;
+
+function looksLikeOpaqueBase64(sample: string, totalChars: number): boolean {
+  if (totalChars < OPAQUE_BASE64_MIN_CHARS) return false;
+  let candidate = sample.trimStart();
+  const dataUrlMarker = candidate.slice(0, 256).toLowerCase().indexOf(";base64,");
+  if (dataUrlMarker >= 0) candidate = candidate.slice(dataUrlMarker + 8);
+  const compact = candidate.replace(/\s+/g, "");
+  if (compact.length < 1_024 || !/^[A-Za-z0-9+/_=-]+$/.test(compact)) return false;
+  if (/^(?:iVBORw0KGgo|\/9j\/|R0lGOD|UklGR|JVBERi0|UEsDB|H4sI)/.test(compact)) return true;
+  if (totalChars < OPAQUE_BASE64_GENERIC_MIN_CHARS) return false;
+  return new Set(compact.slice(0, 4_096)).size >= 16;
+}
+
+function opaqueBase64Marker(stream: "stdout" | "stderr", chars: number, sha256?: unknown): string {
+  const hash = typeof sha256 === "string" && sha256 ? ` sha256=${sha256}` : "";
+  return `[MCP ${stream} suppressed: ${chars} chars of likely binary/base64 text retained in the process spool;${hash} use the native artifact/image/file path instead of transporting binary data as text.]\n`;
+}
 export const MAX_READ_WAIT_MS = 240_000;
 export const ADAPTIVE_READ_WAIT_MS = [2_000, 5_000, 10_000, 30_000, 60_000] as const;
 
@@ -1982,6 +2002,7 @@ export function replayCurrentPolicyError(command: string): string | undefined {
 export class ProcessManager {
   private readonly processes = new Map<string, ProcessState>();
   private readonly outputCursors = new Map<string, OutputCursor>();
+  private readonly suppressedBase64Streams = new Set<string>();
   private readonly adaptiveReadQuietStreaks = new Map<string, number>();
   private readonly maxLivePerCaller: number;
   private readonly maxLiveTotal?: number;
@@ -2480,12 +2501,28 @@ export class ProcessManager {
       stderr: Math.min(prior.stderr, stderrTotal),
     };
     const limit = Math.max(1, Math.min(requestedChars, MAX_READ_CHARS));
-    const stdoutCount = Math.min(limit, Math.max(0, stdoutTotal - cursor.stdout));
-    const stderrCount = Math.min(Math.max(0, limit - stdoutCount), Math.max(0, stderrTotal - cursor.stderr));
-    const nextStdout = cursor.stdout + stdoutCount;
+    const running = legacy.running === true;
+    const stdoutRemaining = Math.max(0, stdoutTotal - cursor.stdout);
+    const stdoutSuppressionKey = `${cursorKey}:stdout`;
+    const stdoutSample = stdoutRemaining >= OPAQUE_BASE64_MIN_CHARS
+      ? this.readSpoolSlice(stdoutPath, cursor.stdout, Math.min(stdoutRemaining, OPAQUE_BASE64_SAMPLE_CHARS))
+      : "";
+    const suppressStdout = stdoutRemaining > 0 && (
+      this.suppressedBase64Streams.has(stdoutSuppressionKey)
+      || looksLikeOpaqueBase64(stdoutSample, stdoutRemaining)
+    );
+    if (suppressStdout) this.suppressedBase64Streams.add(stdoutSuppressionKey);
+
+    const stdoutText = suppressStdout
+      ? opaqueBase64Marker("stdout", stdoutRemaining, legacy.stdout_sha256)
+      : (stdoutRemaining > 0 ? this.readSpoolSlice(stdoutPath, cursor.stdout, Math.min(limit, stdoutRemaining)) : "");
+    const stdoutConsumed = suppressStdout ? stdoutRemaining : Math.min(limit, stdoutRemaining);
+    const stderrBudget = Math.max(0, limit - stdoutText.length);
+    const stderrCount = Math.min(stderrBudget, Math.max(0, stderrTotal - cursor.stderr));
+    const stderrText = stderrCount > 0 ? this.readSpoolSlice(stderrPath, cursor.stderr, stderrCount) : "";
+    const nextStdout = cursor.stdout + stdoutConsumed;
     const nextStderr = cursor.stderr + stderrCount;
     const moreCaptured = nextStdout < stdoutTotal || nextStderr < stderrTotal;
-    const running = legacy.running === true;
     const base: Record<string, unknown> = { ...legacy, stdout: "", stderr: "" };
     delete base.stdout_dropped_from_start;
     delete base.stderr_dropped_from_start;
@@ -2494,8 +2531,8 @@ export class ProcessManager {
     const result = {
       ...base,
       next_action: moreCaptured || running ? "READ_SAME_PROCESS_ID" : "STOP_READING",
-      stdout: stdoutCount > 0 ? this.readSpoolSlice(stdoutPath, cursor.stdout, stdoutCount) : "",
-      stderr: stderrCount > 0 ? this.readSpoolSlice(stderrPath, cursor.stderr, stderrCount) : "",
+      stdout: stdoutText,
+      stderr: stderrText,
       output_page: {
         stdout_start: cursor.stdout,
         stdout_end: nextStdout,
@@ -2503,13 +2540,16 @@ export class ProcessManager {
         stderr_start: cursor.stderr,
         stderr_end: nextStderr,
         stderr_total: stderrTotal,
-        page_chars: stdoutCount + stderrCount,
+        page_chars: stdoutText.length + stderrText.length,
         page_limit: limit,
         more: moreCaptured,
       },
     };
     if (moreCaptured || running) this.outputCursors.set(cursorKey, { stdout: nextStdout, stderr: nextStderr });
-    else this.outputCursors.delete(cursorKey);
+    else {
+      this.outputCursors.delete(cursorKey);
+      this.suppressedBase64Streams.delete(stdoutSuppressionKey);
+    }
     return result;
   }
 
