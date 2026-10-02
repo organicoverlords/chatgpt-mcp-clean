@@ -38,13 +38,24 @@ function Read-Topology([string]$Path){
     if(-not $legacy -and -not $liveSnapshot){ Fail "current topology contract is invalid: schema=$schema authority=$authority" }
     return $topology
 }
-function Resolve-StableRollback($Topology){
+function Resolve-TopologyBinding($Topology,[string]$Origin){
+    if([string]$Topology.schema -ne 'mcp-live-topology.v2'){ return $Topology.serving.backend }
+    $candidates=@()
+    if($null -ne $Topology.serving.backend){ $candidates+=@($Topology.serving.backend) }
+    if($null -ne $Topology.serving.peer_route){ $candidates+=@($Topology.serving.peer_route) }
+    if($null -ne $Topology.serving.auxiliary_routes){ $candidates+=@($Topology.serving.auxiliary_routes) }
+    $target=$Origin.TrimEnd('/')
+    $matches=@($candidates | Where-Object { ([string]$_.public_origin).TrimEnd('/') -ieq $target })
+    if($matches.Count -ne 1){ Fail "live topology must expose exactly one binding for public origin $Origin; found $($matches.Count)" }
+    return $matches[0]
+}
+function Resolve-StableRollback($Topology,$Binding){
     $schema=[string]$Topology.schema
     if($schema -eq 'mcp-live-topology.v2'){
-        # V2 is rollback/comparison evidence only. Use its current stable backend as a locator,
+        # V2 is rollback/comparison evidence only. Use the target binding as a locator,
         # then prove that exact listener live before it can become candidate rollback metadata.
-        $backend=$Topology.serving.backend
-        if($null -eq $backend){ Fail 'live topology has no serving backend' }
+        $backend=$Binding
+        if($null -eq $backend){ Fail 'live topology has no target binding' }
         $rollback=[pscustomobject]@{listen=[string]$backend.listen;instance=[string]$backend.instance_id}
     }else{
         $recoveryProperty=$Topology.PSObject.Properties['recovery']
@@ -73,10 +84,10 @@ function Resolve-StableRollback($Topology){
     if($healthInstance -and $healthInstance -ne $instance){ Fail "stable rollback live instance mismatch: expected=$instance actual=$healthInstance" }
     return [pscustomobject]@{listen=$listen;port=$port;instance=$instance}
 }
-function Resolve-CurrentFrozenRoot($Topology){
+function Resolve-CurrentFrozenRoot($Topology,$Binding){
     if([string]$Topology.schema -eq 'mcp-live-topology.v2'){
-        $runtime=[Environment]::ExpandEnvironmentVariables([string]$Topology.serving.backend.deployment.runtime_root)
-        if([string]::IsNullOrWhiteSpace($runtime)){ Fail 'live topology backend deployment runtime root is missing' }
+        $runtime=[Environment]::ExpandEnvironmentVariables([string]$Binding.deployment.runtime_root)
+        if([string]::IsNullOrWhiteSpace($runtime)){ Fail 'live topology target binding deployment runtime root is missing' }
         return (Split-Path -Parent $runtime)
     }
     return [Environment]::ExpandEnvironmentVariables([string]$Topology.serving.backend.durable_runtime_root)
@@ -107,10 +118,11 @@ if($omenMcpUrl){
 }
 if($DefaultExecutionTarget -eq 'omen' -and -not $omenMcpUrl -and -not (Test-Path -LiteralPath $omenExecPath -PathType Leaf)){ Fail "canonical OMEN execution owner missing: $omenExecPath" }
 $topology=Read-Topology $CurrentTopologyPath
-$stableRollback=Resolve-StableRollback $topology
+$currentBinding=Resolve-TopologyBinding $topology $PublicOrigin
+$stableRollback=Resolve-StableRollback $topology $currentBinding
 $rollbackPort=[int]$stableRollback.port
 $rollbackInstance=[string]$stableRollback.instance
-$currentFrozen=Resolve-CurrentFrozenRoot $topology
+$currentFrozen=Resolve-CurrentFrozenRoot $topology $currentBinding
 $ownerLoginSource=if([string]::IsNullOrWhiteSpace($OwnerLoginSourcePath)){ Join-Path $currentFrozen 'owner-login.txt' }else{ [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($OwnerLoginSourcePath)) }
 if(-not (Test-Path -LiteralPath $ownerLoginSource -PathType Leaf)){ Fail "owner identity source missing: $ownerLoginSource" }
 $ownerLogin=(Get-Content -LiteralPath $ownerLoginSource -Raw).Trim()
@@ -122,7 +134,7 @@ if(Test-Path -LiteralPath $DeploymentRoot){ Fail "deployment root already exists
 $planResult=[ordered]@{
     status='PLAN'; commit=$commit; source_root=$root; deployment_root=$DeploymentRoot; runtime_root=(Join-Path $DeploymentRoot 'runtime');
     task_name=$TaskName; port=$Port; instance_id=$InstanceId; public_origin=$PublicOrigin; oauth_store_relative=$OAuthStoreRelative; receipt_store_relative=$ReceiptStoreRelative; default_execution_target=$DefaultExecutionTarget; omen_exec_path=$(if($omenMcpUrl){$null}else{$omenExecPath}); omen_mcp_url=$omenMcpUrl; owner_login_source=$ownerLoginSource;
-    current_serving_listen=[string]$topology.serving.backend.listen; current_frozen_root=$currentFrozen; rollback_port=$rollbackPort; rollback_instance=$rollbackInstance; route_mutation=$false
+    current_serving_listen=[string]$currentBinding.listen; current_frozen_root=$currentFrozen; rollback_port=$rollbackPort; rollback_instance=$rollbackInstance; route_mutation=$false
 }
 if($Plan){ $planResult | ConvertTo-Json -Depth 5 -Compress; exit 0 }
 if(-not $ExplicitUserAuthorization){ Fail 'preparing a persistent production candidate task requires explicit user authorization' }
