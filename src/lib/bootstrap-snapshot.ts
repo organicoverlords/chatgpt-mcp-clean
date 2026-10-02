@@ -4,6 +4,8 @@ import { join } from "node:path";
 
 export const BOOTSTRAP_PROCESS_ALIAS = "bootstrap";
 const LEGACY_BOOTSTRAP_PROCESS_ID = "231b7e74-4cc8-43d0-9702-fd6dfa2215b3";
+const SHARED_POLICY_ALIASES = ["rules", "agents", "contracts", "routes"] as const;
+type SharedPolicyAlias = typeof SHARED_POLICY_ALIASES[number];
 const SNAPSHOT_PAGE_MAX_CHARS = 30_000;
 const TIMELINE_SNAPSHOT_MAX_BYTES = 64 * 1024;
 const SNAPSHOT_PAGE_SESSION_TTL_MS = 30 * 60 * 1000;
@@ -22,10 +24,13 @@ type SnapshotPageBase = {
   process_state: "SNAPSHOT";
   process_id: string;
   running: false;
-  generated_at: string;
-  freshness: SnapshotFreshness;
+  generated_at?: string;
+  freshness?: SnapshotFreshness;
   snapshot_alias: true;
   bootstrap_alias?: true;
+  shared_policy_alias?: true;
+  read_mode?: "FIXED_SHARED_POLICY_FILE";
+  sources?: string[];
 };
 
 type SnapshotProtectedRange = {
@@ -45,7 +50,71 @@ type SnapshotPageSession = {
 const snapshotPageSessions = new Map<string, SnapshotPageSession>();
 
 export function isBootstrapSnapshot(processId: string): boolean {
-  return [BOOTSTRAP_PROCESS_ALIAS, LEGACY_BOOTSTRAP_PROCESS_ID, "timeline", "checkup"].includes(processId);
+  return [BOOTSTRAP_PROCESS_ALIAS, LEGACY_BOOTSTRAP_PROCESS_ID, "timeline", "checkup", ...SHARED_POLICY_ALIASES].includes(processId as never);
+}
+
+function isSharedPolicyAlias(processId: string): processId is SharedPolicyAlias {
+  return SHARED_POLICY_ALIASES.includes(processId as SharedPolicyAlias);
+}
+
+function sharedPolicyPath(alias: SharedPolicyAlias): string {
+  const envKey = "MCP_SHARED_" + alias.toUpperCase() + "_PATH";
+  const configured = process.env[envKey]?.trim();
+  if (configured) return configured;
+  const userProfile = process.env.USERPROFILE?.trim();
+  if (!userProfile) throw new Error("Shared policy path configuration is required when USERPROFILE is unavailable");
+  const filename = alias === "rules" ? "BOOTSTRAP_RULES.md"
+    : alias === "agents" ? "AGENTS.md"
+    : alias === "contracts" ? "CONTRACTS.json"
+    : "ROUTES.json";
+  return join(userProfile, ".agents", filename);
+}
+
+async function readSharedPolicyAlias(
+  alias: SharedPolicyAlias,
+  maxChars: number,
+  callerId: string,
+  startedAt: number,
+): Promise<Record<string, unknown>> {
+  const key = snapshotSessionKey(alias, callerId);
+  pruneSnapshotPageSessions();
+  const existing = snapshotPageSessions.get(key);
+  if (existing) return pageSnapshot(existing, key, maxChars, startedAt);
+
+  const stdout = (await readFile(sharedPolicyPath(alias), "utf8")).replace(/^\uFEFF/, "");
+  const filename = alias === "rules" ? "BOOTSTRAP_RULES.md"
+    : alias === "agents" ? "AGENTS.md"
+    : alias === "contracts" ? "CONTRACTS.json"
+    : "ROUTES.json";
+  const base: SnapshotPageBase = {
+    mcp_status: "OK",
+    process_state: "SNAPSHOT",
+    process_id: alias,
+    running: false,
+    snapshot_alias: true,
+    shared_policy_alias: true,
+    read_mode: "FIXED_SHARED_POLICY_FILE",
+    sources: [filename],
+  };
+  const pageLimit = Math.max(1, Math.min(maxChars, SNAPSHOT_PAGE_MAX_CHARS));
+  if (stdout.length <= pageLimit) {
+    return {
+      ...base,
+      elapsed_ms: performance.now() - startedAt,
+      next_action: "STOP_READING",
+      stdout,
+      stderr: "",
+    };
+  }
+  const session: SnapshotPageSession = {
+    base,
+    stdout,
+    offset: 0,
+    lastAccessMs: Date.now(),
+    protectedRanges: [],
+  };
+  snapshotPageSessions.set(key, session);
+  return pageSnapshot(session, key, maxChars, startedAt);
 }
 
 function snapshotAlias(processId: string): string {
@@ -243,6 +312,12 @@ export async function readBootstrapSnapshot(
   expectedRoomHead?: string,
 ): Promise<Record<string, unknown>> {
   const startedAt = performance.now();
+  if (isSharedPolicyAlias(processId)) {
+    if (conversationId || expectedRoomHead) {
+      throw new Error("conversation_id and expected_room_head are valid only for process_id=bootstrap");
+    }
+    return readSharedPolicyAlias(processId, maxChars, callerId, startedAt);
+  }
   const alias = snapshotAlias(processId);
   if ((conversationId && !expectedRoomHead) || (!conversationId && expectedRoomHead)) {
     throw new Error("Room-bound bootstrap requires both conversation_id and expected_room_head");
