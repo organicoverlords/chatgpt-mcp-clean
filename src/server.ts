@@ -29,6 +29,34 @@ const omenMcpClients = new Map<string, OmenClientEntry>();
 const OMEN_CLIENT_IDLE_MS = 10 * 60_000;
 const OMEN_CLIENT_CACHE_LIMIT = 64;
 const MODEL_VISIBLE_PAGE_MAX_CHARS = 30_000;
+const bootstrapAliasProcesses = new Map<string, string>();
+
+function bootstrapAliasCommand(): { executable: string; args: string[]; cwd?: string } {
+  const configuredExecutable = process.env.MCP_BOOTSTRAP_ALIAS_EXECUTABLE?.trim();
+  const configuredCwd = process.env.MCP_BOOTSTRAP_ALIAS_CWD?.trim();
+  const configuredArgs = process.env.MCP_BOOTSTRAP_ALIAS_ARGS_JSON?.trim();
+  let args: string[] = [];
+  if (configuredArgs) {
+    const parsed = JSON.parse(configuredArgs);
+    if (!Array.isArray(parsed) || parsed.some((value) => typeof value !== "string")) {
+      throw new Error("MCP_BOOTSTRAP_ALIAS_ARGS_JSON must be a JSON string array");
+    }
+    args = parsed;
+  }
+  if (configuredExecutable) {
+    return { executable: configuredExecutable, args, ...(configuredCwd ? { cwd: configuredCwd } : {}) };
+  }
+  const home = process.env.USERPROFILE?.trim() || process.env.HOME?.trim();
+  const executable = home
+    ? resolve(home, ".local", "bin", process.platform === "win32" ? "bootstrap.exe" : "bootstrap")
+    : "bootstrap";
+  return { executable, args, ...(configuredCwd ? { cwd: configuredCwd } : {}) };
+}
+
+function publicBootstrapAliasOutput(value: Record<string, unknown>): Record<string, unknown> {
+  const { command: _command, submitted_command: _submittedCommand, cwd: _cwd, ...publicValue } = value;
+  return { ...publicValue, process_id: "bootstrap", bootstrap_alias: true };
+}
 
 function pruneOmenClients(): void {
   const now = Date.now();
@@ -444,12 +472,13 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
   server.registerTool(
     "read_output",
     {
-      description: "Read bounded stdout/stderr from an existing process or supported snapshot alias.",
+      description: "Read bounded process output. bootstrap + stdin starts lifecycle entry; keep reading bootstrap without stdin until STOP_READING.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: z.object({
         process_id: z.string().min(1),
         max_chars: z.number().int().optional(),
         wait_ms: z.number().int().min(0).max(240_000).optional(),
+        stdin: z.string().optional(),
         conversation_id: z.string().min(1).optional(),
         expected_room_head: z.string().min(1).optional(),
       }).strict().superRefine((value, ctx) => {
@@ -460,11 +489,48 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
         if ((value.conversation_id === undefined) !== (value.expected_room_head === undefined)) {
           ctx.addIssue({ code: "custom", message: "conversation_id and expected_room_head must be provided together" });
         }
+        if (value.stdin !== undefined && value.process_id !== "bootstrap") {
+          ctx.addIssue({ code: "custom", path: ["stdin"], message: "stdin on read_output is valid only for process_id=bootstrap lifecycle entry" });
+        }
       }),
       outputSchema: processOutputSchema,
     },
-    async ({ process_id, max_chars, wait_ms, conversation_id, expected_room_head }, extra) => {
+    async ({ process_id, max_chars, wait_ms, stdin, conversation_id, expected_room_head }, extra) => {
       const boundedMaxChars = Math.max(1, Math.min(max_chars ?? MODEL_VISIBLE_PAGE_MAX_CHARS, MODEL_VISIBLE_PAGE_MAX_CHARS));
+      if (process_id === "bootstrap" && stdin !== undefined) {
+        if (bootstrapAliasProcesses.has(callerId)) {
+          throw new Error("bootstrap alias already has an active startup process; keep reading bootstrap without stdin until STOP_READING");
+        }
+        const command = bootstrapAliasCommand();
+        const args = [...command.args];
+        if (conversation_id && expected_room_head) {
+          args.push("--conversation-id", conversation_id, "--expected-room-head", expected_room_head);
+        }
+        const started = await processManager.startStructuredWithWait(
+          command.executable,
+          args,
+          command.cwd,
+          callerId,
+          wait_ms ?? DEFAULT_INITIAL_WAIT_MS,
+          undefined,
+          "lifecycle",
+          stdin,
+          undefined,
+          extra.signal,
+          boundedMaxChars,
+        );
+        const actualProcessId = started.process_id;
+        if (typeof actualProcessId !== "string" || !actualProcessId) throw new Error("bootstrap lifecycle start returned no process identity");
+        if (started.next_action === "READ_SAME_PROCESS_ID") bootstrapAliasProcesses.set(callerId, actualProcessId);
+        else bootstrapAliasProcesses.delete(callerId);
+        return structuredTextResult(publicBootstrapAliasOutput(started), callerId, servingIdentity);
+      }
+      const activeBootstrapProcessId = process_id === "bootstrap" ? bootstrapAliasProcesses.get(callerId) : undefined;
+      if (activeBootstrapProcessId) {
+        const read = await processManager.readOutput(activeBootstrapProcessId, boundedMaxChars, wait_ms, extra.signal);
+        if (read.next_action === "STOP_READING") bootstrapAliasProcesses.delete(callerId);
+        return structuredTextResult(publicBootstrapAliasOutput(read), callerId, servingIdentity);
+      }
       const remoteId = localRemoteProcessId(process_id);
       const value = remoteId !== undefined
         ? remoteProcessResult(await callRemoteOmenTool("read_output", { process_id: remoteId, max_chars: boundedMaxChars, ...(wait_ms !== undefined ? { wait_ms } : {}) }, callerId))

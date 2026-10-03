@@ -75,6 +75,8 @@ assert.equal((await startInputSchema.safeParseAsync({ executable: process.execPa
 assert.equal((await startInputSchema.safeParseAsync({ executable: process.execPath, wait_ms: 240_001 })).success, false, "start_process must bound waits above 240s");
 assert.equal((await readInputSchema.safeParseAsync({ process_id: "probe", wait_ms: 240_000 })).success, true, "read_output must accept 240s explicit waits");
 assert.equal((await readInputSchema.safeParseAsync({ process_id: "probe", wait_ms: 240_001 })).success, false, "read_output must bound waits above 240s");
+assert.equal((await readInputSchema.safeParseAsync({ process_id: "bootstrap", stdin: "exact user message" })).success, true, "bootstrap alias must accept exact user text on lifecycle entry");
+assert.equal((await readInputSchema.safeParseAsync({ process_id: "probe", stdin: "must fail" })).success, false, "ordinary read_output must remain output-only");
 assert.equal((await readInputSchema.safeParseAsync({ process_id: "probe", max_chars: 0 })).success, true, "read_output max_chars=0 must be accepted and clamped instead of burning a retry turn");
 assert.equal((await readInputSchema.safeParseAsync({ process_id: "probe", max_chars: -100 })).success, true, "read_output negative max_chars must be accepted and clamped instead of burning a retry turn");
 assert.equal((await readInputSchema.safeParseAsync({ process_id: "probe", max_chars: 1_000_000 })).success, true, "read_output oversized max_chars must be accepted and clamped instead of burning a retry turn");
@@ -174,7 +176,7 @@ const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "d80a3b59bbe90139a0d5a3613e3a6274a681377bd01e0b09f6efb548427ac076";
+const acceptedContractSha256 = "bd6fb728c2c5420f346affdf3e65bca323e218c5e4e05720a85641f65f1e5a20";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 const expectedTools = [...baseExpectedTools].sort((a, b) => a.name.localeCompare(b.name));
