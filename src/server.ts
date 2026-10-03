@@ -482,11 +482,12 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
         stdin: z.string().optional(),
         has_attachments: z.boolean().optional(),
         conversation_id: z.string().min(1).optional(),
+        message_id: z.string().min(1).optional(),
         expected_room_head: z.string().min(1).optional(),
       }).strict().superRefine((value, ctx) => {
-        const roomFields = value.conversation_id !== undefined || value.expected_room_head !== undefined;
+        const roomFields = value.conversation_id !== undefined || value.message_id !== undefined || value.expected_room_head !== undefined;
         if (roomFields && value.process_id !== "bootstrap") {
-          ctx.addIssue({ code: "custom", path: ["process_id"], message: "conversation_id and expected_room_head are valid only for process_id=bootstrap" });
+          ctx.addIssue({ code: "custom", path: ["process_id"], message: "conversation_id, message_id and expected_room_head are valid only for process_id=bootstrap" });
         }
         if ((value.conversation_id === undefined) !== (value.expected_room_head === undefined)) {
           ctx.addIssue({ code: "custom", message: "conversation_id and expected_room_head must be provided together" });
@@ -500,7 +501,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       }),
       outputSchema: processOutputSchema,
     },
-    async ({ process_id, max_chars, wait_ms, stdin, has_attachments, conversation_id, expected_room_head }, extra) => {
+    async ({ process_id, max_chars, wait_ms, stdin, has_attachments, conversation_id, message_id, expected_room_head }, extra) => {
       const boundedMaxChars = Math.max(1, Math.min(max_chars ?? MODEL_VISIBLE_PAGE_MAX_CHARS, MODEL_VISIBLE_PAGE_MAX_CHARS));
       if (process_id === "bootstrap" && stdin !== undefined) {
         if (bootstrapAliasProcesses.has(callerId)) {
@@ -511,6 +512,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
         if (conversation_id && expected_room_head) {
           args.push("--conversation-id", conversation_id, "--expected-room-head", expected_room_head);
         }
+        if (message_id) args.push("--message-id", message_id);
         if (has_attachments === true) args.push("--has-attachments");
         const started = await processManager.startStructuredWithWait(
           command.executable,

@@ -175,6 +175,10 @@
           "type": "string",
           "minLength": 1
         },
+        "message_id": {
+          "type": "string",
+          "minLength": 1
+        },
         "expected_room_head": {
           "type": "string",
           "minLength": 1
