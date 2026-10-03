@@ -30,6 +30,7 @@ for(const required of [
   "CurrentTopologyPath",
   "sourceBranch",
   "canonical_branch=$sourceBranch",
+  "persistence_task=$TaskName",
   "mcp-live-topology.v2",
   "derived_live_snapshot",
   "Resolve-TopologyBinding",
