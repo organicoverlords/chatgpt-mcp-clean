@@ -31,7 +31,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v6"
+              "const": "process-tools.v4"
             },
             "backend_generation": {
               "type": "string",
@@ -52,7 +52,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v6"
+              "const": "process-tools.v4"
             },
             "backend_generation": {
               "type": "string",
@@ -146,7 +146,7 @@
   },
   {
     "name": "read_output",
-    "description": "Read bounded process output. bootstrap + stdin starts lifecycle entry; keep reading bootstrap without stdin until STOP_READING.",
+    "description": "Read bounded stdout/stderr from an existing process or supported snapshot alias.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -197,7 +197,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v6"
+              "const": "process-tools.v4"
             },
             "backend_generation": {
               "type": "string",
@@ -218,7 +218,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v6"
+              "const": "process-tools.v4"
             },
             "backend_generation": {
               "type": "string",
@@ -871,7 +871,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v6"
+              "const": "process-tools.v4"
             },
             "backend_generation": {
               "type": "string",
@@ -892,7 +892,7 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v6"
+              "const": "process-tools.v4"
             },
             "backend_generation": {
               "type": "string",

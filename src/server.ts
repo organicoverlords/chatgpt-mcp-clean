@@ -241,7 +241,8 @@ const snapshotFreshnessSchema = z.object({
   read_mode: z.enum(["MATERIALIZED_ONLY", "V3_ROOM_BOUND_READ"]),
 }).strict();
 
-export const PROCESS_TOOL_CONTRACT_VERSION = "process-tools.v6" as const;
+// Public ChatGPT registration contract: keep stable; runtime identity is backend_generation/source_commit.
+export const PROCESS_TOOL_CONTRACT_VERSION = "process-tools.v4" as const;
 
 export type ProcessServingIdentity = {
   backend_generation?: string;
@@ -472,7 +473,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
   server.registerTool(
     "read_output",
     {
-      description: "Read bounded process output. bootstrap + stdin starts lifecycle entry; keep reading bootstrap without stdin until STOP_READING.",
+      description: "Read bounded stdout/stderr from an existing process or supported snapshot alias.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: z.object({
         process_id: z.string().min(1),
