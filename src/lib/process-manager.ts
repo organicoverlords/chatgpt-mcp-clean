@@ -1,7 +1,7 @@
-import { createHash, randomUUID } from "node:crypto";
+﻿import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, watch, writeFileSync, type FSWatcher } from "node:fs";
-import { mkdir as mkdirAsync, opendir as opendirAsync, readFile as readFileAsync, readdir as readdirAsync, rename as renameAsync, rm as rmAsync, stat as statAsync, unlink as unlinkAsync, writeFile as writeFileAsync } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { mkdir as mkdirAsync, open as openAsync, opendir as opendirAsync, readFile as readFileAsync, readdir as readdirAsync, rename as renameAsync, rm as rmAsync, stat as statAsync, unlink as unlinkAsync, writeFile as writeFileAsync } from "node:fs/promises";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { Worker } from "node:worker_threads";
 import { currentTelemetryContext, emitTelemetry, withTelemetryContext, type TelemetryContext } from "./transport-telemetry.js";
@@ -13,6 +13,8 @@ const MAX_READ_CHARS = 256_000;
 const OPAQUE_BASE64_MIN_CHARS = 64_000;
 const OPAQUE_BASE64_SAMPLE_CHARS = 8_192;
 const OPAQUE_BASE64_GENERIC_MIN_CHARS = 1_000_000;
+const PREFLIGHT_WORKER_THRESHOLD_CHARS = 64_000;
+const PREFLIGHT_WORKER_TIMEOUT_MS = 10_000;
 
 function looksLikeOpaqueBase64(sample: string, totalChars: number): boolean {
   if (totalChars < OPAQUE_BASE64_MIN_CHARS) return false;
@@ -50,10 +52,12 @@ const MAX_COMPLETED_PROCESSES = 64;
 const TASKKILL_TIMEOUT_MS = 5_000;
 const KILL_SETTLE_MS = 1_000;
 const DEFAULT_MAX_LIVE_PER_CALLER = 6;
-// Shared-host concurrency is opt-in only; normal isolation is per caller/GPT.
+// Per-caller isolation is not enough on a shared Windows host: several callers can
+// otherwise exhaust the machine together. Keep the global cap conservative and
+// configurable, but enabled by default for receipt-backed production managers.
+const DEFAULT_MAX_LIVE_TOTAL = 12;
 const MAX_CONFIGURED_LIVE_TOTAL = 80;
 const HOST_ADMISSION_DIRECTORY = ".host-admission";
-const CONTROL_POLL_MS = 100;
 const CONTROL_RECONCILE_MS = 5_000;
 const CONTROL_HANDOFF_OVERHEAD_MS = 1_500;
 const CONTROL_KILL_TIMEOUT_MS = TASKKILL_TIMEOUT_MS + KILL_SETTLE_MS + CONTROL_HANDOFF_OVERHEAD_MS;
@@ -1348,7 +1352,7 @@ function encodedCommandTransportError(command: string): string | undefined {
   return undefined;
 }
 
-function commandPolicyError(command: string, code = powershellCodeMask(command)): string | undefined {
+export function commandPolicyError(command: string, code = powershellCodeMask(command)): string | undefined {
   const encodedTransportError = encodedCommandTransportError(command);
   if (encodedTransportError) return encodedTransportError;
   const rootScanError = driveRootRecursiveScanError(command, code);
@@ -1420,7 +1424,7 @@ function explicitPowerShellCommandPayload(executionPlan: CommandExecutionPlan): 
   return payload || undefined;
 }
 
-function commandExecutionPreflightError(command: string, executionPlan: CommandExecutionPlan): string | undefined {
+export function commandExecutionPreflightError(command: string, executionPlan: CommandExecutionPlan): string | undefined {
   const outerError = commandPreflightError(command, executionPlan.mode);
   if (outerError) return outerError;
   const payload = explicitPowerShellCommandPayload(executionPlan);
@@ -1437,6 +1441,68 @@ function workerExecArgv(source: string[] = process.execArgv): string[] {
     result.push(arg);
   }
   return result;
+}
+
+let sharedPreflightWorker: Worker | undefined;
+let sharedPreflightWorkerFailure: string | undefined;
+const preflightWorkerWaiters = new Map<string, { resolve: (value: string | undefined) => void; reject: (error: Error) => void }>();
+
+function preflightWorker(): Worker {
+  if (sharedPreflightWorkerFailure) throw new Error("process_preflight_worker_unavailable: " + sharedPreflightWorkerFailure);
+  if (sharedPreflightWorker) return sharedPreflightWorker;
+  const worker = new Worker(new URL("./process-preflight-worker.js", import.meta.url), { execArgv: workerExecArgv() });
+  worker.on("message", (message: any) => {
+    if (!message || typeof message.requestId !== "string") return;
+    const waiter = preflightWorkerWaiters.get(message.requestId);
+    if (!waiter) return;
+    preflightWorkerWaiters.delete(message.requestId);
+    if (typeof message.workerError === "string") waiter.reject(new Error(message.workerError));
+    else waiter.resolve(typeof message.error === "string" ? message.error : undefined);
+    if (preflightWorkerWaiters.size === 0) worker.unref();
+  });
+  const fail = (error: Error) => {
+    sharedPreflightWorkerFailure = error.message;
+    sharedPreflightWorker = undefined;
+    const waiters = [...preflightWorkerWaiters.values()];
+    preflightWorkerWaiters.clear();
+    for (const waiter of waiters) waiter.reject(error);
+  };
+  worker.once("error", fail);
+  worker.once("exit", (code) => fail(new Error("preflight worker exited with code " + code)));
+  worker.unref();
+  sharedPreflightWorker = worker;
+  return worker;
+}
+
+async function commandPreflightAsync(
+  command: string,
+  executionPlan: CommandExecutionPlan,
+  mode: "full" | "policy",
+): Promise<string | undefined> {
+  if (command.length < PREFLIGHT_WORKER_THRESHOLD_CHARS) {
+    return mode === "policy" ? commandPolicyError(command) : commandExecutionPreflightError(command, executionPlan);
+  }
+  const requestId = randomUUID();
+  const worker = preflightWorker();
+  worker.ref();
+  return await new Promise<string | undefined>((resolvePreflight, rejectPreflight) => {
+    const timer = setTimeout(() => {
+      preflightWorkerWaiters.delete(requestId);
+      rejectPreflight(new Error("process_preflight_timeout"));
+    }, PREFLIGHT_WORKER_TIMEOUT_MS);
+    timer.unref();
+    preflightWorkerWaiters.set(requestId, {
+      resolve: (value) => { clearTimeout(timer); resolvePreflight(value); },
+      reject: (error) => { clearTimeout(timer); rejectPreflight(error); },
+    });
+    try {
+      worker.postMessage({ requestId, command, executionPlan, mode });
+    } catch (error) {
+      preflightWorkerWaiters.delete(requestId);
+      clearTimeout(timer);
+      rejectPreflight(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
 }
 
 function powershellWorker(): Worker {
@@ -1481,6 +1547,7 @@ function sharedPowerShellWorker(): Worker {
   sharedLauncherWorker = worker;
   return worker;
 }
+
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -1853,10 +1920,12 @@ export class ProcessManager {
   private lastControlPruneAt = 0;
   private outputSpoolPruneInFlight = false;
   private receiptPruneInFlight = false;
+  private retrievalStopPruneInFlight = false;
+  private controlPruneInFlight = false;
 
   constructor(options: ProcessManagerOptions = {}) {
     this.maxLivePerCaller = options.maxLivePerCaller ?? DEFAULT_MAX_LIVE_PER_CALLER;
-    this.maxLiveTotal = options.maxLiveTotal;
+    this.maxLiveTotal = options.maxLiveTotal ?? DEFAULT_MAX_LIVE_TOTAL;
     if (this.maxLiveTotal !== undefined && (!Number.isInteger(this.maxLiveTotal) || this.maxLiveTotal < 1 || this.maxLiveTotal > MAX_CONFIGURED_LIVE_TOTAL)) {
       throw new Error(`maxLiveTotal must be an integer between 1 and ${MAX_CONFIGURED_LIVE_TOTAL}`);
     }
@@ -1935,6 +2004,68 @@ export class ProcessManager {
     }
   }
 
+  private async persistConcurrencyRejectionAsync(
+    scope: "caller" | "host",
+    rejectionId: string,
+    rejectedAt: string,
+    details: Record<string, unknown>,
+    ownerContext: TelemetryContext,
+  ): Promise<void> {
+    if (!this.receiptArchiveDirectory) return;
+    const dayDirectory = join(this.receiptArchiveDirectory, rejectedAt.slice(0, 10));
+    const path = join(dayDirectory, "rejected-" + rejectionId + ".json");
+    const temporaryPath = path + "." + process.pid + "." + randomUUID() + ".tmp";
+    try {
+      await mkdirAsync(dayDirectory, { recursive: true });
+      await writeFileAsync(
+        temporaryPath,
+        JSON.stringify({ version: 1, kind: "process_concurrency_rejection", scope, ...details, rejected_at: rejectedAt }),
+        { encoding: "utf8", flag: "wx" },
+      );
+      await renameAsync(temporaryPath, path);
+    } catch (error) {
+      emitTelemetry({
+        event: "process_concurrency_rejection_archive_error",
+        scope,
+        rejection_id: rejectionId,
+        error_message: error instanceof Error ? error.message : String(error),
+      }, ownerContext);
+    } finally {
+      try { await unlinkAsync(temporaryPath); } catch {}
+    }
+  }
+
+  private persistConcurrencyRejectionSync(
+    scope: "caller" | "host",
+    rejectionId: string,
+    rejectedAt: string,
+    details: Record<string, unknown>,
+    ownerContext: TelemetryContext,
+  ): void {
+    if (!this.receiptArchiveDirectory) return;
+    const dayDirectory = join(this.receiptArchiveDirectory, rejectedAt.slice(0, 10));
+    const path = join(dayDirectory, "rejected-" + rejectionId + ".json");
+    const temporaryPath = path + "." + process.pid + "." + randomUUID() + ".tmp";
+    try {
+      mkdirSync(dayDirectory, { recursive: true });
+      writeFileSync(
+        temporaryPath,
+        JSON.stringify({ version: 1, kind: "process_concurrency_rejection", scope, ...details, rejected_at: rejectedAt }),
+        { encoding: "utf8", flag: "wx" },
+      );
+      renameSync(temporaryPath, path);
+    } catch (error) {
+      emitTelemetry({
+        event: "process_concurrency_rejection_archive_error",
+        scope,
+        rejection_id: rejectionId,
+        error_message: error instanceof Error ? error.message : String(error),
+      }, ownerContext);
+    } finally {
+      try { unlinkSync(temporaryPath); } catch {}
+    }
+  }
+
   private rejectConcurrency(scope: "caller" | "host", callerId: string, ownerContext: TelemetryContext, liveCount: number, limit: number, activeProcessIds: string[] = []): never {
     const rejectionId = randomUUID();
     const rejectedAt = new Date().toISOString();
@@ -1947,27 +2078,36 @@ export class ProcessManager {
       max_live_processes: limit,
       active_process_ids: activeProcessIds,
     };
-    if (this.receiptArchiveDirectory) {
-      const dayDirectory = join(this.receiptArchiveDirectory, rejectedAt.slice(0, 10));
-      const path = join(dayDirectory, `rejected-${rejectionId}.json`);
-      const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-      try {
-        mkdirSync(dayDirectory, { recursive: true });
-        writeFileSync(temporaryPath, JSON.stringify({ version: 1, kind: "process_concurrency_rejection", scope, ...details, rejected_at: rejectedAt }), { encoding: "utf8", flag: "wx" });
-        renameSync(temporaryPath, path);
-      } catch (error) {
-        emitTelemetry({ event: "process_concurrency_rejection_archive_error", scope, rejection_id: rejectionId, error_message: error instanceof Error ? error.message : String(error) }, ownerContext);
-      } finally {
-        try { unlinkSync(temporaryPath); } catch { /* already renamed or never created */ }
-      }
-    }
+    this.persistConcurrencyRejectionSync(scope, rejectionId, rejectedAt, details, ownerContext);
     emitTelemetry({ event: scope === "host" ? "process_host_concurrency_rejected" : "process_concurrency_rejected", scope, ...details }, ownerContext);
     const code = scope === "host" ? "start_process_host_concurrency_limited" : "start_process_concurrency_limited";
-    throw new Error(`${code}: live_process_count=${liveCount}; max_live_processes=${limit}; active_process_ids=${activeProcessIds.join(",")}; rejection_id=${rejectionId}`);
+    throw new Error(code + ": live_process_count=" + liveCount + "; max_live_processes=" + limit + "; active_process_ids=" + activeProcessIds.join(",") + "; rejection_id=" + rejectionId);
+  }
+
+  private async rejectConcurrencyAsync(scope: "caller" | "host", callerId: string, ownerContext: TelemetryContext, liveCount: number, limit: number, activeProcessIds: string[] = []): Promise<never> {
+    const rejectionId = randomUUID();
+    const rejectedAt = new Date().toISOString();
+    const details = {
+      rejection_id: rejectionId,
+      owner_caller_id: callerId,
+      request_id: ownerContext.request_id ?? null,
+      session_id: ownerContext.session_id ?? null,
+      live_process_count: liveCount,
+      max_live_processes: limit,
+      active_process_ids: activeProcessIds,
+    };
+    await this.persistConcurrencyRejectionAsync(scope, rejectionId, rejectedAt, details, ownerContext);
+    emitTelemetry({ event: scope === "host" ? "process_host_concurrency_rejected" : "process_concurrency_rejected", scope, ...details }, ownerContext);
+    const code = scope === "host" ? "start_process_host_concurrency_limited" : "start_process_concurrency_limited";
+    throw new Error(code + ": live_process_count=" + liveCount + "; max_live_processes=" + limit + "; active_process_ids=" + activeProcessIds.join(",") + "; rejection_id=" + rejectionId);
   }
 
   private rejectHostAdmission(callerId: string, ownerContext: TelemetryContext, liveCount: number, maxLiveTotal: number): never {
     return this.rejectConcurrency("host", callerId, ownerContext, liveCount, maxLiveTotal);
+  }
+
+  private async rejectHostAdmissionAsync(callerId: string, ownerContext: TelemetryContext, liveCount: number, maxLiveTotal: number): Promise<never> {
+    return await this.rejectConcurrencyAsync("host", callerId, ownerContext, liveCount, maxLiveTotal);
   }
 
   private claimHostAdmissionSlot(processId: string, callerId: string, claimedAt: string, ownerContext: TelemetryContext): void {
@@ -2022,6 +2162,87 @@ export class ProcessManager {
     try { unlinkSync(path); } catch { /* a concurrent stale-slot cleanup may already have removed it */ }
   }
 
+  private async readHostAdmissionRecordAsync(path: string): Promise<HostAdmissionRecord | undefined> {
+    try {
+      const record = JSON.parse(await readFileAsync(path, "utf8")) as Partial<HostAdmissionRecord>;
+      if (
+        record.version !== 1 ||
+        typeof record.process_id !== "string" ||
+        !Number.isInteger(record.manager_pid) || Number(record.manager_pid) <= 0 ||
+        (record.child_pid !== null && (!Number.isInteger(record.child_pid) || Number(record.child_pid) <= 0)) ||
+        typeof record.claimed_at !== "string"
+      ) return undefined;
+      return record as HostAdmissionRecord;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async tryReclaimStaleHostAdmissionSlotAsync(path: string): Promise<boolean> {
+    const record = await this.readHostAdmissionRecordAsync(path);
+    if (!record) return false;
+    if (this.pidIsAlive(record.manager_pid)) return false;
+    if (record.child_pid !== null && this.pidIsAlive(record.child_pid)) return false;
+    try {
+      await unlinkAsync(path);
+      emitTelemetry({ event: "process_host_admission_stale_slot_reclaimed", process_id: record.process_id, manager_pid: record.manager_pid, child_pid: record.child_pid });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async claimHostAdmissionSlotAsync(processId: string, callerId: string, claimedAt: string, ownerContext: TelemetryContext): Promise<void> {
+    const maxLiveTotal = this.maxLiveTotal;
+    if (maxLiveTotal === undefined) return;
+    if (!this.hostAdmissionDirectory) {
+      const liveCount = this.liveProcessCount();
+      if (liveCount >= maxLiveTotal) await this.rejectHostAdmissionAsync(callerId, ownerContext, liveCount, maxLiveTotal);
+      return;
+    }
+    const record: HostAdmissionRecord = { version: 1, process_id: processId, manager_pid: process.pid, child_pid: null, claimed_at: claimedAt };
+    for (let index = 0; index < maxLiveTotal; index += 1) {
+      const path = join(this.hostAdmissionDirectory, String(index) + ".json");
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          await writeFileAsync(path, JSON.stringify(record), { encoding: "utf8", flag: "wx" });
+          this.hostAdmissionSlots.set(processId, path);
+          return;
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code !== "EEXIST") {
+            emitTelemetry({ event: "process_host_admission_error", owner_caller_id: callerId, error_message: error instanceof Error ? error.message : String(error) }, ownerContext);
+            throw new Error("start_process_host_admission_unavailable: " + (error instanceof Error ? error.message : String(error)));
+          }
+          if (attempt === 0 && await this.tryReclaimStaleHostAdmissionSlotAsync(path)) continue;
+          break;
+        }
+      }
+    }
+    await this.rejectHostAdmissionAsync(callerId, ownerContext, maxLiveTotal, maxLiveTotal);
+  }
+
+  private async updateHostAdmissionChildPidAsync(processId: string, childPid: number): Promise<void> {
+    const path = this.hostAdmissionSlots.get(processId);
+    if (!path) return;
+    const record = await this.readHostAdmissionRecordAsync(path);
+    if (!record || record.process_id !== processId || record.manager_pid !== process.pid) return;
+    try {
+      await writeFileAsync(path, JSON.stringify({ ...record, child_pid: childPid }), { encoding: "utf8", flag: "w" });
+    } catch (error) {
+      emitTelemetry({ event: "process_host_admission_update_error", process_id: processId, child_pid: childPid, error_message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  private async releaseHostAdmissionSlotAsync(processId: string): Promise<void> {
+    const path = this.hostAdmissionSlots.get(processId);
+    if (!path) return;
+    this.hostAdmissionSlots.delete(processId);
+    const record = await this.readHostAdmissionRecordAsync(path);
+    if (!record || record.process_id !== processId || record.manager_pid !== process.pid) return;
+    try { await unlinkAsync(path); } catch {}
+  }
+
   private tryRuntimeRepair(state: ProcessState, code: number | null, signal: NodeJS.Signals | null): boolean {
     const exitCode = code ?? -1;
     if (exitCode === 0 || signal || state.killRequested || state.error || !state.runtimeRepairAllowed || state.repairAttempts.length >= 1) return false;
@@ -2047,13 +2268,12 @@ export class ProcessManager {
     state.command = normalized;
     state.stdout.reset();
     state.stderr.reset();
-    this.resetOutputSpools(state);
     state.pid = 0;
     state.launching = true;
     state.attemptStartedAt = finishedAt;
     emitTelemetry({ event: "process_command_retried", process_id: state.id, owner_caller_id: state.callerId, repair_reason: repair.reason, prior_exit_code: exitCode }, state.ownerContext);
     this.markProcessChanged(state);
-    try {
+    void this.resetOutputSpoolsAsync(state).then(() => {
       this.launcherWorker.postMessage({
         type: "launch",
         requestId: state.id,
@@ -2064,11 +2284,11 @@ export class ProcessManager {
         stdoutSpoolPath: state.stdoutSpoolPath,
         stderrSpoolPath: state.stderrSpoolPath,
       });
-      return true;
-    } catch (error) {
+    }).catch((error) => {
       state.error = error instanceof Error ? error.message : String(error);
-      return false;
-    }
+      this.observeTerminal(state, -1, null);
+    });
+    return true;
   }
 
   private retrievalStopPath(callerId: string, activityTarget: ActivityTarget): string | undefined {
@@ -2154,6 +2374,91 @@ export class ProcessManager {
     }
   }
 
+  private async pruneRetrievalStopsAsync(force = false): Promise<void> {
+    if (!this.retrievalStopDirectory || this.retrievalStopPruneInFlight) return;
+    const now = Date.now();
+    if (!force && now - this.lastRetrievalStopPruneAt < RETRIEVAL_STOP_PRUNE_INTERVAL_MS) return;
+    this.lastRetrievalStopPruneAt = now;
+    this.retrievalStopPruneInFlight = true;
+    try {
+      let entries;
+      try { entries = await readdirAsync(this.retrievalStopDirectory, { withFileTypes: true }); } catch { return; }
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+        const path = join(this.retrievalStopDirectory, entry.name);
+        try {
+          const marker = JSON.parse(await readFileAsync(path, 'utf8')) as Partial<RetrievalStopMarker>;
+          const expiresAt = Date.parse(String(marker.expires_at ?? ''));
+          if (!Number.isFinite(expiresAt) || expiresAt <= now) await unlinkAsync(path);
+        } catch {
+          try { await unlinkAsync(path); } catch {}
+        }
+      }
+    } finally {
+      this.retrievalStopPruneInFlight = false;
+    }
+  }
+
+  private async armRetrievalStopAsync(state: ProcessState): Promise<void> {
+    if (state.actionClass?.toLowerCase() !== RETRIEVAL_SUFFICIENT_ACTION || !state.activityTarget || state.exitCode !== 0) return;
+    const path = this.retrievalStopPath(state.callerId, state.activityTarget);
+    if (!path) return;
+    const armedAt = state.finishedAt ?? new Date().toISOString();
+    const marker: RetrievalStopMarker = {
+      version: 1,
+      caller_id: state.callerId,
+      activity_target: state.activityTarget,
+      armed_by_process_id: state.id,
+      armed_by_action_class: RETRIEVAL_SUFFICIENT_ACTION,
+      armed_at: armedAt,
+      expires_at: new Date(Date.parse(armedAt) + RETRIEVAL_STOP_TTL_MS).toISOString(),
+    };
+    try {
+      await writeFileAsync(path, JSON.stringify(marker), 'utf8');
+      void this.pruneRetrievalStopsAsync();
+      emitTelemetry({
+        event: 'process_retrieval_stop_armed',
+        process_id: state.id,
+        owner_caller_id: state.callerId,
+        activity_target: state.activityTarget,
+        action_class: state.actionClass,
+        expires_at: marker.expires_at,
+      }, state.ownerContext);
+    } catch (error) {
+      emitTelemetry({
+        event: 'process_retrieval_stop_error',
+        process_id: state.id,
+        owner_caller_id: state.callerId,
+        error_message: error instanceof Error ? error.message : String(error),
+      }, state.ownerContext);
+    }
+  }
+
+  private async activeRetrievalStopAsync(
+    callerId: string,
+    activityTarget: ActivityTarget | undefined,
+    actionClass: string | undefined,
+  ): Promise<RetrievalStopMarker | undefined> {
+    if (!activityTarget || !isRetrievalNavigationAction(actionClass)) return undefined;
+    const path = this.retrievalStopPath(callerId, activityTarget);
+    if (!path) return undefined;
+    void this.pruneRetrievalStopsAsync();
+    try {
+      const marker = JSON.parse(await readFileAsync(path, 'utf8')) as RetrievalStopMarker;
+      if (
+        marker.version !== 1 || marker.caller_id !== callerId || !sameActivityTarget(marker.activity_target, activityTarget)
+        || marker.armed_by_action_class !== RETRIEVAL_SUFFICIENT_ACTION
+      ) return undefined;
+      if (Date.parse(marker.expires_at) <= Date.now()) {
+        try { await unlinkAsync(path); } catch {}
+        return undefined;
+      }
+      return marker;
+    } catch {
+      return undefined;
+    }
+  }
+
   private observeTerminal(state: ProcessState, code: number | null, signal: NodeJS.Signals | null): void {
     if (state.terminalObserved) return;
     state.terminalObserved = true;
@@ -2165,10 +2470,10 @@ export class ProcessManager {
     if (signal) state.signal = signal;
     state.finishedAt = finishedAt;
     state.launching = false;
-    this.releaseHostAdmissionSlot(state.id);
+    void this.releaseHostAdmissionSlotAsync(state.id);
     this.markProcessChanged(state);
     emitTelemetry({ event: "process_exit_observed", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, exit_code: state.exitCode, signal: state.signal ?? null, started_at: state.startedAt, finished_at: state.finishedAt }, state.ownerContext);
-    this.armRetrievalStop(state);
+    void this.armRetrievalStopAsync(state);
     sharedLauncherHandlers.delete(state.id);
     state.resolveDone();
     void this.persistReceiptAsync(state, exitCode, signal, finishedAt);
@@ -2183,7 +2488,7 @@ export class ProcessManager {
       state.launching = false;
       if (message.executionMode === "powershell" || message.executionMode === "native" || message.executionMode === "explicit_shell" || message.executionMode === "native_sequence" || message.executionMode === "native_pipeline") state.executionMode = message.executionMode;
       if (typeof message.executionReason === "string") state.executionReason = message.executionReason;
-      this.updateHostAdmissionChildPid(state.id, state.pid);
+      void this.updateHostAdmissionChildPidAsync(state.id, state.pid);
       emitTelemetry({
         event: message.type === "started" ? "process_started" : "process_step_started",
         process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, cwd: state.cwd, started_at: state.startedAt,
@@ -2243,6 +2548,15 @@ export class ProcessManager {
     return paths;
   }
 
+  private async initializeOutputSpoolsAsync(processId: string): Promise<{ stdout: string; stderr: string }> {
+    const paths = this.outputSpoolPaths(processId);
+    await Promise.all([
+      writeFileAsync(paths.stdout, Buffer.alloc(0)),
+      writeFileAsync(paths.stderr, Buffer.alloc(0)),
+    ]);
+    return paths;
+  }
+
   private resetOutputSpools(state: ProcessState): void {
     writeFileSync(state.stdoutSpoolPath, Buffer.alloc(0));
     writeFileSync(state.stderrSpoolPath, Buffer.alloc(0));
@@ -2255,6 +2569,23 @@ export class ProcessManager {
     state.stdoutSha256 = undefined;
     state.stderrSha256 = undefined;
     const prefix = `${state.id}:`;
+    for (const key of [...this.outputCursors.keys()]) if (key.startsWith(prefix)) this.outputCursors.delete(key);
+  }
+
+  private async resetOutputSpoolsAsync(state: ProcessState): Promise<void> {
+    await Promise.all([
+      writeFileAsync(state.stdoutSpoolPath, Buffer.alloc(0)),
+      writeFileAsync(state.stderrSpoolPath, Buffer.alloc(0)),
+    ]);
+    state.stdoutChars = 0;
+    state.stderrChars = 0;
+    state.stdoutBytes = 0;
+    state.stderrBytes = 0;
+    state.stdoutHash = createHash('sha256');
+    state.stderrHash = createHash('sha256');
+    state.stdoutSha256 = undefined;
+    state.stderrSha256 = undefined;
+    const prefix = state.id + ':';
     for (const key of [...this.outputCursors.keys()]) if (key.startsWith(prefix)) this.outputCursors.delete(key);
   }
 
@@ -2312,6 +2643,97 @@ export class ProcessManager {
     } finally {
       closeSync(fd);
     }
+  }
+
+  private async spoolCharLengthAsync(path: string): Promise<number> {
+    try {
+      const bytes = (await statAsync(path)).size;
+      if (bytes % 2 !== 0) throw new Error("Output spool has odd UTF-16LE byte length: " + path);
+      return bytes / 2;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+      throw error;
+    }
+  }
+
+  private async readSpoolSliceAsync(path: string, startChar: number, maxChars: number): Promise<string> {
+    if (maxChars <= 0) return "";
+    const handle = await openAsync(path, "r");
+    try {
+      const buffer = Buffer.allocUnsafe(maxChars * 2);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, startChar * 2);
+      const evenBytes = bytesRead - (bytesRead % 2);
+      return buffer.subarray(0, evenBytes).toString("utf16le");
+    } finally {
+      await handle.close();
+    }
+  }
+
+  private async pageSpoolOutputAsync(
+    legacy: Record<string, unknown>,
+    stdoutPath: string,
+    stderrPath: string,
+    callerId: string,
+    requestedChars: number,
+  ): Promise<Record<string, unknown>> {
+    const processId = String(legacy.process_id);
+    const cursorKey = this.cursorKey(processId, callerId);
+    const [stdoutTotal, stderrTotal] = await Promise.all([
+      this.spoolCharLengthAsync(stdoutPath),
+      this.spoolCharLengthAsync(stderrPath),
+    ]);
+    const prior = this.outputCursors.get(cursorKey) ?? { stdout: 0, stderr: 0 };
+    const cursor = { stdout: Math.min(prior.stdout, stdoutTotal), stderr: Math.min(prior.stderr, stderrTotal) };
+    const limit = Math.max(1, Math.min(requestedChars, MAX_READ_CHARS));
+    const running = legacy.running === true;
+    const stdoutRemaining = Math.max(0, stdoutTotal - cursor.stdout);
+    const stdoutSuppressionKey = cursorKey + ":stdout";
+    const stdoutSample = stdoutRemaining >= OPAQUE_BASE64_MIN_CHARS
+      ? await this.readSpoolSliceAsync(stdoutPath, cursor.stdout, Math.min(stdoutRemaining, OPAQUE_BASE64_SAMPLE_CHARS))
+      : "";
+    const suppressStdout = stdoutRemaining > 0 && (
+      this.suppressedBase64Streams.has(stdoutSuppressionKey)
+      || looksLikeOpaqueBase64(stdoutSample, stdoutRemaining)
+    );
+    if (suppressStdout) this.suppressedBase64Streams.add(stdoutSuppressionKey);
+    const stdoutText = suppressStdout
+      ? opaqueBase64Marker("stdout", stdoutRemaining, legacy.stdout_sha256)
+      : (stdoutRemaining > 0 ? await this.readSpoolSliceAsync(stdoutPath, cursor.stdout, Math.min(limit, stdoutRemaining)) : "");
+    const stdoutConsumed = suppressStdout ? stdoutRemaining : Math.min(limit, stdoutRemaining);
+    const stderrBudget = Math.max(0, limit - stdoutText.length);
+    const stderrCount = Math.min(stderrBudget, Math.max(0, stderrTotal - cursor.stderr));
+    const stderrText = stderrCount > 0 ? await this.readSpoolSliceAsync(stderrPath, cursor.stderr, stderrCount) : "";
+    const nextStdout = cursor.stdout + stdoutConsumed;
+    const nextStderr = cursor.stderr + stderrCount;
+    const moreCaptured = nextStdout < stdoutTotal || nextStderr < stderrTotal;
+    const base: Record<string, unknown> = { ...legacy, stdout: "", stderr: "" };
+    delete base.stdout_dropped_from_start;
+    delete base.stderr_dropped_from_start;
+    delete base.stdout_truncated;
+    delete base.stderr_truncated;
+    const result = {
+      ...base,
+      next_action: moreCaptured || running ? "READ_SAME_PROCESS_ID" : "STOP_READING",
+      stdout: stdoutText,
+      stderr: stderrText,
+      output_page: {
+        stdout_start: cursor.stdout,
+        stdout_end: nextStdout,
+        stdout_total: stdoutTotal,
+        stderr_start: cursor.stderr,
+        stderr_end: nextStderr,
+        stderr_total: stderrTotal,
+        page_chars: stdoutText.length + stderrText.length,
+        page_limit: limit,
+        more: moreCaptured,
+      },
+    };
+    if (moreCaptured || running) this.outputCursors.set(cursorKey, { stdout: nextStdout, stderr: nextStderr });
+    else {
+      this.outputCursors.delete(cursorKey);
+      this.suppressedBase64Streams.delete(stdoutSuppressionKey);
+    }
+    return result;
   }
 
   private pageSpoolOutput(
@@ -2550,14 +2972,19 @@ export class ProcessManager {
 
   private pruneControlFiles(): void {
     const now = Date.now();
-    if (now - this.lastControlPruneAt < CONTROL_PRUNE_INTERVAL_MS) return;
+    if (now - this.lastControlPruneAt < CONTROL_PRUNE_INTERVAL_MS || this.controlPruneInFlight) return;
     this.lastControlPruneAt = now;
+    this.controlPruneInFlight = true;
+    void this.pruneControlFilesAsync(now).finally(() => { this.controlPruneInFlight = false; });
+  }
+
+  private async pruneControlFilesAsync(now: number): Promise<void> {
     const cutoff = now - CONTROL_RETENTION_MS;
     for (const directory of [this.controlRequestDirectory, this.controlResponseDirectory]) {
       if (!directory) continue;
       let entries;
       try {
-        entries = readdirSync(directory, { withFileTypes: true });
+        entries = await readdirAsync(directory, { withFileTypes: true });
       } catch {
         continue;
       }
@@ -2565,8 +2992,8 @@ export class ProcessManager {
         if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
         const path = join(directory, entry.name);
         try {
-          if (statSync(path).mtimeMs < cutoff) unlinkSync(path);
-        } catch { /* best-effort cleanup */ }
+          if ((await statAsync(path)).mtimeMs < cutoff) await unlinkAsync(path);
+        } catch {}
       }
     }
   }
@@ -2640,6 +3067,54 @@ export class ProcessManager {
     }
   }
 
+  private async waitForControlResponse(
+    responsePath: string,
+    deadlineMs: number,
+    signal?: AbortSignal,
+  ): Promise<ProcessControlResponse> {
+    const directory = this.controlResponseDirectory;
+    if (!directory) throw new Error("process control response directory unavailable");
+    const expectedName = basename(responsePath);
+    return await new Promise<ProcessControlResponse>((resolveResponse, rejectResponse) => {
+      let settled = false;
+      let watcher: FSWatcher | undefined;
+      let timer: NodeJS.Timeout | undefined;
+      const finish = (error?: Error, response?: ProcessControlResponse) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        try { watcher?.close(); } catch {}
+        signal?.removeEventListener("abort", onAbort);
+        if (error) rejectResponse(error);
+        else resolveResponse(response!);
+      };
+      const tryRead = async () => {
+        if (settled) return;
+        try {
+          const response = JSON.parse(await readFileAsync(responsePath, "utf8")) as ProcessControlResponse;
+          finish(undefined, response);
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code !== "ENOENT") finish(error instanceof Error ? error : new Error(String(error)));
+        }
+      };
+      const onAbort = () => finish(new Error("request_aborted"));
+      try {
+        watcher = watch(directory, { persistent: false }, (_event, filename) => {
+          if (filename === null || String(filename) === expectedName) void tryRead();
+        });
+        watcher.once("error", (error) => finish(error));
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+      timer = setTimeout(() => finish(new Error("process_control_handoff_timeout")), Math.max(0, deadlineMs - Date.now()));
+      timer.unref();
+      void tryRead();
+    });
+  }
+
   private async requestRemoteControl(
     processId: string,
     action: "read" | "kill",
@@ -2678,39 +3153,19 @@ export class ProcessManager {
       request_id: requestId,
     }, observer);
     try {
-      while (Date.now() <= deadlineMs) {
-        if (signal?.aborted) throw new Error("request_aborted");
-        try {
-          const response = JSON.parse(await readFileAsync(responsePath, "utf8")) as ProcessControlResponse;
-          if (response.version !== 1 || response.request_id !== requestId || response.process_id !== processId) {
-            throw new Error(`Invalid process control response for ${processId}`);
-          }
-          if (response.error) throw new Error(response.error);
-          if (!response.result || typeof response.result !== "object") throw new Error(`Empty process control response for ${processId}`);
-          emitTelemetry({
-            event: "process_control_handoff_completed",
-            process_id: processId,
-            action,
-            request_id: requestId,
-          }, observer);
-          return response.result;
-        } catch (error) {
-          const code = error instanceof Error && "code" in error ? (error as NodeJS.ErrnoException).code : undefined;
-          if (code !== "ENOENT") throw error;
-        }
-        if (action === "read") {
-          const receipt = await this.readReceiptAsync(processId, maxChars);
-          if (receipt) return receipt;
-        }
-        await delay(CONTROL_POLL_MS);
+      const response = await this.waitForControlResponse(responsePath, deadlineMs, signal);
+      if (response.version !== 1 || response.request_id !== requestId || response.process_id !== processId) {
+        throw new Error("Invalid process control response for " + processId);
       }
+      if (response.error) throw new Error(response.error);
+      if (!response.result || typeof response.result !== "object") throw new Error("Empty process control response for " + processId);
       emitTelemetry({
-        event: "process_control_handoff_timeout",
+        event: "process_control_handoff_completed",
         process_id: processId,
         action,
         request_id: requestId,
       }, observer);
-      throw new Error(`Process owner unavailable for process_id: ${processId}`);
+      return response.result;
     } finally {
       try { await unlinkAsync(requestPath); } catch { /* owner may already have consumed it */ }
       try { await unlinkAsync(responsePath); } catch { /* response may not exist */ }
@@ -2724,7 +3179,11 @@ export class ProcessManager {
     const stdout = state.stdout.tail(MAX_CAPTURE_CHARS, MAX_CAPTURE_CHARS);
     const stderr = state.stderr.tail(MAX_CAPTURE_CHARS, MAX_CAPTURE_CHARS);
     const audit = this.completeProcessAudit(state, exitCode, signal);
-    const receipt: CompletedProcessReceipt = { version: 1, process_id: state.id, pid: state.pid, caller_id: state.callerId, ...(state.activityTarget ? { activity_target: state.activityTarget } : {}), ...(state.actionClass ? { action_class: state.actionClass } : {}), ...(state.executionMode ? { execution_mode: state.executionMode } : {}), ...(state.executionReason ? { execution_reason: state.executionReason } : {}), ...audit, command, ...(state.command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}), ...(state.submittedCommand !== undefined ? { submitted_command: state.submittedCommand.slice(0, MAX_COMMAND_REPORT_CHARS), ...(state.submittedCommand.length > MAX_COMMAND_REPORT_CHARS ? { submitted_command_truncated: true as const } : {}) } : {}), cwd: state.cwd, stdout: stdout.text, stderr: stderr.text, stdout_spool_path: state.stdoutSpoolPath, stderr_spool_path: state.stderrSpoolPath, stdout_chars: this.spoolCharLength(state.stdoutSpoolPath), stderr_chars: this.spoolCharLength(state.stderrSpoolPath), ...(stdout.truncated ? { stdout_truncated: true as const } : {}), ...(stderr.truncated ? { stderr_truncated: true as const } : {}), exit_code: exitCode, signal, started_at: state.startedAt, finished_at: finishedAt, ...(state.error ? { error: state.error } : {}), ...(state.errorCode ? { error_code: state.errorCode } : {}), ...(state.repairAttempts.length > 0 ? { repair_attempts: state.repairAttempts } : {}) };
+    const [stdoutChars, stderrChars] = await Promise.all([
+      this.spoolCharLengthAsync(state.stdoutSpoolPath),
+      this.spoolCharLengthAsync(state.stderrSpoolPath),
+    ]);
+    const receipt: CompletedProcessReceipt = { version: 1, process_id: state.id, pid: state.pid, caller_id: state.callerId, ...(state.activityTarget ? { activity_target: state.activityTarget } : {}), ...(state.actionClass ? { action_class: state.actionClass } : {}), ...(state.executionMode ? { execution_mode: state.executionMode } : {}), ...(state.executionReason ? { execution_reason: state.executionReason } : {}), ...audit, command, ...(state.command.length > MAX_COMMAND_REPORT_CHARS ? { command_truncated: true as const } : {}), ...(state.submittedCommand !== undefined ? { submitted_command: state.submittedCommand.slice(0, MAX_COMMAND_REPORT_CHARS), ...(state.submittedCommand.length > MAX_COMMAND_REPORT_CHARS ? { submitted_command_truncated: true as const } : {}) } : {}), cwd: state.cwd, stdout: stdout.text, stderr: stderr.text, stdout_spool_path: state.stdoutSpoolPath, stderr_spool_path: state.stderrSpoolPath, stdout_chars: stdoutChars, stderr_chars: stderrChars, ...(stdout.truncated ? { stdout_truncated: true as const } : {}), ...(stderr.truncated ? { stderr_truncated: true as const } : {}), exit_code: exitCode, signal, started_at: state.startedAt, finished_at: finishedAt, ...(state.error ? { error: state.error } : {}), ...(state.errorCode ? { error_code: state.errorCode } : {}), ...(state.repairAttempts.length > 0 ? { repair_attempts: state.repairAttempts } : {}) };
     const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
     try {
       await writeFileAsync(temporaryPath, JSON.stringify(receipt), { encoding: "utf8", flag: "wx" });
@@ -2804,9 +3263,67 @@ export class ProcessManager {
     return undefined;
   }
 
+  private async formatReceiptAsync(receipt: CompletedProcessReceipt, processId: string, maxChars: number): Promise<Record<string, unknown> | undefined> {
+    if (!this.isValidCompletedReceipt(receipt, processId)) return undefined;
+    const limit = Math.max(1, Math.min(maxChars, MAX_READ_CHARS));
+    const observer = currentTelemetryContext();
+    const observerCallerId = observer.caller_id ?? "caller_unknown";
+    emitTelemetry({ event: "process_receipt_read", process_id: receipt.process_id, pid: receipt.pid, owner_caller_id: receipt.caller_id, caller_id: observerCallerId }, observer);
+    const audit = receipt.audit_schema === "process-output-evidence.v1"
+      ? {
+          ...(receipt.request_id ? { request_id: receipt.request_id } : {}),
+          audit_schema: receipt.audit_schema,
+          retained_stdout_chars: receipt.retained_stdout_chars,
+          retained_stderr_chars: receipt.retained_stderr_chars,
+          retained_output_chars: receipt.retained_output_chars,
+          retained_stdout_bytes: receipt.retained_stdout_bytes,
+          retained_stderr_bytes: receipt.retained_stderr_bytes,
+          retained_output_bytes: receipt.retained_output_bytes,
+          stdout_sha256: receipt.stdout_sha256,
+          stderr_sha256: receipt.stderr_sha256,
+          evidence_completeness: receipt.evidence_completeness,
+          execution_outcome: receipt.execution_outcome,
+        }
+      : processOutputAudit(receipt.stdout, receipt.stderr, Boolean(receipt.stdout_truncated), Boolean(receipt.stderr_truncated), receipt.exit_code, receipt.signal, receipt.error, receipt.request_id);
+    const failureDiagnostic = processFailureDiagnostic(receipt.command, receipt.stdout, receipt.stderr, receipt.exit_code, receipt.error, receipt.execution_reason, receipt.error_code);
+    const legacy = { ...processResponseState(receipt.started_at, false, receipt.finished_at), process_id: receipt.process_id, pid: receipt.pid, ...audit, ...(failureDiagnostic ? { failure_diagnostic: failureDiagnostic } : {}), ...(receipt.activity_target ? { activity_target: receipt.activity_target } : {}), ...(receipt.action_class ? { action_class: receipt.action_class } : {}), ...(receipt.execution_mode ? { execution_mode: receipt.execution_mode } : {}), ...(receipt.execution_reason ? { execution_reason: receipt.execution_reason } : {}), command: receipt.command, ...(receipt.command_truncated ? { command_truncated: true } : {}), ...(receipt.submitted_command !== undefined ? { submitted_command: receipt.submitted_command, ...(receipt.submitted_command_truncated ? { submitted_command_truncated: true } : {}) } : {}), cwd: receipt.cwd, running: false, stdout: receipt.stdout.slice(-limit), stderr: receipt.stderr.slice(-limit), exit_code: receipt.exit_code, signal: receipt.signal, started_at: receipt.started_at, finished_at: receipt.finished_at, ...(receipt.stdout_truncated || receipt.stdout.length > limit ? { stdout_truncated: true } : {}), ...(receipt.stderr_truncated || receipt.stderr.length > limit ? { stderr_truncated: true } : {}), ...(receipt.error ? { error: receipt.error } : {}), ...(receipt.error_code ? { error_code: receipt.error_code } : {}), ...(receipt.repair_attempts?.length ? { repair_attempts: receipt.repair_attempts } : {}) };
+    const stdoutPath = typeof receipt.stdout_spool_path === "string" ? receipt.stdout_spool_path : undefined;
+    const stderrPath = typeof receipt.stderr_spool_path === "string" ? receipt.stderr_spool_path : undefined;
+    if (stdoutPath && stderrPath) {
+      try {
+        const [stdoutTotal, stderrTotal] = await Promise.all([
+          this.spoolCharLengthAsync(stdoutPath),
+          this.spoolCharLengthAsync(stderrPath),
+        ]);
+        const cursorExists = this.outputCursors.has(this.cursorKey(receipt.process_id, observerCallerId));
+        if (cursorExists || stdoutTotal + stderrTotal > limit) {
+          return await this.pageSpoolOutputAsync(legacy, stdoutPath, stderrPath, observerCallerId, limit);
+        }
+        const [stdoutText, stderrText] = await Promise.all([
+          this.readSpoolSliceAsync(stdoutPath, 0, stdoutTotal),
+          this.readSpoolSliceAsync(stderrPath, 0, stderrTotal),
+        ]);
+        const complete = { ...legacy, stdout: stdoutText, stderr: stderrText };
+        delete complete.stdout_truncated;
+        delete complete.stderr_truncated;
+        return complete;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+    const cursorExists = this.outputCursors.has(this.cursorKey(receipt.process_id, observerCallerId));
+    const needsPaging = cursorExists || receipt.stdout.length + receipt.stderr.length > limit;
+    return needsPaging ? this.pageOutput(legacy, receipt.stdout, receipt.stderr, observerCallerId, Boolean(receipt.stdout_truncated), Boolean(receipt.stderr_truncated), limit) : legacy;
+  }
+
   private async readReceiptAsync(processId: string, maxChars: number): Promise<Record<string, unknown> | undefined> {
+    this.pruneReceipts();
     for (const path of this.receiptReadPaths(processId)) {
-      try { return this.formatReceipt(JSON.parse(await readFileAsync(path, "utf8")) as CompletedProcessReceipt, processId, maxChars); } catch {}
+      try {
+        const receipt = JSON.parse(await readFileAsync(path, "utf8")) as CompletedProcessReceipt;
+        const formatted = await this.formatReceiptAsync(receipt, processId, maxChars);
+        if (formatted) return formatted;
+      } catch {}
     }
     return undefined;
   }
@@ -2992,6 +3509,101 @@ export class ProcessManager {
     emitTelemetry({ event: "process_launch_queued", process_id: state.id, owner_caller_id: state.callerId, cwd: state.cwd, started_at: state.startedAt, ...(state.activityTarget ? { activity_target: state.activityTarget } : {}), ...(state.actionClass ? { action_class: state.actionClass } : {}) }, state.ownerContext);
     return { ...processResponseState(state.startedAt, true), process_id: state.id, pid: 0, cwd: state.cwd, running: true, launching: true } as StartResult;
   }
+  private async startPreparedAsync(
+    effectiveCommand: string,
+    executionPlan: CommandExecutionPlan,
+    workingDirectory: string | undefined,
+    callerId: string,
+    activityTarget: ActivityTarget | undefined,
+    actionClass: string | undefined,
+    submittedCommand: string | undefined,
+    normalizationRewrites: string[] = [],
+    preflightCommand: string = effectiveCommand,
+    preflightMode: "full" | "policy" = "full",
+    transportPreflightError?: string,
+    dedupeIdentity: string = effectiveCommand,
+    runtimeRepairAllowed = true,
+  ): Promise<StartResult> {
+    const preflightError = transportPreflightError ?? await commandPreflightAsync(preflightCommand, executionPlan, preflightMode);
+    if (preflightError) {
+      const rejectionId = randomUUID();
+      void this.persistPreflightRejectionAsync(rejectionId, submittedCommand ?? effectiveCommand, workingDirectory, callerId, preflightError);
+      emitTelemetry({ event: "process_preflight_rejected", reason: preflightError, rejection_id: rejectionId });
+      throw new Error(`start_process_preflight_failed: ${preflightError}`);
+    }
+    const retrievalStop = await this.activeRetrievalStopAsync(callerId, activityTarget, actionClass);
+    if (retrievalStop) {
+      emitTelemetry({
+        event: "process_retrieval_stop_rejected",
+        owner_caller_id: callerId,
+        activity_target: activityTarget,
+        action_class: actionClass,
+        armed_by_process_id: retrievalStop.armed_by_process_id,
+        expires_at: retrievalStop.expires_at,
+      });
+      throw new Error(`start_process_retrieval_stop: successful ${RETRIEVAL_SUFFICIENT_ACTION} already satisfied this activity_target; synthesize the answer now. If one concrete unresolved fact remains, use a new specific activity_target.id before further stack_/memory_/timeline_/report_ retrieval. armed_by_process_id=${retrievalStop.armed_by_process_id}`);
+    }
+    const cwd = normalizedCwd(workingDirectory);
+    const duplicate = [...this.processes.values()].find((state) => state.exitCode === null && state.callerId === callerId && state.cwd === cwd && state.dedupeIdentity === dedupeIdentity && sameActivityTarget(state.activityTarget, activityTarget) && state.actionClass === actionClass);
+    if (duplicate) {
+      emitTelemetry({ event: "process_reused", process_id: duplicate.id, pid: duplicate.pid, owner_caller_id: duplicate.callerId });
+      return { ...processResponseState(duplicate.startedAt, true), process_id: duplicate.id, pid: duplicate.pid, cwd: duplicate.cwd, running: true, ...(duplicate.launching ? { launching: true } : {}) } as StartResult;
+    }
+    const ownerContext = currentTelemetryContext();
+    const liveForCaller = [...this.processes.values()].filter((state) => state.exitCode === null && state.callerId === callerId);
+    if (liveForCaller.length >= this.maxLivePerCaller) await this.rejectConcurrencyAsync("caller", callerId, ownerContext, liveForCaller.length, this.maxLivePerCaller, liveForCaller.map((state) => state.id));
+    if (sharedLauncherFailure) throw new Error(`process_launcher_unavailable: ${sharedLauncherFailure}`);
+    const processId = randomUUID();
+    const startedAt = new Date().toISOString();
+    await this.claimHostAdmissionSlotAsync(processId, callerId, startedAt, ownerContext);
+    let outputSpools: { stdout: string; stderr: string };
+    try {
+      outputSpools = await this.initializeOutputSpoolsAsync(processId);
+    } catch (error) {
+      await this.releaseHostAdmissionSlotAsync(processId);
+      throw error;
+    }
+    let resolveDone!: () => void;
+    const done = new Promise<void>((resolve) => { resolveDone = resolve; });
+    const state: ProcessState = {
+      id: processId, pid: 0, callerId, ownerContext, command: effectiveCommand, dedupeIdentity, ...(submittedCommand !== undefined ? { submittedCommand } : {}), ...(activityTarget ? { activityTarget } : {}), ...(actionClass ? { actionClass } : {}), cwd,
+      launching: true, terminalObserved: false, resolveDone, killRequested: false,
+      stdout: new BoundedCapture(), stderr: new BoundedCapture(),
+      stdoutSpoolPath: outputSpools.stdout, stderrSpoolPath: outputSpools.stderr,
+      stdoutChars: 0, stderrChars: 0, stdoutBytes: 0, stderrBytes: 0,
+      stdoutHash: createHash("sha256"), stderrHash: createHash("sha256"),
+      startedAt, exitCode: null,
+      done, revision: 0, lastReadRevisionByCaller: new Map<string, number>(), waiters: new Set<() => void>(),
+      attemptStartedAt: startedAt, repairAttempts: [], runtimeRepairAllowed,
+    };
+    this.processes.set(state.id, state);
+    sharedLauncherHandlers.set(state.id, (message) => this.handleLauncherMessage(message));
+    try {
+      this.launcherWorker.postMessage({
+        type: "launch",
+        requestId: state.id,
+        command: effectiveCommand,
+        cwd,
+        plan: executionPlan,
+        ownerCallerId: state.callerId,
+        ownerSessionId: state.ownerContext.session_id ?? undefined,
+        stdoutSpoolPath: state.stdoutSpoolPath,
+        stderrSpoolPath: state.stderrSpoolPath,
+      });
+    } catch (error) {
+      sharedLauncherHandlers.delete(state.id);
+      this.processes.delete(state.id);
+      await this.releaseHostAdmissionSlotAsync(state.id);
+      await Promise.all([
+        unlinkAsync(state.stdoutSpoolPath).catch(() => undefined),
+        unlinkAsync(state.stderrSpoolPath).catch(() => undefined),
+      ]);
+      throw error;
+    }
+    for (const rewrite of normalizationRewrites) emitTelemetry({ event: "process_command_normalized", process_id: state.id, rewrite }, state.ownerContext);
+    emitTelemetry({ event: "process_launch_queued", process_id: state.id, owner_caller_id: state.callerId, cwd: state.cwd, started_at: state.startedAt, ...(state.activityTarget ? { activity_target: state.activityTarget } : {}), ...(state.actionClass ? { action_class: state.actionClass } : {}) }, state.ownerContext);
+    return { ...processResponseState(state.startedAt, true), process_id: state.id, pid: 0, cwd: state.cwd, running: true, launching: true } as StartResult;
+  }
 
   start(command: string, workingDirectory?: string, callerId = "caller_unknown", activityTarget?: ActivityTarget, actionClass?: string): StartResult {
     this.pruneCompleted();
@@ -3062,6 +3674,80 @@ export class ProcessManager {
     );
   }
 
+  private async startAsync(
+    command: string,
+    workingDirectory?: string,
+    callerId = "caller_unknown",
+    activityTarget?: ActivityTarget,
+    actionClass?: string,
+  ): Promise<StartResult> {
+    this.pruneCompleted();
+    const prepared = replayPrepareStartProcessCommand(command);
+    const executionPlan = planCommandExecution(prepared.command, POWERSHELL_EXE);
+    return await this.startPreparedAsync(
+      prepared.command,
+      executionPlan,
+      workingDirectory,
+      callerId,
+      activityTarget,
+      actionClass,
+      prepared.command !== command ? command : undefined,
+      prepared.rewrites,
+      prepared.command,
+    );
+  }
+
+  private async startStructuredAsync(
+    executable: string,
+    args: string[] = [],
+    workingDirectory?: string,
+    callerId = "caller_unknown",
+    activityTarget?: ActivityTarget,
+    actionClass?: string,
+    stdin?: string,
+    environment?: Record<string, string>,
+  ): Promise<StartResult> {
+    this.pruneCompleted();
+    const executionPlan = planStructuredExecution(executable, args, stdin, POWERSHELL_EXE, process.env, environment);
+    const displayCommand = structuredCommandDisplay(executable, args);
+    const inputText = stdin === undefined ? displayCommand : displayCommand + "\n" + stdin;
+    const preflightCommand = structuredPolicyText(inputText, environment);
+    const transportPreflightError =
+      structuredArgvTransportError(executable, args)
+      ?? structuredHostPreflightError(executable);
+    return await this.startPreparedAsync(displayCommand, executionPlan, workingDirectory, callerId, activityTarget, actionClass, undefined, ["structured_argv", ...(stdin !== undefined ? ["structured_stdin"] : [])], preflightCommand, "full", transportPreflightError, this.executionDedupeIdentity(executionPlan), false);
+  }
+
+  private async startScriptAsync(
+    language: StructuredScriptLanguage,
+    script: string,
+    workingDirectory?: string,
+    callerId = "caller_unknown",
+    activityTarget?: ActivityTarget,
+    actionClass?: string,
+    environment?: Record<string, string>,
+  ): Promise<StartResult> {
+    this.pruneCompleted();
+    const executionPlan = planStructuredScript(language, script, POWERSHELL_EXE, process.env, environment);
+    const displayCommand = "[" + language + " script]\n" + script;
+    const policyCommand = structuredPolicyText(structuredCommandDisplay(executionPlan.executable, executionPlan.args) + "\n" + script, environment);
+    return await this.startPreparedAsync(
+      displayCommand,
+      executionPlan,
+      workingDirectory,
+      callerId,
+      activityTarget,
+      actionClass,
+      undefined,
+      ["structured_script", "structured_script_" + language + "_stdin"],
+      policyCommand,
+      "policy",
+      undefined,
+      this.executionDedupeIdentity(executionPlan),
+      false,
+    );
+  }
+
   async startWithWait(
     command: string,
     workingDirectory?: string,
@@ -3072,7 +3758,7 @@ export class ProcessManager {
     outputMaxChars = MAX_READ_CHARS,
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
-    const started = this.start(command, cwd, callerId, activityTarget, actionClass);
+    const started = await this.startAsync(command, cwd, callerId, activityTarget, actionClass);
     const boundedWaitMs = Math.max(0, Math.min(waitMs, 240_000));
     emitTelemetry({
       event: "process_wait_requested",
@@ -3082,9 +3768,9 @@ export class ProcessManager {
     });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
-    if (!state || state.exitCode !== null) return this.read(started.process_id, outputMaxChars);
+    if (!state || state.exitCode !== null) return await this.readAsync(started.process_id, outputMaxChars);
     await Promise.race([state.done, delay(boundedWaitMs)]);
-    return this.read(started.process_id, outputMaxChars);
+    return await this.readAsync(started.process_id, outputMaxChars);
   }
 
   read(processId: string, maxChars = MAX_READ_CHARS, markRead = true): Record<string, unknown> {
@@ -3153,6 +3839,75 @@ export class ProcessManager {
   }
 
 
+  private async readAsync(processId: string, maxChars = MAX_READ_CHARS, markRead = true): Promise<Record<string, unknown>> {
+    this.pruneCompleted();
+    const limit = Math.max(1, Math.min(maxChars, MAX_READ_CHARS));
+    const state = this.processes.get(processId);
+    if (!state) {
+      const receipt = await this.readReceiptAsync(processId, limit);
+      if (receipt) return receipt;
+      throw new Error("Unknown process_id: " + processId);
+    }
+    const command = state.command.slice(0, MAX_COMMAND_REPORT_CHARS);
+    const stdout = state.stdout.tail(limit);
+    const stderr = state.stderr.tail(limit);
+    const fullStdout = state.stdout.full();
+    const fullStderr = state.stderr.full();
+    const observer = currentTelemetryContext();
+    const observerCallerId = observer.caller_id ?? "caller_unknown";
+    if (markRead) state.lastReadRevisionByCaller.set(observerCallerId, state.revision);
+    emitTelemetry({
+      event: "process_read",
+      process_id: state.id,
+      pid: state.pid,
+      owner_caller_id: state.callerId,
+      caller_id: observerCallerId,
+      running: state.exitCode === null,
+      reassociated: Boolean(observer.caller_id && observer.caller_id !== state.callerId),
+    }, observer);
+    const legacy = {
+      ...processResponseState(state.startedAt, state.exitCode === null, state.finishedAt),
+      process_id: state.id,
+      pid: state.pid,
+      ...(state.activityTarget ? { activity_target: state.activityTarget } : {}),
+      ...(state.actionClass ? { action_class: state.actionClass } : {}),
+      ...(state.executionMode ? { execution_mode: state.executionMode } : {}),
+      ...(state.executionReason ? { execution_reason: state.executionReason } : {}),
+      command,
+      ...((state.command.length > MAX_COMMAND_REPORT_CHARS) ? { command_truncated: true } : {}),
+      ...(state.submittedCommand !== undefined ? { submitted_command: state.submittedCommand.slice(0, MAX_COMMAND_REPORT_CHARS), ...(state.submittedCommand.length > MAX_COMMAND_REPORT_CHARS ? { submitted_command_truncated: true } : {}) } : {}),
+      cwd: state.cwd,
+      running: state.exitCode === null,
+      ...(state.launching ? { launching: true } : {}),
+      stdout: stdout.text,
+      stderr: stderr.text,
+      ...(state.exitCode !== null ? this.completeProcessAudit(state, state.exitCode, state.signal ?? null) : {}),
+      ...(state.exitCode !== null ? (() => {
+        const diagnostic = processFailureDiagnostic(state.command, fullStdout.text, fullStderr.text, state.exitCode, state.error, state.executionReason, state.errorCode);
+        return diagnostic ? { failure_diagnostic: diagnostic } : {};
+      })() : {}),
+      exit_code: state.exitCode,
+      signal: state.signal ?? null,
+      started_at: state.startedAt,
+      finished_at: state.finishedAt ?? null,
+      ...(stdout.truncated ? { stdout_truncated: true, stdout_dropped_from_start: stdout.dropped } : {}),
+      ...(stderr.truncated ? { stderr_truncated: true, stderr_dropped_from_start: stderr.dropped } : {}),
+      ...(state.error ? { error: state.error } : {}),
+      ...(state.errorCode ? { error_code: state.errorCode } : {}),
+      ...(state.repairAttempts.length > 0 ? { repair_attempts: state.repairAttempts } : {}),
+    };
+    const cursorExists = this.outputCursors.has(this.cursorKey(state.id, observerCallerId));
+    const [stdoutChars, stderrChars] = await Promise.all([
+      this.spoolCharLengthAsync(state.stdoutSpoolPath),
+      this.spoolCharLengthAsync(state.stderrSpoolPath),
+    ]);
+    const needsPaging = state.exitCode === null || cursorExists || stdoutChars + stderrChars > limit;
+    return needsPaging
+      ? await this.pageSpoolOutputAsync(legacy, state.stdoutSpoolPath, state.stderrSpoolPath, observerCallerId, limit)
+      : legacy;
+  }
+
+
   private async waitForDoneOrTimeout(state: ProcessState, waitMs: number, signal?: AbortSignal): Promise<void> {
     if (!signal) {
       await Promise.race([state.done, delay(waitMs)]);
@@ -3189,14 +3944,14 @@ export class ProcessManager {
     outputMaxChars = MAX_READ_CHARS,
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
-    const started = this.startScript(language, script, cwd, callerId, activityTarget, actionClass, environment);
+    const started = await this.startScriptAsync(language, script, cwd, callerId, activityTarget, actionClass, environment);
     const boundedWaitMs = Math.max(0, Math.min(waitMs, 240_000));
     emitTelemetry({ event: "process_wait_requested", action: "start_script", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
-    if (!state || state.exitCode !== null) return this.read(started.process_id, outputMaxChars);
+    if (!state || state.exitCode !== null) return await this.readAsync(started.process_id, outputMaxChars);
     await this.waitForDoneOrTimeout(state, boundedWaitMs, signal);
-    return this.read(started.process_id, outputMaxChars);
+    return await this.readAsync(started.process_id, outputMaxChars);
   }
 
   async startStructuredWithWait(
@@ -3213,14 +3968,14 @@ export class ProcessManager {
     outputMaxChars = MAX_READ_CHARS,
   ): Promise<Record<string, unknown>> {
     const cwd = await boundedValidatedCwd(workingDirectory);
-    const started = this.startStructured(executable, args, cwd, callerId, activityTarget, actionClass, stdin, environment);
+    const started = await this.startStructuredAsync(executable, args, cwd, callerId, activityTarget, actionClass, stdin, environment);
     const boundedWaitMs = Math.max(0, Math.min(waitMs, 240_000));
     emitTelemetry({ event: "process_wait_requested", action: "start_structured", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
-    if (!state || state.exitCode !== null) return this.read(started.process_id, outputMaxChars);
+    if (!state || state.exitCode !== null) return await this.readAsync(started.process_id, outputMaxChars);
     await this.waitForDoneOrTimeout(state, boundedWaitMs, signal);
-    return this.read(started.process_id, outputMaxChars);
+    return await this.readAsync(started.process_id, outputMaxChars);
   }
 
   async readOutput(processId: string, maxChars = MAX_READ_CHARS, waitMs?: number, signal?: AbortSignal): Promise<Record<string, unknown>> {
@@ -3283,15 +4038,19 @@ export class ProcessManager {
       if (receipt) return receipt;
       return await this.requestRemoteControl(processId, "read", currentTelemetryContext(), maxChars, boundedWaitMs, signal);
     }
-    if (boundedWaitMs === 0 || state.exitCode !== null) return this.read(processId, maxChars);
+    if (boundedWaitMs === 0 || state.exitCode !== null) return await this.readAsync(processId, maxChars);
     const observer = currentTelemetryContext();
     const observerCallerId = observer.caller_id ?? "caller_unknown";
     const cursor = this.outputCursors.get(this.cursorKey(processId, observerCallerId)) ?? { stdout: 0, stderr: 0 };
-    if (this.spoolCharLength(state.stdoutSpoolPath) > cursor.stdout || this.spoolCharLength(state.stderrSpoolPath) > cursor.stderr) {
-      return this.read(processId, maxChars);
+    const [stdoutChars, stderrChars] = await Promise.all([
+      this.spoolCharLengthAsync(state.stdoutSpoolPath),
+      this.spoolCharLengthAsync(state.stderrSpoolPath),
+    ]);
+    if (stdoutChars > cursor.stdout || stderrChars > cursor.stderr) {
+      return await this.readAsync(processId, maxChars);
     }
     const lastReadRevision = state.lastReadRevisionByCaller.get(observerCallerId) ?? 0;
-    if (state.revision > lastReadRevision) return this.read(processId, maxChars);
+    if (state.revision > lastReadRevision) return await this.readAsync(processId, maxChars);
 
     await this.waitForProcessChange(state, boundedWaitMs, signal);
     if (state.exitCode === null && state.revision <= lastReadRevision) {
@@ -3306,7 +4065,7 @@ export class ProcessManager {
         no_change: true,
       };
     }
-    return this.read(processId, maxChars);
+    return await this.readAsync(processId, maxChars);
   }
 
   async kill(processId: string): Promise<Record<string, unknown>> {
