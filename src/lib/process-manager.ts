@@ -56,6 +56,7 @@ const HOST_ADMISSION_DIRECTORY = ".host-admission";
 const CONTROL_POLL_MS = 100;
 const CONTROL_RECONCILE_MS = 5_000;
 const CONTROL_HANDOFF_OVERHEAD_MS = 1_500;
+const CONTROL_OWNER_CLAIM_TIMEOUT_MS = 1_000;
 const CONTROL_KILL_TIMEOUT_MS = TASKKILL_TIMEOUT_MS + KILL_SETTLE_MS + CONTROL_HANDOFF_OVERHEAD_MS;
 const CONTROL_RETENTION_MS = COMPLETED_RETENTION_MS;
 const CONTROL_PRUNE_INTERVAL_MS = 60_000;
@@ -2593,6 +2594,12 @@ export class ProcessManager {
       if (request.version !== 1 || !PROCESS_ID_PATTERN.test(request.request_id) || !PROCESS_ID_PATTERN.test(request.process_id) || (request.action !== "read" && request.action !== "kill") || typeof request.requester_caller_id !== "string" || !Number.isFinite(Date.parse(request.deadline_at))) { try { await unlinkAsync(requestPath); } catch {}; continue; }
       if (Date.now() > Date.parse(request.deadline_at)) { try { await unlinkAsync(requestPath); } catch {}; continue; }
       if (!this.processes.has(request.process_id) || this.controlRequestsInFlight.has(request.request_id)) continue;
+      // Claim immediately so the requester can distinguish a live owner from a stale process id.
+      try {
+        await unlinkAsync(requestPath);
+      } catch {
+        continue;
+      }
       this.controlRequestsInFlight.add(request.request_id);
       void this.handleControlRequest(request, requestPath).finally(() => this.controlRequestsInFlight.delete(request.request_id));
     }
@@ -2663,6 +2670,8 @@ export class ProcessManager {
       action,
       request_id: requestId,
     }, observer);
+    const ownerClaimDeadlineMs = Date.now() + Math.min(CONTROL_OWNER_CLAIM_TIMEOUT_MS, timeoutMs);
+    let ownerClaimed = false;
     try {
       while (Date.now() <= deadlineMs) {
         if (signal?.aborted) throw new Error("request_aborted");
@@ -2687,6 +2696,28 @@ export class ProcessManager {
         if (action === "read") {
           const receipt = await this.readReceiptAsync(processId, maxChars);
           if (receipt) return receipt;
+        }
+        if (!ownerClaimed) {
+          try {
+            await statAsync(requestPath);
+          } catch (error) {
+            const code = error instanceof Error && "code" in error ? (error as NodeJS.ErrnoException).code : undefined;
+            if (code === "ENOENT") ownerClaimed = true;
+            else throw error;
+          }
+          if (!ownerClaimed && Date.now() >= ownerClaimDeadlineMs) {
+            if (action === "read") {
+              const receipt = await this.readReceiptAsync(processId, maxChars);
+              if (receipt) return receipt;
+            }
+            emitTelemetry({
+              event: "process_control_owner_unavailable",
+              process_id: processId,
+              action,
+              request_id: requestId,
+            }, observer);
+            throw new Error(`Process owner unavailable for process_id: ${processId}`);
+          }
         }
         await delay(CONTROL_POLL_MS);
       }
