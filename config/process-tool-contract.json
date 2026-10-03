@@ -168,6 +168,9 @@
         "stdin": {
           "type": "string"
         },
+        "has_attachments": {
+          "type": "boolean"
+        },
         "conversation_id": {
           "type": "string",
           "minLength": 1

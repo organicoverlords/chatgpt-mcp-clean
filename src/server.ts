@@ -480,6 +480,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
         max_chars: z.number().int().optional(),
         wait_ms: z.number().int().min(0).max(240_000).optional(),
         stdin: z.string().optional(),
+        has_attachments: z.boolean().optional(),
         conversation_id: z.string().min(1).optional(),
         expected_room_head: z.string().min(1).optional(),
       }).strict().superRefine((value, ctx) => {
@@ -493,10 +494,13 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
         if (value.stdin !== undefined && value.process_id !== "bootstrap") {
           ctx.addIssue({ code: "custom", path: ["stdin"], message: "stdin on read_output is valid only for process_id=bootstrap lifecycle entry" });
         }
+        if (value.has_attachments !== undefined && value.process_id !== "bootstrap") {
+          ctx.addIssue({ code: "custom", path: ["has_attachments"], message: "has_attachments on read_output is valid only for process_id=bootstrap lifecycle entry" });
+        }
       }),
       outputSchema: processOutputSchema,
     },
-    async ({ process_id, max_chars, wait_ms, stdin, conversation_id, expected_room_head }, extra) => {
+    async ({ process_id, max_chars, wait_ms, stdin, has_attachments, conversation_id, expected_room_head }, extra) => {
       const boundedMaxChars = Math.max(1, Math.min(max_chars ?? MODEL_VISIBLE_PAGE_MAX_CHARS, MODEL_VISIBLE_PAGE_MAX_CHARS));
       if (process_id === "bootstrap" && stdin !== undefined) {
         if (bootstrapAliasProcesses.has(callerId)) {
@@ -507,6 +511,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
         if (conversation_id && expected_room_head) {
           args.push("--conversation-id", conversation_id, "--expected-room-head", expected_room_head);
         }
+        if (has_attachments === true) args.push("--has-attachments");
         const started = await processManager.startStructuredWithWait(
           command.executable,
           args,
