@@ -26,7 +26,7 @@ Use these sources in this order. Current live evidence always outranks an old re
 
 1. `organicoverlords/chatgpt-mcp-clean` `master`: current MCP source, the supported one-package installer, this recovery script, process contract, Busy package, and generic local Caddy install.
 2. `organicoverlords/agents` `main`: canonical `RULES.md`, `AGENTS.md`, `CONTRACTS.json`, `Get-AgentContract.ps1`, agent pointers, and the Stack Atlas/contract PATH launchers. This is how the assistant's shared working instructions are restored.
-3. `organicoverlords/regression-research` `main`, when the user's Vault is available: durable user directives/history plus `04 Operating Contracts/mcp-current-topology.json` and `mcp-recovery-state.json`. `mcp-current-topology.json` is the current-serving authority; `mcp-recovery-state.json` is **recovery metadata only** and must never be projected as current topology.
+3. `organicoverlords/regression-research` `main`, when the user's Vault is available: durable user directives/history plus historical topology/recovery evidence. Current topology comes from the runtime-owned `%LOCALAPPDATA%\ChatGPTMcpRust\admin\mcp-restorer\state\mcp-current-topology.json`; Vault `mcp-current-topology.json` and `mcp-recovery-state.json` are recovery evidence only and must never overwrite live topology.
 4. The live Windows machine after recovery: exact listeners, task actions, Caddy loaded/on-disk routes, runtime identity, OAuth store identity, and real Host `/mcp` behavior.
 5. `chatgpt/home-direct-stable-runtime`: source owner for the long-lived home-direct Caddy supervisor/config. Use it only when restoring that user-specific serving layer; PR #391/#390 made boot recovery converge canonical routing while Caddy is down without weakening live-retarget protection.
 
@@ -40,7 +40,7 @@ A GitHub connector/plugin cannot execute Windows commands by itself. It **can** 
 
 1. Read this `README.md` from `organicoverlords/chatgpt-mcp-clean@master`.
 2. Fetch `scripts/restore-stack-from-github.ps1` from the same ref and give that exact file to the user to run in PowerShell 7. Do not rewrite it from memory when GitHub is available.
-3. If the user has access to `organicoverlords/regression-research`, read `04 Operating Contracts/mcp-current-topology.json` before making claims about the current ports/commits/routes. Read `mcp-recovery-state.json` only as rollback/recovery metadata.
+3. Read the runtime-owned mcp-restorer topology before making claims about current ports/commits/routes. If the Vault is available, its topology and `mcp-recovery-state.json` remain secondary rollback/recovery evidence only.
 4. After the script restores one healthy MCP process binding, switch back to MCP for machine work. Do not continue asking the user to manually orchestrate commands that MCP can perform.
 
 If raw-file download is the only route, the user can save the `master` copy of `scripts/restore-stack-from-github.ps1` and run it locally. Prefer a GitHub connector/file fetch or a normal clone over copying a script from an old chat transcript.
@@ -77,7 +77,7 @@ pwsh -File .\scripts\restore-stack-from-github.ps1 `
   -RestoreUserContext
 ```
 
-`-RestoreUserContext` additionally restores/updates the Vault checkout, canonical agent rules/contracts, Stack Atlas and `Get-AgentContract` entrypoints, `VaultCheckoutSync`, and the persistent bootstrap snapshot tasks. When Vault contains a valid current topology, `PublicOrigin` can be omitted and recovered from it. `OwnerLogin` can be recovered from an existing supported stack config or surviving current frozen owner file; otherwise the user must supply it because it is intentionally not stored in public GitHub.
+`-RestoreUserContext` additionally restores/updates the Vault checkout, canonical agent rules/contracts, Stack Atlas and `Get-AgentContract` entrypoints, `VaultCheckoutSync`, and the persistent bootstrap snapshot tasks. `PublicOrigin` can be omitted only when runtime topology or an existing supported stack config provides it. `OwnerLogin` can be recovered from an existing supported stack config or surviving current frozen owner file; otherwise the user must supply it because it is intentionally not stored in public GitHub.
 
 The script requires Windows, PowerShell 7, Git, Node.js/npm, and Python. The underlying installer currently requires Node.js 20+. Creating the supported inbound Windows Firewall rule requires one elevated run unless `-SkipFirewall` is used because the rule already exists. The public HTTPS hostname/router path is external to GitHub: DNS/router/NAT must still deliver public TCP 443 to the Windows Caddy HTTPS port configured by the installer.
 
@@ -93,7 +93,7 @@ A fresh functional install uses its own managed state under `%LOCALAPPDATA%\Chat
 
 Do this only after one functional binding is healthy. The redundant four-binding layout changes over time, so there is deliberately no permanent `3140`, `3137`, or other port constant in the disaster script.
 
-1. Restore/read the Vault and load `04 Operating Contracts/mcp-current-topology.json`. Confirm `schema=mcp-current-topology.v1` and `authority=current_serving_topology`.
+1. Read the runtime-owned mcp-restorer topology and verify it against live Caddy/backend evidence. Treat any Vault topology copy as historical/recovery evidence, not current authority.
 2. Verify the topology against live listeners/tasks and the source rollout PR/commit. If the machine was lost completely, treat the topology as the last durable desired state until live replacements are proved—not as proof that old PIDs/tasks still exist.
 3. Preserve surviving OAuth stores, receipt stores, rollback artifacts, dirty worktrees, and unrelated processes. Never use task/instance names such as `test` or `debug` as disposal authority.
 4. Recreate clean frozen candidates from the current source commit with `scripts/prepare-frozen-home-direct.ps1`. This script creates a hash-checked independent runtime and Scheduled Task but intentionally does **not** change Caddy routes. It requires explicit authorization, current topology, and existing OAuth state for the lane it starts. Use its `-Plan` mode first.
@@ -114,7 +114,7 @@ An MCP change is not complete merely because health is green or Caddy points at 
 4. Preserve old backends until running-process continuity is proved. Cross-backend read_output/kill_process requires the replacement to use the same receipt/control directory as the backend that owns those live processes. Do not kill foreign work to accelerate a cutover.
 5. For a one-binding-at-a-time shared-production cutover, claim an exact Busy scope beginning mcp:binding: and use the production-change gate with rollback plus off-path proof. A broad Caddy/MCP scope does not qualify for guarded-binding rollout semantics.
 6. Keep an independent rollback route healthy and preserve the immediately previous serving generation off-route until acceptance is complete. Never merge or copy OAuth stores as part of rollback.
-7. Reconcile durable current state before the final answer: Vault mcp-current-topology.json, mcp-recovery-state.json, Stack Atlas metadata/tests, install/restore/update guidance, and the canonical agent/control contract that governs MCP changes.
+7. Reconcile durable current state before the final answer: runtime mcp-restorer topology, recovery metadata, Vault historical evidence, Stack Atlas metadata/tests, install/restore/update guidance, and the canonical agent/control contract that governs MCP changes.
 8. Run a stale-current-reference audit for superseded serving ports, commits, task names, broad Busy scopes, and receipt-store assumptions in current docs/contracts. Do not rewrite dated incident reports, fixtures, or historical evidence.
 9. When the Vault/Stack Atlas control layer changed, refresh its installed/runtime projection and re-run the relevant bootstrap/Atlas acceptance checks. A Git commit alone does not prove the local runtime copy changed.
 10. Record rollback identity, validation evidence, and intentionally preserved old generations. Only then call the update or restore complete.
@@ -134,7 +134,7 @@ pwsh -File "$env:LOCALAPPDATA\ChatGPTMcpStack\mcp\scripts\stack-doctor.ps1" `
 python "$env:USERPROFILE\Desktop\vault\tools\stack_atlas.py" lookup stack_atlas
 ```
 
-When restoring this user's context, also verify that `VaultCheckoutSync`, `VaultBootstrapSnapshot`, and `VaultBootstrapSnapshotWatchdog` exist with known owner-installed actions. Then read `mcp-current-topology.json` again and compare it with exact local task/listener/Caddy evidence before calling the exact redundant topology restored.
+When restoring this user's context, also verify that `VaultCheckoutSync`, `VaultBootstrapSnapshot`, and `VaultBootstrapSnapshotWatchdog` exist with known owner-installed actions. Then read the runtime mcp-restorer topology again and compare it with exact local task/listener/Caddy evidence before calling the exact redundant topology restored.
 
 ### Information that GitHub cannot safely reconstruct
 

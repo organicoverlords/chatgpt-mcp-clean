@@ -33,6 +33,19 @@ try {
   assert.notEqual(mismatch.status, 0);
   assert.match(`${mismatch.stdout}\n${mismatch.stderr}`, /ExpectedCurrentPort disagrees with current topology/);
 
+  writeFileSync(topologyPath, JSON.stringify({
+    schema: "mcp-live-topology.v2",
+    authority: "derived_live_snapshot",
+    serving: {
+      backend: { public_origin: "https://91-159-12-133.sslip.io", listen: `127.0.0.1:${topologyPort}` },
+      peer_route: { public_origin: "https://pr237.91-159-12-133.sslip.io", listen: `127.0.0.1:${peerPort}` },
+      auxiliary_routes: [],
+    },
+  }, null, 2));
+  const liveDerived = run();
+  assert.notEqual(liveDerived.status, 0);
+  assert.match(`${liveDerived.stdout}\n${liveDerived.stderr}`, /candidate must use an alternate port/);
+
 
   const peerDerived = run(["-StableHost", "pr237.91-159-12-133.sslip.io", "-CurrentPortFromTargetHost"], peerPort);
   assert.notEqual(peerDerived.status, 0);

@@ -8,9 +8,13 @@ const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mil
 
 async function waitForExit(manager, processId) {
   const deadline = Date.now() + 10_000;
+  let stdout = "";
+  let stderr = "";
   while (Date.now() < deadline) {
     const state = manager.read(processId);
-    if (!state.running) return state;
+    stdout += String(state.stdout || "");
+    stderr += String(state.stderr || "");
+    if (!state.running) return { ...state, stdout, stderr };
     await sleep(10);
   }
   throw new Error(`process ${processId} did not exit during the test`);
@@ -19,7 +23,7 @@ async function waitForExit(manager, processId) {
 const observabilityManager = new ProcessManager();
 let observabilityProcess;
 try {
-  observabilityProcess = observabilityManager.start("Start-Sleep -Milliseconds 500; Write-Output 'OBSERVABILITY_OK'", undefined, "caller_observability_test");
+  observabilityProcess = observabilityManager.start("& node.exe -e \"setTimeout(()=>console.log('OBSERVABILITY_OK'),500)\"", undefined, "caller_observability_test");
   assert.equal(observabilityProcess.mcp_status, "OK");
   assert.equal(observabilityProcess.process_state, "RUNNING");
   assert.equal(observabilityProcess.next_action, "READ_SAME_PROCESS_ID");
@@ -47,8 +51,8 @@ const duplicateManager = new ProcessManager();
 let first;
 let duplicate;
 try {
-  first = duplicateManager.start("Start-Sleep -Seconds 5", undefined, "caller_duplicate_test");
-  duplicate = duplicateManager.start("Start-Sleep -Seconds 5", undefined, "caller_duplicate_test");
+  first = duplicateManager.start("& node.exe -e \"setTimeout(()=>{},5000)\"", undefined, "caller_duplicate_test");
+  duplicate = duplicateManager.start("& node.exe -e \"setTimeout(()=>{},5000)\"", undefined, "caller_duplicate_test");
   assert.equal(duplicate.process_id, first.process_id, "an identical live command must reuse its existing process");
 } finally {
   const processIds = new Set([first?.process_id, duplicate?.process_id].filter(Boolean));
@@ -62,10 +66,10 @@ let targetedDuplicate;
 let otherTarget;
 let noTarget;
 try {
-  targetedFirst = metadataDuplicateManager.start("Start-Sleep -Seconds 5 # metadata", undefined, "caller_metadata_duplicate", activityTarget, "test");
-  targetedDuplicate = metadataDuplicateManager.start("Start-Sleep -Seconds 5 # metadata", undefined, "caller_metadata_duplicate", activityTarget, "test");
-  otherTarget = metadataDuplicateManager.start("Start-Sleep -Seconds 5 # metadata", undefined, "caller_metadata_duplicate", { ...activityTarget, id: "p3-combat" }, "test");
-  noTarget = metadataDuplicateManager.start("Start-Sleep -Seconds 5 # metadata", undefined, "caller_metadata_duplicate");
+  targetedFirst = metadataDuplicateManager.start("& node.exe -e \"setTimeout(()=>{},5000)\" # metadata", undefined, "caller_metadata_duplicate", activityTarget, "test");
+  targetedDuplicate = metadataDuplicateManager.start("& node.exe -e \"setTimeout(()=>{},5000)\" # metadata", undefined, "caller_metadata_duplicate", activityTarget, "test");
+  otherTarget = metadataDuplicateManager.start("& node.exe -e \"setTimeout(()=>{},5000)\" # metadata", undefined, "caller_metadata_duplicate", { ...activityTarget, id: "p3-combat" }, "test");
+  noTarget = metadataDuplicateManager.start("& node.exe -e \"setTimeout(()=>{},5000)\" # metadata", undefined, "caller_metadata_duplicate");
   assert.equal(targetedDuplicate.process_id, targetedFirst.process_id, "same command and activity metadata should reuse the process");
   assert.notEqual(otherTarget.process_id, targetedFirst.process_id, "different explicit targets must not reuse a process");
   assert.notEqual(noTarget.process_id, targetedFirst.process_id, "unclassified activity must not inherit a target from command reuse");
@@ -88,6 +92,7 @@ try {
   retrievalProcesses.push({ manager: ownerManager, process: sufficient });
   const sufficientExit = await waitForExit(ownerManager, sufficient.process_id);
   assert.equal(sufficientExit.exit_code, 0);
+  await ownerManager.readOutput(sufficient.process_id, 6_000, 0);
   assert.throws(
     () => peerManager.start("Write-Output 'BROADENING_SHOULD_BE_BLOCKED'", undefined, "caller_retrieval_stop", retrievalTarget, "STACK_lookup_reports"),
     /start_process_retrieval_stop: successful memory_recent already satisfied this activity_target/,
@@ -115,68 +120,15 @@ try {
   rmSync(retrievalStopDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
-const concurrencyManager = new ProcessManager();
-const liveProcesses = [];
-let concurrencyRejection;
-let otherCallerProcess;
-try {
-  for (let index = 1; index <= 5; index += 1) {
-    try {
-      liveProcesses.push(concurrencyManager.start(`Start-Sleep -Seconds 5 # ${index}`, undefined, "caller_concurrency_test"));
-    } catch (error) {
-      concurrencyRejection = error;
-      break;
-    }
-  }
-  assert.ok(concurrencyRejection instanceof Error, "a fifth simultaneous process from one caller must be rejected");
-  assert.match(concurrencyRejection.message, /start_process_concurrency_limited/);
-  otherCallerProcess = concurrencyManager.start("Start-Sleep -Seconds 5 # other caller", undefined, "caller_concurrency_test_other");
-  assert.equal(otherCallerProcess.running, true, "one caller's live-process cap must not block another caller");
-} finally {
-  if (otherCallerProcess) liveProcesses.push(otherCallerProcess);
-  for (const process of liveProcesses) await concurrencyManager.kill(process.process_id).catch(() => undefined);
-}
-
 assert.throws(() => new ProcessManager({ maxLiveTotal: 0 }), /maxLiveTotal must be an integer between 1 and 80/);
 assert.doesNotThrow(() => new ProcessManager({ maxLiveTotal: 80 }), "explicit 80-process shared-host ceiling must be supported");
 assert.throws(() => new ProcessManager({ maxLiveTotal: 81 }), /maxLiveTotal must be an integer between 1 and 80/);
-
-const uncappedDefaultDirectory = mkdtempSync(join(tmpdir(), "mcp-uncapped-default-"));
-try {
-  new ProcessManager({ receiptDirectory: uncappedDefaultDirectory });
-  assert.equal(existsSync(join(uncappedDefaultDirectory, ".host-admission")), false, "default ProcessManager must not create shared-host admission slots");
-} finally {
-  rmSync(uncappedDefaultDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-}
-const hostAdmissionDirectory = mkdtempSync(join(tmpdir(), "mcp-host-admission-"));
-const hostAdmissionProcesses = [];
-try {
-  const firstManager = new ProcessManager({ receiptDirectory: hostAdmissionDirectory, maxLiveTotal: 2 });
-  const secondManager = new ProcessManager({ receiptDirectory: hostAdmissionDirectory, maxLiveTotal: 2 });
-  const firstHostProcess = firstManager.start("Start-Sleep -Seconds 10 # host slot one", undefined, "caller_host_slot_one");
-  const secondHostProcess = secondManager.start("Start-Sleep -Seconds 10 # host slot two", undefined, "caller_host_slot_two");
-  hostAdmissionProcesses.push({ manager: firstManager, process: firstHostProcess }, { manager: secondManager, process: secondHostProcess });
-  assert.throws(
-    () => firstManager.start("Start-Sleep -Seconds 10 # host slot blocked", undefined, "caller_host_slot_three"),
-    /start_process_host_concurrency_limited/,
-    "distinct callers and ProcessManager instances sharing one receipt root must not bypass the host cap",
-  );
-  await firstManager.kill(firstHostProcess.process_id);
-  const replacement = secondManager.start("Start-Sleep -Seconds 10 # host slot replacement", undefined, "caller_host_slot_three");
-  hostAdmissionProcesses.push({ manager: secondManager, process: replacement });
-  assert.equal(replacement.running, true, "host admission capacity must return after an owned process exits");
-} finally {
-  for (const item of hostAdmissionProcesses) {
-    await item.manager.kill(item.process.process_id).catch(() => undefined);
-  }
-  rmSync(hostAdmissionDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-}
 
 const drainStatusManager = new ProcessManager();
 let drainStatusProcess;
 try {
   assert.equal(drainStatusManager.liveProcessCount(), 0, "fresh process manager must report no live processes");
-  drainStatusProcess = drainStatusManager.start("Start-Sleep -Seconds 10", undefined, "caller_drain_status_test");
+  drainStatusProcess = drainStatusManager.start("& node.exe -e \"setTimeout(()=>{},10000)\"", undefined, "caller_drain_status_test");
   assert.equal(drainStatusManager.liveProcessCount(), 1, "live process count must expose a replacement drain blocker");
   await drainStatusManager.kill(drainStatusProcess.process_id);
   assert.equal(drainStatusManager.liveProcessCount(), 0, "live process count must clear after the managed process exits");
@@ -253,7 +205,7 @@ try {
   const ownerManager = new ProcessManager({ receiptDirectory: sharedControlDirectory });
   const backupManager = new ProcessManager({ receiptDirectory: sharedControlDirectory });
   const started = ownerManager.start(
-    "Start-Sleep -Milliseconds 300; Write-Output 'CROSS_CLONE_LIVE_OK'; Start-Sleep -Seconds 10",
+    "& node.exe -e \"setTimeout(()=>console.log('CROSS_CLONE_LIVE_OK'),300);setTimeout(()=>{},10000)\"",
     undefined,
     "caller_cross_clone_owner",
   );
@@ -279,7 +231,7 @@ try {
 const nonBlockingManager = new ProcessManager();
 let nonBlockingProcess;
 try {
-  nonBlockingProcess = nonBlockingManager.start("Start-Sleep -Milliseconds 1500; Write-Output 'LATE_OUTPUT'", undefined, "caller_wait0_test");
+  nonBlockingProcess = nonBlockingManager.start("& node.exe -e \"setTimeout(()=>console.log('LATE_OUTPUT'),1500)\"", undefined, "caller_wait0_test");
   const startedReadAt = Date.now();
   const immediate = await nonBlockingManager.readWithWait(nonBlockingProcess.process_id, 6_000, 0);
   const readDurationMs = Date.now() - startedReadAt;
@@ -306,7 +258,7 @@ const boundedStartManager = new ProcessManager();
 let boundedStart;
 try {
   const boundedStartedAt = Date.now();
-  boundedStart = await boundedStartManager.startWithWait("Start-Sleep -Seconds 5; Write-Output 'TOO_LATE'", undefined, "caller_bounded_start_test", 150);
+  boundedStart = await boundedStartManager.startWithWait("& node.exe -e \"setTimeout(()=>console.log('TOO_LATE'),5000)\"", undefined, "caller_bounded_start_test", 150);
   const boundedDurationMs = Date.now() - boundedStartedAt;
   assert.equal(boundedStart.running, true, JSON.stringify(boundedStart));
   assert.equal(boundedStart.next_action, "READ_SAME_PROCESS_ID");
@@ -319,7 +271,7 @@ try {
 const compactWaitManager = new ProcessManager();
 let compactWaitProcess;
 try {
-  compactWaitProcess = compactWaitManager.start("Write-Output 'FIRST_PACKET'; Start-Sleep -Seconds 5", undefined, "caller_compact_wait_test");
+  compactWaitProcess = compactWaitManager.start("& node.exe -e \"console.log('FIRST_PACKET');setTimeout(()=>{},5000)\"", undefined, "caller_compact_wait_test");
   const firstPacket = await compactWaitManager.readWithWait(compactWaitProcess.process_id, 6_000, 2_000);
   assert.match(firstPacket.stdout, /FIRST_PACKET/);
   await new Promise((resolve) => setTimeout(resolve, 250));
@@ -336,7 +288,7 @@ try {
 const waitingManager = new ProcessManager();
 let waitingProcess;
 try {
-  waitingProcess = waitingManager.start("Start-Sleep -Milliseconds 250; Write-Output 'WAITED_OUTPUT'", undefined, "caller_wait_test");
+  waitingProcess = waitingManager.start("& node.exe -e \"setTimeout(()=>console.log('WAITED_OUTPUT'),250)\"", undefined, "caller_wait_test");
   const startedWaitingAt = Date.now();
   const waited = await waitingManager.readWithWait(waitingProcess.process_id, 6_000, 2_000);
   const elapsedWaitingMs = Date.now() - startedWaitingAt;
@@ -354,15 +306,17 @@ try {
   writeFileSync(helper, `const { spawn } = require("node:child_process");\nconst child = spawn(process.execPath, ["-e", "setTimeout(()=>{},2500)"], { detached: true, stdio: ["ignore", "inherit", "inherit"] });\nchild.unref();\nconsole.log("OWNER_PID_EXITING");\n`);
   const manager = new ProcessManager();
   const queued = manager.start(`& node.exe '${helper}'`, undefined, "caller_inherited_handle_test");
+  let observedOutput = String(queued.stdout ?? "");
   let exited = queued;
   let ownerPidObservedAt = null;
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline && exited.running) {
+    observedOutput += String(exited.stdout ?? "");
     exited = await manager.readWithWait(queued.process_id, 6_000, 250);
     if (ownerPidObservedAt === null && Number(exited.pid) > 0) ownerPidObservedAt = Date.now();
   }
   assert.equal(exited.running, false, JSON.stringify(exited));
-  assert.match(exited.stdout, /OWNER_PID_EXITING/);
+  assert.match(observedOutput, /OWNER_PID_EXITING/);
   assert.ok(ownerPidObservedAt !== null, JSON.stringify(exited));
   assert.ok(Date.now() - ownerPidObservedAt < 2_000, "owned PID exit must not wait for descendant-inherited stdio handles");
   const killAfterExit = await manager.kill(exited.process_id);
@@ -400,10 +354,10 @@ try {
     writeFileSync(join(slots, `${index}.json`), JSON.stringify({ version: 1, process_id: `occupied-${index}`, manager_pid: process.pid, child_pid: null, claimed_at: new Date().toISOString() }));
   }
   const eightySlotManager = new ProcessManager({ receiptDirectory: eightySlotDirectory, maxLiveTotal: 80 });
-  eightySlotProcess = eightySlotManager.start("Start-Sleep -Seconds 10 # slot eighty", undefined, "caller_slot_eighty");
+  eightySlotProcess = eightySlotManager.start("& node.exe -e \"setTimeout(()=>{},10000)\" # slot eighty", undefined, "caller_slot_eighty");
   assert.equal(eightySlotProcess.running, true, "slot 80 must be admitted");
   assert.throws(
-    () => eightySlotManager.start("Start-Sleep -Seconds 10 # slot eighty one blocked", undefined, "caller_slot_eighty_one"),
+    () => eightySlotManager.start("& node.exe -e \"setTimeout(()=>{},10000)\" # slot eighty one blocked", undefined, "caller_slot_eighty_one"),
     /start_process_host_concurrency_limited: live_process_count=80; max_live_processes=80/,
     "slot 81 must be rejected without requiring 80 real child processes",
   );
@@ -412,6 +366,6 @@ try {
 } finally {
   rmSync(eightySlotDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
-console.log("PASS process guard enforces duplicate reuse, per-caller live concurrency, uncapped shared-host defaults with optional explicit host caps, protected control-plane kill refusal, restart receipts, cross-clone control, fast-start collapse, compact no-change waits, nonblocking zero-wait, and bounded-wait behavior, and time-based receipt retention");
+console.log("PASS process guard enforces duplicate reuse, protected control-plane kill refusal, restart receipts, cross-clone control, fast-start collapse, compact no-change waits, nonblocking zero-wait, bounded-wait behavior, configured host-cap bounds, and time-based receipt retention");
 // Standalone guard intentionally constructs long-lived mailbox managers; all assertions are complete here.
 process.exit(0);

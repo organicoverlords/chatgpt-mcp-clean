@@ -2,8 +2,9 @@
 import "dotenv/config";
 import { Agent, createServer, request as httpRequest } from "node:http";
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { readFileSync, watch, type FSWatcher } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
+import { mkdir as mkdirAsync, readFile as readFileAsync, rename as renameAsync, stat as statAsync, unlink as unlinkAsync, writeFile as writeFileAsync } from "node:fs/promises";
 import { BoundedJsonlWriter } from "./lib/bounded-jsonl.js";
 import { backendRequestTimeoutMs, type FrontDoorMcpCall } from "./lib/front-door-timeout.js";
 
@@ -22,6 +23,8 @@ const MAX_CAPTURE_BYTES = 1024 * 1024;
 const PROCESS_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HOP_BY_HOP_HEADERS = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"]);
 const backendAgent = new Agent({ keepAlive: true, maxSockets: 128, maxFreeSockets: 32 });
+const PROCESS_ROUTE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const PROCESS_ROUTE_MAX_ENTRIES = 4_096;
 
 if (HOST !== "127.0.0.1" || !Number.isInteger(PORT) || PORT < 1024 || PORT > 65535) {
   throw new Error("The MCP front door must bind a non-privileged port on 127.0.0.1");
@@ -41,16 +44,42 @@ function validBackend(value: unknown): value is BackendTarget {
   return candidate.version === 1 && Number.isInteger(candidate.port) && candidate.port! >= 1024 && candidate.port! <= 65535 && candidate.port !== PORT && typeof candidate.generation === "string" && candidate.generation.length > 0;
 }
 
-let lastBackend: BackendTarget | undefined;
+function readBackendTargetSync(): BackendTarget {
+  const parsed = JSON.parse(readFileSync(BACKEND_CONFIG_PATH, "utf8").replace(/^\uFEFF/, "")) as unknown;
+  if (!validBackend(parsed)) throw new Error("invalid backend config");
+  return parsed;
+}
+
+let lastBackend: BackendTarget = readBackendTargetSync();
+let lastBackendConfigMtimeMs = -1;
+let backendRefreshInFlight: Promise<void> | undefined;
+async function refreshBackendTarget(): Promise<void> {
+  if (backendRefreshInFlight) return await backendRefreshInFlight;
+  backendRefreshInFlight = (async () => {
+    try {
+      const parsed = JSON.parse((await readFileAsync(BACKEND_CONFIG_PATH, "utf8")).replace(/^\uFEFF/, "")) as unknown;
+      if (!validBackend(parsed)) throw new Error("invalid backend config");
+      lastBackend = parsed;
+      try { lastBackendConfigMtimeMs = (await statAsync(BACKEND_CONFIG_PATH)).mtimeMs; } catch {}
+    } catch (error) {
+      frontDoorLog("front_backend_config_refresh_error", { error: error instanceof Error ? error.message : String(error) });
+    }
+  })().finally(() => { backendRefreshInFlight = undefined; });
+  await backendRefreshInFlight;
+}
 function backendTarget(): BackendTarget {
+  return lastBackend;
+}
+
+async function refreshBackendTargetIfChanged(): Promise<void> {
   try {
-    const parsed = JSON.parse(readFileSync(BACKEND_CONFIG_PATH, "utf8").replace(/^\uFEFF/, "")) as unknown;
-    if (!validBackend(parsed)) throw new Error("invalid backend config");
-    lastBackend = parsed;
+    const mtimeMs = (await statAsync(BACKEND_CONFIG_PATH)).mtimeMs;
+    if (mtimeMs !== lastBackendConfigMtimeMs) await refreshBackendTarget();
+    else if (backendRefreshInFlight) await backendRefreshInFlight;
   } catch (error) {
-    if (!lastBackend) throw error;
+    frontDoorLog("front_backend_config_stat_error", { error: error instanceof Error ? error.message : String(error) });
+    if (backendRefreshInFlight) await backendRefreshInFlight;
   }
-  return lastBackend!;
 }
 
 function loadProcessRoutes(): Map<string, ProcessRoute> {
@@ -69,14 +98,54 @@ function validRoute(value: unknown): value is ProcessRoute {
   return Number.isInteger(route.port) && route.port! >= 1024 && route.port! <= 65535 && typeof route.generation === "string" && typeof route.created_at === "string";
 }
 
+const PROCESS_ROUTE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_PROCESS_ROUTES = 4096;
 const processRoutes = loadProcessRoutes();
-function persistProcessRoutes(): void {
-  mkdirSync(dirname(PROCESS_ROUTES_PATH), { recursive: true });
-  const temporary = `${PROCESS_ROUTES_PATH}.${process.pid}.tmp`;
-  const routes = Object.fromEntries([...processRoutes.entries()].sort(([left], [right]) => left.localeCompare(right)));
-  writeFileSync(temporary, `${JSON.stringify({ version: 1, routes }, null, 2)}\n`, "utf8");
-  renameSync(temporary, PROCESS_ROUTES_PATH);
+let processRoutePersistDirty = false;
+let processRoutePersistInFlight: Promise<void> | undefined;
+
+function pruneProcessRoutes(now = Date.now()): boolean {
+  let changed = false;
+  for (const [id, route] of processRoutes) {
+    const createdAt = Date.parse(route.created_at);
+    if (!Number.isFinite(createdAt) || now - createdAt > PROCESS_ROUTE_MAX_AGE_MS) {
+      processRoutes.delete(id);
+      changed = true;
+    }
+  }
+  if (processRoutes.size > PROCESS_ROUTE_MAX_ENTRIES) {
+    const oldest = [...processRoutes.entries()]
+      .sort((a, b) => Date.parse(a[1].created_at) - Date.parse(b[1].created_at))
+      .slice(0, processRoutes.size - PROCESS_ROUTE_MAX_ENTRIES);
+    for (const [id] of oldest) processRoutes.delete(id);
+    changed = true;
+  }
+  return changed;
 }
+
+async function persistProcessRoutesOnce(): Promise<void> {
+  const temporary = `${PROCESS_ROUTES_PATH}.${process.pid}.${Date.now()}.tmp`;
+  const routes = Object.fromEntries([...processRoutes.entries()].sort(([left], [right]) => left.localeCompare(right)));
+  await mkdirAsync(dirname(PROCESS_ROUTES_PATH), { recursive: true });
+  await writeFileAsync(temporary, `${JSON.stringify({ version: 1, routes }, null, 2)}\n`, "utf8");
+  await renameAsync(temporary, PROCESS_ROUTES_PATH);
+}
+
+function schedulePersistProcessRoutes(): void {
+  processRoutePersistDirty = true;
+  if (processRoutePersistInFlight) return;
+  processRoutePersistInFlight = (async () => {
+    while (processRoutePersistDirty) {
+      processRoutePersistDirty = false;
+      try {
+        await persistProcessRoutesOnce();
+      } catch (error) {
+        frontDoorLog("front_process_route_persist_error", { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+  })().finally(() => { processRoutePersistInFlight = undefined; });
+}
+if (pruneProcessRoutes()) schedulePersistProcessRoutes();
 
 function parseMcpCall(body: Buffer): McpCall {
   try {
@@ -125,13 +194,13 @@ function updateProcessRoute(call: McpCall, target: BackendTarget, responseBody: 
   if (!result) return;
   if (call.tool === "start_process" && typeof result.process_id === "string" && PROCESS_ID_PATTERN.test(result.process_id)) {
     processRoutes.set(result.process_id, { port: target.port, generation: target.generation, created_at: new Date().toISOString() });
-    persistProcessRoutes();
+    schedulePersistProcessRoutes();
     return;
   }
   if (!call.processId || !processRoutes.has(call.processId)) return;
   if ((call.tool === "read_output" && result.running === false) || (call.tool === "kill_process" && (result.killed === true || result.already_exited === true))) {
     processRoutes.delete(call.processId);
-    persistProcessRoutes();
+    schedulePersistProcessRoutes();
   }
 }
 
@@ -155,41 +224,13 @@ function copyResponseHeaders(source: IncomingMessage, response: ServerResponse):
 let activeRequests = 0;
 let totalRequests = 0;
 
-async function targetGenerationMatches(target: BackendTarget): Promise<boolean> {
-  return new Promise((resolveMatch) => {
-    const probe = httpRequest({ host: "127.0.0.1", port: target.port, path: "/health", method: "GET", agent: false }, (probeResponse) => {
-      const chunks: Buffer[] = [];
-      probeResponse.on("data", (chunk: Buffer) => chunks.push(chunk));
-      probeResponse.on("end", () => {
-        try {
-          const health = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { status?: unknown; name?: unknown; pid?: unknown; backend_generation?: unknown };
-          if (health.status !== "ok" || health.name !== "shell-mcp") return resolveMatch(false);
-          if (target.generation.startsWith("legacy-")) return resolveMatch(String(health.pid) === target.generation.slice("legacy-".length));
-          resolveMatch(health.backend_generation === target.generation);
-        } catch { resolveMatch(false); }
-      });
-    });
-    probe.setTimeout(1_000, () => probe.destroy());
-    probe.on("error", () => resolveMatch(false));
-    probe.end();
-  });
-}
 
 async function proxyRequest(request: IncomingMessage, response: ServerResponse, body: Buffer, call: McpCall, requestId?: string): Promise<void> {
-  const active = backendTarget();
   const pinned = call.processId ? processRoutes.get(call.processId) : undefined;
+  if (!pinned) await refreshBackendTargetIfChanged();
+  const active = backendTarget();
   const target = pinned ? { version: 1 as const, port: pinned.port, generation: pinned.generation } : active;
   if (requestId) frontDoorLog("front_backend_select", { request_id: requestId, tool: call.tool || null, process_id: call.processId || null, backend_port: target.port, backend_generation: target.generation, pinned: Boolean(pinned) });
-  if (!await targetGenerationMatches(target)) {
-    if (requestId) frontDoorLog("front_backend_unavailable", { request_id: requestId, backend_port: target.port, backend_generation: target.generation });
-    if (!response.destroyed && !response.headersSent) {
-      response.statusCode = 503;
-      response.setHeader("content-type", "application/json");
-      response.setHeader("retry-after", "1");
-      response.end(JSON.stringify({ error: "Service unavailable" }));
-    }
-    return;
-  }
   activeRequests += 1;
   totalRequests += 1;
   let settled = false;
@@ -273,6 +314,17 @@ async function readBody(request: IncomingMessage): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
+let backendConfigWatcher: FSWatcher | undefined;
+try {
+  const configName = basename(BACKEND_CONFIG_PATH);
+  backendConfigWatcher = watch(dirname(BACKEND_CONFIG_PATH), { persistent: false }, (_event, filename) => {
+    if (filename === null || String(filename).toLowerCase() === configName.toLowerCase()) void refreshBackendTarget();
+  });
+  backendConfigWatcher.on("error", (error) => frontDoorLog("front_backend_config_watch_error", { error: error.message }));
+} catch (error) {
+  frontDoorLog("front_backend_config_watch_error", { error: error instanceof Error ? error.message : String(error) });
+}
+
 const server = createServer(async (request, response) => {
   const rawUrl = request.url || "";
   const requestPath = rawUrl.split("?", 1)[0] || "";
@@ -333,9 +385,11 @@ server.headersTimeout = 40_000;
 server.requestTimeout = 35_000;
 server.timeout = 0;
 const stop = () => {
+  try { backendConfigWatcher?.close(); } catch {}
   server.close(() => {
     backendAgent.destroy();
-    void requestLogWriter.close().finally(() => process.exit(0));
+    const pendingRoutes = processRoutePersistInFlight ?? Promise.resolve();
+    void Promise.all([pendingRoutes, requestLogWriter.close()]).finally(() => process.exit(0));
   });
   setTimeout(() => process.exit(1), 5_000).unref();
 };

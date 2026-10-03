@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdir as mkdirAsync, open as openAsync, readFile as readFileAsync, rename as renameAsync, stat as statAsync, unlink as unlinkAsync, writeFile as writeFileAsync } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { Response } from "express";
 import type { OAuthServerProvider, AuthorizationParams } from "@modelcontextprotocol/sdk/server/auth/provider.js";
@@ -14,6 +15,9 @@ const REFRESH_TTL_SEC = 7 * 24 * 60 * 60;
 const CODE_TTL_MS = 60_000;
 const REFRESH_REUSE_GRACE_MS = 120_000;
 const MAX_CLIENTS = 64;
+const STORE_LOCK_TIMEOUT_MS = 2_000;
+const STORE_LOCK_STALE_MS = 15_000;
+const STORE_LOCK_RETRY_MS = 10;
 const SUPPORTED_SCOPES = new Set(["mcp", "offline_access"]);
 const UUID_CLIENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DISPOSABLE_CLIENT_NAMES = new Set([
@@ -49,6 +53,17 @@ interface StoreShape {
   codes?: Record<string, CodeRecord>;
 }
 
+function sleep(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
+function pidIsAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
 function freshToken(): string { return randomBytes(32).toString("base64url"); }
 function digest(value: string): string { return createHash("sha256").update(value).digest("hex"); }
 function canonical(url: URL | string): string { return new URL(url.toString()).href; }
@@ -91,13 +106,100 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     private readonly resourceUrl: URL,
     private readonly ownerLogin: string,
     private readonly storePath: string,
-  ) { this.load(); }
+  ) {
+    this.load();
+  }
+
+  private async loadAsync(): Promise<void> {
+    try {
+      const data = JSON.parse(await readFileAsync(this.storePath, "utf8")) as StoreShape;
+      const clients = new Map(Object.entries(data.clients ?? {}));
+      const access = new Map(Object.entries(data.access ?? {}));
+      const refresh = new Map(Object.entries(data.refresh ?? {}));
+      const codes = new Map(Object.entries(data.codes ?? {}));
+      this.clients.clear();
+      this.access.clear();
+      this.refresh.clear();
+      this.codes.clear();
+      for (const [id, client] of clients) this.clients.set(id, client);
+      for (const [key, rec] of access) this.access.set(key, rec);
+      for (const [key, rec] of refresh) this.refresh.set(key, rec);
+      for (const [key, rec] of codes) this.codes.set(key, rec);
+      this.prune();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        emitTelemetry({ event: "oauth_store_read_error", error_message: error instanceof Error ? error.message : String(error) });
+      }
+    }
+  }
+
+  private async persistAsync(): Promise<void> {
+    this.prune();
+    const data: StoreShape = {
+      clients: Object.fromEntries(this.clients),
+      access: Object.fromEntries(this.access),
+      refresh: Object.fromEntries(this.refresh),
+      codes: Object.fromEntries(this.codes),
+    };
+    await mkdirAsync(dirname(this.storePath), { recursive: true });
+    const tmp = this.storePath + "." + randomUUID() + ".tmp";
+    try {
+      await writeFileAsync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
+      await renameAsync(tmp, this.storePath);
+    } finally {
+      try { await unlinkAsync(tmp); } catch {}
+    }
+  }
+
+  private async withStoreMutation<T>(fn: () => T | Promise<T>): Promise<T> {
+    const lockPath = this.storePath + ".lock";
+    await mkdirAsync(dirname(this.storePath), { recursive: true });
+    const deadline = Date.now() + STORE_LOCK_TIMEOUT_MS;
+    let handle: Awaited<ReturnType<typeof openAsync>> | undefined;
+    for (;;) {
+      try {
+        handle = await openAsync(lockPath, "wx", 0o600);
+        await handle.writeFile(String(process.pid), "utf8");
+        break;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "EEXIST" && code !== "EACCES" && code !== "EPERM") throw error;
+        let holderAlive = false;
+        try {
+          const age = Date.now() - (await statAsync(lockPath)).mtimeMs;
+          if (age > STORE_LOCK_STALE_MS) {
+            const raw = (await readFileAsync(lockPath, "utf8")).trim();
+            const pid = Number(raw);
+            holderAlive = Number.isInteger(pid) && pid > 0 && pidIsAlive(pid);
+            if (!holderAlive) {
+              await unlinkAsync(lockPath);
+              continue;
+            }
+          }
+        } catch (staleError) {
+          if ((staleError as NodeJS.ErrnoException).code === "ENOENT") continue;
+        }
+        if (Date.now() >= deadline) throw new Error("oauth_store_locked");
+        await sleep(STORE_LOCK_RETRY_MS);
+      }
+    }
+    try {
+      await this.loadAsync();
+      try {
+        return await fn();
+      } finally {
+        await this.persistAsync();
+      }
+    } finally {
+      try { await handle?.close(); } catch {}
+      try { await unlinkAsync(lockPath); } catch {}
+    }
+  }
 
   get clientsStore(): OAuthRegisteredClientsStore {
     return {
       getClient: (clientId) => this.getClient(clientId),
-      registerClient: async (raw) => {
-        this.load();
+      registerClient: async (raw) => await this.withStoreMutation(() => {
         const client = raw as OAuthClientInformationFull;
         const requestedAuthMethod = client.token_endpoint_auth_method || "none";
         if (requestedAuthMethod !== "none" && requestedAuthMethod !== "client_secret_post" && requestedAuthMethod !== "client_secret_basic") throw new InvalidClientMetadataError("Unsupported token endpoint authentication method");
@@ -120,26 +222,27 @@ export class LocalOAuthProvider implements OAuthServerProvider {
         this.prune();
         this.makeClientRoom();
         this.clients.set(full.client_id, full);
-        this.persist();
         return full;
-      },
+      }),
+
     };
   }
   async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response): Promise<void> {
-    this.load();
-    this.prune();
-    const resource = this.validateResource(params.resource);
-    const scopes = this.validateScopes(params.scopes);
-    const code = freshToken();
-    this.codes.set(digest(code), {
-      clientId: client.client_id,
-      redirectUri: params.redirectUri,
-      codeChallenge: params.codeChallenge,
-      scopes,
-      resource,
-      expiresAt: Date.now() + CODE_TTL_MS,
+    let code = "";
+    await this.withStoreMutation(() => {
+
+      const resource = this.validateResource(params.resource);
+      const scopes = this.validateScopes(params.scopes);
+        code = freshToken();
+      this.codes.set(digest(code), {
+        clientId: client.client_id,
+        redirectUri: params.redirectUri,
+        codeChallenge: params.codeChallenge,
+        scopes,
+        resource,
+        expiresAt: Date.now() + CODE_TTL_MS,
+      });
     });
-    this.persist();
     const redirect = new URL(params.redirectUri);
     redirect.searchParams.set("code", code);
     if (params.state) redirect.searchParams.set("state", params.state);
@@ -147,105 +250,112 @@ export class LocalOAuthProvider implements OAuthServerProvider {
   }
 
   async challengeForAuthorizationCode(client: OAuthClientInformationFull, code: string): Promise<string> {
+    await this.loadAsync();
     const rec = this.getCode(client, code);
     return rec.codeChallenge;
   }
 
   async exchangeAuthorizationCode(client: OAuthClientInformationFull, code: string, _verifier?: string, redirectUri?: string, resource?: URL): Promise<OAuthTokens> {
-    const rec = this.getCode(client, code);
-    if (redirectUri && redirectUri !== rec.redirectUri) throw new InvalidGrantError("redirect_uri mismatch");
-    if (resource && canonical(resource) !== rec.resource) throw new InvalidTargetError("resource mismatch");
-    this.codes.delete(digest(code));
-    return this.issuePair(client.client_id, rec.scopes, rec.resource);
+    return await this.withStoreMutation(() => {
+      const rec = this.getCode(client, code);
+      if (redirectUri && redirectUri !== rec.redirectUri) throw new InvalidGrantError("redirect_uri mismatch");
+      if (resource && canonical(resource) !== rec.resource) throw new InvalidTargetError("resource mismatch");
+      this.codes.delete(digest(code));
+      return this.issuePair(client.client_id, rec.scopes, rec.resource);
+    });
   }
+
   async exchangeRefreshToken(client: OAuthClientInformationFull, refreshToken: string, scopes?: string[], resource?: URL): Promise<OAuthTokens> {
-    this.load();
-    this.prune();
-    const now = Date.now();
-    const key = digest(refreshToken);
-    const rec = this.refresh.get(key);
-    if (!rec || rec.clientId !== client.client_id || rec.expiresAt <= now) {
-      emitTelemetry({ event: "oauth_refresh_rejected", reason: !rec ? "unknown_token" : rec.clientId !== client.client_id ? "client_mismatch" : "expired_token" });
-      throw new InvalidGrantError("Invalid refresh token");
-    }
-    if (resource && canonical(resource) !== rec.resource) throw new InvalidTargetError("resource mismatch");
-    const nextScopes = scopes?.length ? this.validateScopes(scopes) : rec.scopes;
-    if (nextScopes.some((s) => !rec.scopes.includes(s))) throw new InvalidScopeError("scope escalation denied");
+    return await this.withStoreMutation(async () => {
+        const now = Date.now();
+        const key = digest(refreshToken);
+        const rec = this.refresh.get(key);
+        if (!rec || rec.clientId !== client.client_id || rec.expiresAt <= now) {
+          emitTelemetry({ event: "oauth_refresh_rejected", reason: !rec ? "unknown_token" : rec.clientId !== client.client_id ? "client_mismatch" : "expired_token" });
+          throw new InvalidGrantError("Invalid refresh token");
+        }
+        if (resource && canonical(resource) !== rec.resource) throw new InvalidTargetError("resource mismatch");
+        const nextScopes = scopes?.length ? this.validateScopes(scopes) : rec.scopes;
+        if (nextScopes.some((s) => !rec.scopes.includes(s))) throw new InvalidScopeError("scope escalation denied");
 
-    const publicClient = (client.token_endpoint_auth_method || "none") === "none";
-    if (!publicClient) {
-      rec.scopes = nextScopes;
-      rec.expiresAt = now + REFRESH_TTL_SEC * 1000;
-      delete rec.supersededAt;
-      delete rec.supersededReuseCount;
-      delete rec.successorRefreshDigest;
-      const accessToken = freshToken();
-      this.access.set(digest(accessToken), {
-        clientId: client.client_id, scopes: nextScopes, resource: rec.resource, subject: rec.subject,
-        expiresAt: now + ACCESS_TTL_SEC * 1000,
-      });
-      this.persist();
-      emitTelemetry({ event: "oauth_refresh_completed", mode: "confidential" });
-      return { access_token: accessToken, token_type: "Bearer", expires_in: ACCESS_TTL_SEC, refresh_token: refreshToken, scope: nextScopes.join(" ") };
-    }
+        const publicClient = (client.token_endpoint_auth_method || "none") === "none";
+        if (!publicClient) {
+          rec.scopes = nextScopes;
+          rec.expiresAt = now + REFRESH_TTL_SEC * 1000;
+          delete rec.supersededAt;
+          delete rec.supersededReuseCount;
+          delete rec.successorRefreshDigest;
+          const accessToken = freshToken();
+          this.access.set(digest(accessToken), {
+            clientId: client.client_id, scopes: nextScopes, resource: rec.resource, subject: rec.subject,
+            expiresAt: now + ACCESS_TTL_SEC * 1000,
+          });
+          emitTelemetry({ event: "oauth_refresh_completed", mode: "confidential" });
+          return { access_token: accessToken, token_type: "Bearer", expires_in: ACCESS_TTL_SEC, refresh_token: refreshToken, scope: nextScopes.join(" ") };
+        }
 
-    if (rec.supersededAt !== undefined) {
-      const insideRetryGrace = now - rec.supersededAt <= REFRESH_REUSE_GRACE_MS;
-      const successor = rec.successorRefreshDigest ? this.refresh.get(rec.successorRefreshDigest) : undefined;
-      const familyAlreadyAdvanced = successor?.supersededAt !== undefined;
-      if (!insideRetryGrace) {
-        this.revokeRefreshFamily(key);
-        this.persist();
-        emitTelemetry({ event: "oauth_refresh_rejected", reason: "replay_outside_grace", family_revoked: true });
-        throw new InvalidGrantError("Refresh token replay detected");
-      }
-      if (familyAlreadyAdvanced) {
-        emitTelemetry({ event: "oauth_refresh_rejected", reason: "successor_already_rotated", family_revoked: false });
-        throw new InvalidGrantError("Refresh token already rotated");
-      }
-      const recent = this.recentRefreshSuccessors.get(key);
-      if (recent && recent.digest === rec.successorRefreshDigest && successor) {
-        if (nextScopes.join(" ") !== successor.scopes.join(" ")) throw new InvalidScopeError("refresh retry scope mismatch");
+        if (rec.supersededAt !== undefined) {
+          const insideRetryGrace = now - rec.supersededAt <= REFRESH_REUSE_GRACE_MS;
+          const successor = rec.successorRefreshDigest ? this.refresh.get(rec.successorRefreshDigest) : undefined;
+          const familyAlreadyAdvanced = successor?.supersededAt !== undefined;
+          if (!insideRetryGrace) {
+            this.revokeRefreshFamily(key);
+              emitTelemetry({ event: "oauth_refresh_rejected", reason: "replay_outside_grace", family_revoked: true });
+            throw new InvalidGrantError("Refresh token replay detected");
+          }
+          if (familyAlreadyAdvanced) {
+            emitTelemetry({ event: "oauth_refresh_rejected", reason: "successor_already_rotated", family_revoked: false });
+            throw new InvalidGrantError("Refresh token already rotated");
+          }
+          const recent = this.recentRefreshSuccessors.get(key);
+          if (recent && recent.digest === rec.successorRefreshDigest && successor) {
+            if (nextScopes.join(" ") !== successor.scopes.join(" ")) throw new InvalidScopeError("refresh retry scope mismatch");
+            const accessToken = freshToken();
+            this.access.set(digest(accessToken), {
+              clientId: client.client_id, scopes: nextScopes, resource: rec.resource, subject: rec.subject,
+              expiresAt: now + ACCESS_TTL_SEC * 1000,
+            });
+              emitTelemetry({ event: "oauth_refresh_completed", mode: "coalesced_retry" });
+            return { access_token: accessToken, token_type: "Bearer", expires_in: ACCESS_TTL_SEC, refresh_token: recent.token, scope: nextScopes.join(" ") };
+          }
+          // Never branch a refresh family after restart. A lost retry response must
+          // not invalidate the successor already delivered to another request.
+          emitTelemetry({ event: "oauth_refresh_rejected", reason: "retry_not_cached", family_revoked: false });
+          throw new InvalidGrantError("Refresh retry unavailable after restart");
+        } else {
+          rec.supersededAt = now;
+          // Retain the hash as a bounded replay-detection tombstone; it is no longer
+          // usable after the short retry grace even though the record remains durable.
+          rec.expiresAt = now + REFRESH_TTL_SEC * 1000;
+        }
+
+        rec.scopes = nextScopes;
         const accessToken = freshToken();
-        this.access.set(digest(accessToken), {
-          clientId: client.client_id, scopes: nextScopes, resource: rec.resource, subject: rec.subject,
-          expiresAt: now + ACCESS_TTL_SEC * 1000,
-        });
-        this.persist();
-        emitTelemetry({ event: "oauth_refresh_completed", mode: "coalesced_retry" });
-        return { access_token: accessToken, token_type: "Bearer", expires_in: ACCESS_TTL_SEC, refresh_token: recent.token, scope: nextScopes.join(" ") };
-      }
-      // Never branch a refresh family after restart. A lost retry response must
-      // not invalidate the successor already delivered to another request.
-      emitTelemetry({ event: "oauth_refresh_rejected", reason: "retry_not_cached", family_revoked: false });
-      throw new InvalidGrantError("Refresh retry unavailable after restart");
-    } else {
-      rec.supersededAt = now;
-      // Retain the hash as a bounded replay-detection tombstone; it is no longer
-      // usable after the short retry grace even though the record remains durable.
-      rec.expiresAt = now + REFRESH_TTL_SEC * 1000;
-    }
+        const nextRefreshToken = freshToken();
+        const nextRefreshDigest = digest(nextRefreshToken);
+        const common = { clientId: client.client_id, scopes: nextScopes, resource: rec.resource, subject: rec.subject };
+        this.access.set(digest(accessToken), { ...common, expiresAt: now + ACCESS_TTL_SEC * 1000 });
+        this.refresh.set(nextRefreshDigest, { ...common, expiresAt: now + REFRESH_TTL_SEC * 1000 });
+        rec.successorRefreshDigest = nextRefreshDigest;
+        this.recentRefreshSuccessors.set(key, { token: nextRefreshToken, digest: nextRefreshDigest, issuedAt: now });
+        emitTelemetry({ event: "oauth_refresh_completed", mode: "rotated" });
+        return { access_token: accessToken, token_type: "Bearer", expires_in: ACCESS_TTL_SEC, refresh_token: nextRefreshToken, scope: nextScopes.join(" ") };
 
-    rec.scopes = nextScopes;
-    const accessToken = freshToken();
-    const nextRefreshToken = freshToken();
-    const nextRefreshDigest = digest(nextRefreshToken);
-    const common = { clientId: client.client_id, scopes: nextScopes, resource: rec.resource, subject: rec.subject };
-    this.access.set(digest(accessToken), { ...common, expiresAt: now + ACCESS_TTL_SEC * 1000 });
-    this.refresh.set(nextRefreshDigest, { ...common, expiresAt: now + REFRESH_TTL_SEC * 1000 });
-    rec.successorRefreshDigest = nextRefreshDigest;
-    this.recentRefreshSuccessors.set(key, { token: nextRefreshToken, digest: nextRefreshDigest, issuedAt: now });
-    this.persist();
-    emitTelemetry({ event: "oauth_refresh_completed", mode: "rotated" });
-    return { access_token: accessToken, token_type: "Bearer", expires_in: ACCESS_TTL_SEC, refresh_token: nextRefreshToken, scope: nextScopes.join(" ") };
+    });
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
-    // Access-token verification is the MCP request hot path. Durable state is
-    // loaded at construction and local mutations update memory before persist,
-    // so rereading oauth.json here only couples every tool call to disk latency.
+    // Known access tokens stay entirely in memory. A candidate backend that was
+    // started before another backend issued the token gets one async store refresh
+    // on the miss path so cross-generation handoff sees newly issued durable state.
     this.prune();
-    const rec = this.access.get(digest(token));
+    const key = digest(token);
+    let rec = this.access.get(key);
+    if (!rec || rec.expiresAt <= Date.now()) {
+      await this.loadAsync();
+      this.prune();
+      rec = this.access.get(key);
+    }
     if (!rec || rec.expiresAt <= Date.now()) {
       emitTelemetry({ event: "oauth_access_rejected", reason: "unknown_or_expired_token" });
       throw new InvalidTokenError("Invalid or expired access token");
@@ -261,14 +371,13 @@ export class LocalOAuthProvider implements OAuthServerProvider {
   }
 
   async revokeToken(_client: OAuthClientInformationFull, request: OAuthTokenRevocationRequest): Promise<void> {
-    this.load();
-    const key = digest(request.token);
-    this.access.delete(key);
-    this.refresh.delete(key);
-    this.persist();
+    await this.withStoreMutation(() => {
+      const key = digest(request.token);
+      this.access.delete(key);
+      this.refresh.delete(key);
+    });
   }
   private getCode(client: OAuthClientInformationFull, code: string): CodeRecord {
-    this.load();
     this.prune();
     const rec = this.codes.get(digest(code));
     if (!rec || rec.clientId !== client.client_id || rec.expiresAt <= Date.now()) throw new InvalidGrantError("Invalid or expired authorization code");
@@ -288,18 +397,19 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     return [...new Set(out)];
   }
 
-  recoverLegacyChatGptClient(clientId: string, redirectUri: string): boolean {
-    this.load();
-    this.prune();
-    if (this.clients.has(clientId)) return false;
-    if (!UUID_CLIENT_ID.test(clientId) || !isChatGptRedirect(redirectUri)) return false;
-    this.clients.set(clientId, { client_id: clientId, client_id_issued_at: Math.floor(Date.now() / 1000), redirect_uris: [redirectUri], token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], client_name: "recovered-chatgpt-client" });
-    this.persist();
-    return true;
+  async recoverLegacyChatGptClient(clientId: string, redirectUri: string): Promise<boolean> {
+    return await this.withStoreMutation(() => {
+      this.prune();
+      if (this.clients.has(clientId)) return false;
+      if (!UUID_CLIENT_ID.test(clientId) || !isChatGptRedirect(redirectUri)) return false;
+      this.clients.set(clientId, { client_id: clientId, client_id_issued_at: Math.floor(Date.now() / 1000), redirect_uris: [redirectUri], token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], client_name: "recovered-chatgpt-client" });
+      return true;
+    });
   }
 
-  isChatGptAuthorizationReconnect(clientId: string, redirectUri: string): boolean {
-    this.load();
+  async isChatGptAuthorizationReconnect(clientId: string, redirectUri: string): Promise<boolean> {
+    await this.loadAsync();
+
     this.prune();
     if (!UUID_CLIENT_ID.test(clientId) || !isChatGptRedirect(redirectUri)) return false;
     const registered = this.clients.get(clientId);
@@ -307,10 +417,11 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     const name = (registered.client_name || "").trim().toLowerCase();
     return (name === "chatgpt" || name === "recovered-chatgpt-client")
       && (registered.redirect_uris ?? []).includes(redirectUri);
-  }
+    }
 
-  private getClient(clientId: string): OAuthClientInformationFull | undefined {
-    this.load();
+  private async getClient(clientId: string): Promise<OAuthClientInformationFull | undefined> {
+    await this.loadAsync();
+
     this.prune();
     const registered = this.clients.get(clientId);
     if (registered) return registered;
@@ -328,7 +439,7 @@ export class LocalOAuthProvider implements OAuthServerProvider {
       grant_types: ["refresh_token"],
       response_types: [],
     };
-  }
+    }
 
   private isClientReferenced(clientId: string): boolean {
     for (const rec of this.codes.values()) if (rec.clientId === clientId) return true;
@@ -372,7 +483,6 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     const common = { clientId, scopes, resource, subject: this.ownerLogin };
     this.access.set(digest(accessToken), { ...common, expiresAt: now + ACCESS_TTL_SEC * 1000 });
     this.refresh.set(digest(refreshToken), { ...common, expiresAt: now + REFRESH_TTL_SEC * 1000 });
-    this.persist();
     return { access_token: accessToken, token_type: "Bearer", expires_in: ACCESS_TTL_SEC, refresh_token: refreshToken, scope: scopes.join(" ") };
   }
   private prune(): void {
@@ -410,17 +520,5 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     }
   }
 
-  private persist(): void {
-    this.prune();
-    const data: StoreShape = {
-      clients: Object.fromEntries(this.clients),
-      access: Object.fromEntries(this.access),
-      refresh: Object.fromEntries(this.refresh),
-      codes: Object.fromEntries(this.codes),
-    };
-    mkdirSync(dirname(this.storePath), { recursive: true });
-    const tmp = `${this.storePath}.${randomUUID()}.tmp`;
-    writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
-    renameSync(tmp, this.storePath);
-  }
+
 }

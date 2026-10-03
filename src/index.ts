@@ -247,7 +247,7 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use("/authorize", (req, res, next) => {
+app.use("/authorize", async (req, res, next) => {
   const host = (req.header("host") || "").toLowerCase();
   const clientId = typeof req.query.client_id === "string" ? req.query.client_id : "";
   const redirectUri = typeof req.query.redirect_uri === "string" ? req.query.redirect_uri : "";
@@ -266,13 +266,13 @@ app.use("/authorize", (req, res, next) => {
     const forwardedChatGptReconnect = Boolean(req.header("x-forwarded-for"))
       && authorizationHost === host
       && isPrivateOrLocalClientAddress(req.socket.remoteAddress)
-      && oauth.isChatGptAuthorizationReconnect(clientId, redirectUri);
+      && await oauth.isChatGptAuthorizationReconnect(clientId, redirectUri);
     if (!directLocal && !forwardedPrivate && !forwardedChatGptReconnect) {
       res.status(403).send("Owner authorization required");
       return;
     }
   }
-  if (req.method === "GET" && clientId && redirectUri) oauth.recoverLegacyChatGptClient(clientId, redirectUri);
+  if (req.method === "GET" && clientId && redirectUri) await oauth.recoverLegacyChatGptClient(clientId, redirectUri);
   next();
 });
 const oauthMetadata = {

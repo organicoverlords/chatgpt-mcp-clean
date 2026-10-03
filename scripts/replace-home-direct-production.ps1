@@ -11,7 +11,7 @@ param(
     [string]$CaddyConfigPath = (Join-Path $env:LOCALAPPDATA 'Caddy\mcp-home-test\Caddyfile'),
     [string]$CaddyExe = (Join-Path $env:LOCALAPPDATA 'Caddy\mcp-home-test\caddy.exe'),
     [string]$StackAtlasPath = (Join-Path $env:USERPROFILE 'Desktop\vault\tools\stack_atlas.py'),
-    [string]$CurrentTopologyPath = (Join-Path $env:USERPROFILE 'Desktop\vault\04 Operating Contracts\mcp-current-topology.json'),
+    [string]$CurrentTopologyPath = (Join-Path $env:LOCALAPPDATA 'ChatGPTMcpRust\admin\mcp-restorer\state\mcp-current-topology.json'),
     [string]$CaddyAdminOrigin = 'http://127.0.0.1:2019',
     [string]$ExplicitUserAuthorizationEvidence = '',
     [switch]$CurrentPortFromTargetHost,
@@ -21,6 +21,28 @@ param(
 )
 $ErrorActionPreference='Stop'
 function Health([int]$Port){ Invoke-RestMethod -Uri ("http://127.0.0.1:{0}/health" -f $Port) -TimeoutSec 3 }
+function Read-Topology([string]$Path){
+    if(-not (Test-Path -LiteralPath $Path -PathType Leaf)){ throw "current topology missing: $Path" }
+    $topology=Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    $schema=[string]$topology.schema
+    $authority=[string]$topology.authority
+    $legacy=($schema -eq 'mcp-current-topology.v1' -and $authority -eq 'current_serving_topology')
+    $live=($schema -eq 'mcp-live-topology.v2' -and $authority -eq 'derived_live_snapshot')
+    if(-not $legacy -and -not $live){ throw "current topology contract is invalid: schema=$schema authority=$authority" }
+    return $topology
+}
+function Resolve-TopologyBinding($Topology,[string]$Origin){
+    if([string]$Topology.schema -ne 'mcp-live-topology.v2'){ return $Topology.serving.backend }
+    $candidates=@()
+    if($null -ne $Topology.serving.backend){ $candidates+=@($Topology.serving.backend) }
+    if($null -ne $Topology.serving.peer_route){ $candidates+=@($Topology.serving.peer_route) }
+    if($null -ne $Topology.serving.auxiliary_routes){ $candidates+=@($Topology.serving.auxiliary_routes) }
+    $target=$Origin.TrimEnd('/')
+    $matches=@($candidates | Where-Object { ([string]$_.public_origin).TrimEnd('/') -ieq $target })
+    if($matches.Count -ne 1){ throw "live topology must expose exactly one binding for public origin $Origin; found $($matches.Count)" }
+    return $matches[0]
+}
+
 function Get-CaddySiteBlockRange([string]$ConfigText,[string]$HostName){
     $match=[regex]::Match($ConfigText,"(?m)^\s*"+[regex]::Escape($HostName)+"\s*\{\s*\r?$")
     if(-not $match.Success){ throw "Caddy config is missing target host block: $HostName" }
@@ -159,10 +181,9 @@ if($CreateTargetHost){
     $persistedCurrentPort=$currentPort
     if($null -ne $ExpectedCurrentPort -and [int]$ExpectedCurrentPort -ne $currentPort){ throw "ExpectedCurrentPort disagrees with target host route: expected=$([int]$ExpectedCurrentPort) caddy=$currentPort host=$StableHost" }
 }else{
-    if(-not (Test-Path -LiteralPath $CurrentTopologyPath -PathType Leaf)){ throw "current topology missing: $CurrentTopologyPath" }
-    $topology=Get-Content -LiteralPath $CurrentTopologyPath -Raw | ConvertFrom-Json
-    if([string]$topology.schema -ne 'mcp-current-topology.v1' -or [string]$topology.authority -ne 'current_serving_topology'){ throw 'current topology contract is invalid' }
-    $currentListen=[string]$topology.serving.backend.listen
+    $topology=Read-Topology $CurrentTopologyPath
+    $topologyBinding=Resolve-TopologyBinding $topology $PublicOrigin
+    $currentListen=[string]$topologyBinding.listen
     if($currentListen -notmatch '^127\.0\.0\.1:(?<port>[0-9]+)$'){ throw "current topology backend listen is unsupported: $currentListen" }
     $topologyCurrentPort=[int]$Matches.port
     if($topologyCurrentPort -lt 1024 -or $topologyCurrentPort -gt 65535){ throw "current topology backend port is invalid: $topologyCurrentPort" }
@@ -267,13 +288,12 @@ if($CandidatePort -eq $IndependentRollbackPort){ throw 'candidate must not reuse
 if(-not (Test-Path -LiteralPath $CaddyConfigPath -PathType Leaf)){ throw "Caddy config missing: $CaddyConfigPath" }
 if(-not (Test-Path -LiteralPath $CaddyExe -PathType Leaf)){ throw "Caddy executable missing: $CaddyExe" }
 if($CreateTargetHost){
-    if(-not (Test-Path -LiteralPath $CurrentTopologyPath -PathType Leaf)){ throw "current topology missing: $CurrentTopologyPath" }
-    $rollbackTopology=Get-Content -LiteralPath $CurrentTopologyPath -Raw | ConvertFrom-Json
-    if([string]$rollbackTopology.schema -ne 'mcp-current-topology.v1' -or [string]$rollbackTopology.authority -ne 'current_serving_topology'){ throw 'current topology contract is invalid' }
-    $rollbackListen=[string]$rollbackTopology.serving.backend.listen
+    $rollbackTopology=Read-Topology $CurrentTopologyPath
+    $rollbackBinding=$rollbackTopology.serving.backend
+    $rollbackListen=[string]$rollbackBinding.listen
     if($rollbackListen -notmatch '^127\.0\.0\.1:(?<port>[0-9]+)$'){ throw "current topology backend listen is unsupported: $rollbackListen" }
     $rollbackProofPort=[int]$Matches.port
-    $rollbackOrigin=[string]$rollbackTopology.serving.public_origin
+    $rollbackOrigin=if([string]$rollbackTopology.schema -eq 'mcp-live-topology.v2'){ [string]$rollbackBinding.public_origin }else{ [string]$rollbackTopology.serving.public_origin }
     try { $rollbackProofHost=([uri]$rollbackOrigin).Host } catch { throw "current topology public origin is invalid: $rollbackOrigin" }
     if([string]::IsNullOrWhiteSpace($rollbackProofHost)){ throw "current topology public origin has no host: $rollbackOrigin" }
 }else{

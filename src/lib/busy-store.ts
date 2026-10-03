@@ -34,6 +34,27 @@ function isLockContentionError(error: unknown): boolean {
   return code === "EEXIST" || code === "EACCES" || code === "EPERM";
 }
 
+function pidIsAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+function staleLockHolderIsAlive(lockPath: string): boolean {
+  try {
+    const raw = readFileSync(lockPath, "utf8").trim();
+    const pid = Number(raw);
+    return Number.isInteger(pid) && pid > 0 && pidIsAlive(pid);
+  } catch {
+    return false;
+  }
+}
+
 
 const REPO_SCOPE_ALIASES = new Map<string, string>([
   ["regression-research", "regression-research"],
@@ -120,8 +141,10 @@ export class BusyStore {
   // landing together could still interleave and lose a claim. O_EXCL creation is atomic
   // on Windows and POSIX alike, so the lock file is the arbiter.
   //
-  // A lock older than LOCK_STALE_MS is stolen: a process killed mid-write must not wedge
-  // BUSY forever, and every holder here does bounded file IO. Waiting for a competing
+  // A stale lock is reclaimed only when its recorded holder PID is no longer alive.
+  // Age alone is not proof that the writer died: hard paging or slow storage can keep
+  // a valid writer inside the critical section longer than the stale threshold.
+  // Waiting for a competing
   // writer must yield the Node event loop so health and unrelated tools remain responsive.
   private async withLock<T>(fn: () => T | PromiseLike<T>, timeoutMs = LOCK_TIMEOUT_MS): Promise<T> {
     const lockPath = `${this.storePath}.lock`;
@@ -140,7 +163,7 @@ export class BusyStore {
         if (!isLockContentionError(error)) throw error;
         let reclaimed = false;
         try {
-          if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
+          if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS && !staleLockHolderIsAlive(lockPath)) {
             unlinkSync(lockPath);
             reclaimed = true;
           }

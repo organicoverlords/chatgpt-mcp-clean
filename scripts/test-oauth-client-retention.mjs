@@ -182,9 +182,9 @@ try {
   assert.equal(await recovered.clientsStore.getClient("missing-client"), undefined);
 
   const staleClientId = "123e4567-e89b-42d3-a456-426614174000";
-  assert.equal(recovered.recoverLegacyChatGptClient(staleClientId, "https://evil.example/oauth/callback"), false);
-  assert.equal(recovered.recoverLegacyChatGptClient("not-a-uuid", redirectUri), false);
-  assert.equal(recovered.recoverLegacyChatGptClient(staleClientId, redirectUri), true);
+  assert.equal(await recovered.recoverLegacyChatGptClient(staleClientId, "https://evil.example/oauth/callback"), false);
+  assert.equal(await recovered.recoverLegacyChatGptClient("not-a-uuid", redirectUri), false);
+  assert.equal(await recovered.recoverLegacyChatGptClient(staleClientId, redirectUri), true);
   assert.deepEqual((await recovered.clientsStore.getClient(staleClientId))?.redirect_uris, [redirectUri]);
   const recoveredAgain = new LocalOAuthProvider(resourceUrl, "owner@example.com", storePath);
   assert.deepEqual((await recoveredAgain.clientsStore.getClient(staleClientId))?.redirect_uris, [redirectUri]);
