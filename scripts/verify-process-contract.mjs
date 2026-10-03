@@ -159,14 +159,19 @@ const largeStartStructured = await assertStructuredProcessResult("start_process"
 assert.ok(String(largeStartStructured.stdout || "").length <= 30_000, "completed start_process output must stay inside the model-visible page cap");
 assert.equal(largeStartStructured.output_page?.page_limit, 30_000, "completed start_process must expose the model-visible page cap");
 assert.equal(largeStartStructured.next_action, "READ_SAME_PROCESS_ID", "completed oversized start_process output must continue losslessly through read_output");
-let largeStartText = String(largeStartStructured.stdout || "");
+const largeStartPreview = String(largeStartStructured.stdout || "");
+let largeStartText = "";
 let largeStartPage = largeStartStructured;
+let firstRead = true;
 while (largeStartPage.next_action === "READ_SAME_PROCESS_ID") {
   largeStartPage = await assertStructuredProcessResult("read_output", { process_id: largeStartStructured.process_id, max_chars: 1_000_000, wait_ms: 0 });
   assert.ok(String(largeStartPage.stdout || "").length <= 30_000, "continued start_process output must stay model-visible");
+  if (firstRead) assert.equal(String(largeStartPage.stdout || ""), largeStartPreview, "start_process preview must remain replayable until read_output consumes it");
+  firstRead = false;
   largeStartText += String(largeStartPage.stdout || "");
 }
 assert.equal(largeStartText.length, 70_000, "completed start_process output must reconstruct losslessly across model-visible pages");
+assert.equal(largeStartText, "S".repeat(70_000), "completed start_process pages must preserve exact output bytes");
 
 const killStructured = await assertStructuredProcessResult("kill_process", { process_id: startStructured.process_id });
 assert.equal(killStructured.already_exited, true, "kill_process structured regression probe should exercise already-exited variant");

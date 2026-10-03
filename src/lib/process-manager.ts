@@ -362,6 +362,7 @@ type ProcessState = {
   signal?: NodeJS.Signals | null;
   error?: string;
   errorCode?: string;
+  retrievalStopReady?: Promise<void>;
   done: Promise<void>;
   revision: number;
   lastReadRevisionByCaller: Map<string, number>;
@@ -2473,7 +2474,7 @@ export class ProcessManager {
     void this.releaseHostAdmissionSlotAsync(state.id);
     this.markProcessChanged(state);
     emitTelemetry({ event: "process_exit_observed", process_id: state.id, pid: state.pid, owner_caller_id: state.callerId, exit_code: state.exitCode, signal: state.signal ?? null, started_at: state.startedAt, finished_at: state.finishedAt }, state.ownerContext);
-    void this.armRetrievalStopAsync(state);
+    state.retrievalStopReady = this.armRetrievalStopAsync(state);
     sharedLauncherHandlers.delete(state.id);
     state.resolveDone();
     void this.persistReceiptAsync(state, exitCode, signal, finishedAt);
@@ -2675,6 +2676,7 @@ export class ProcessManager {
     stderrPath: string,
     callerId: string,
     requestedChars: number,
+    consumeCursor = true,
   ): Promise<Record<string, unknown>> {
     const processId = String(legacy.process_id);
     const cursorKey = this.cursorKey(processId, callerId);
@@ -2682,7 +2684,7 @@ export class ProcessManager {
       this.spoolCharLengthAsync(stdoutPath),
       this.spoolCharLengthAsync(stderrPath),
     ]);
-    const prior = this.outputCursors.get(cursorKey) ?? { stdout: 0, stderr: 0 };
+    const prior = consumeCursor ? (this.outputCursors.get(cursorKey) ?? { stdout: 0, stderr: 0 }) : { stdout: 0, stderr: 0 };
     const cursor = { stdout: Math.min(prior.stdout, stdoutTotal), stderr: Math.min(prior.stderr, stderrTotal) };
     const limit = Math.max(1, Math.min(requestedChars, MAX_READ_CHARS));
     const running = legacy.running === true;
@@ -2695,7 +2697,7 @@ export class ProcessManager {
       this.suppressedBase64Streams.has(stdoutSuppressionKey)
       || looksLikeOpaqueBase64(stdoutSample, stdoutRemaining)
     );
-    if (suppressStdout) this.suppressedBase64Streams.add(stdoutSuppressionKey);
+    if (suppressStdout && consumeCursor) this.suppressedBase64Streams.add(stdoutSuppressionKey);
     const stdoutText = suppressStdout
       ? opaqueBase64Marker("stdout", stdoutRemaining, legacy.stdout_sha256)
       : (stdoutRemaining > 0 ? await this.readSpoolSliceAsync(stdoutPath, cursor.stdout, Math.min(limit, stdoutRemaining)) : "");
@@ -2728,10 +2730,12 @@ export class ProcessManager {
         more: moreCaptured,
       },
     };
-    if (moreCaptured || running) this.outputCursors.set(cursorKey, { stdout: nextStdout, stderr: nextStderr });
-    else {
-      this.outputCursors.delete(cursorKey);
-      this.suppressedBase64Streams.delete(stdoutSuppressionKey);
+    if (consumeCursor) {
+      if (moreCaptured || running) this.outputCursors.set(cursorKey, { stdout: nextStdout, stderr: nextStderr });
+      else {
+        this.outputCursors.delete(cursorKey);
+        this.suppressedBase64Streams.delete(stdoutSuppressionKey);
+      }
     }
     return result;
   }
@@ -3768,9 +3772,9 @@ export class ProcessManager {
     });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
-    if (!state || state.exitCode !== null) return await this.readAsync(started.process_id, outputMaxChars);
+    if (!state || state.exitCode !== null) return await this.readAsync(started.process_id, outputMaxChars, false, false);
     await Promise.race([state.done, delay(boundedWaitMs)]);
-    return await this.readAsync(started.process_id, outputMaxChars);
+    return await this.readAsync(started.process_id, outputMaxChars, false, false);
   }
 
   read(processId: string, maxChars = MAX_READ_CHARS, markRead = true): Record<string, unknown> {
@@ -3839,7 +3843,7 @@ export class ProcessManager {
   }
 
 
-  private async readAsync(processId: string, maxChars = MAX_READ_CHARS, markRead = true): Promise<Record<string, unknown>> {
+  private async readAsync(processId: string, maxChars = MAX_READ_CHARS, markRead = true, consumeCursor = true): Promise<Record<string, unknown>> {
     this.pruneCompleted();
     const limit = Math.max(1, Math.min(maxChars, MAX_READ_CHARS));
     const state = this.processes.get(processId);
@@ -3848,6 +3852,7 @@ export class ProcessManager {
       if (receipt) return receipt;
       throw new Error("Unknown process_id: " + processId);
     }
+    if (state.retrievalStopReady) await state.retrievalStopReady;
     const command = state.command.slice(0, MAX_COMMAND_REPORT_CHARS);
     const stdout = state.stdout.tail(limit);
     const stderr = state.stderr.tail(limit);
@@ -3903,7 +3908,7 @@ export class ProcessManager {
     ]);
     const needsPaging = state.exitCode === null || cursorExists || stdoutChars + stderrChars > limit;
     return needsPaging
-      ? await this.pageSpoolOutputAsync(legacy, state.stdoutSpoolPath, state.stderrSpoolPath, observerCallerId, limit)
+      ? await this.pageSpoolOutputAsync(legacy, state.stdoutSpoolPath, state.stderrSpoolPath, observerCallerId, limit, consumeCursor)
       : legacy;
   }
 
@@ -3949,9 +3954,9 @@ export class ProcessManager {
     emitTelemetry({ event: "process_wait_requested", action: "start_script", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
-    if (!state || state.exitCode !== null) return await this.readAsync(started.process_id, outputMaxChars);
+    if (!state || state.exitCode !== null) return await this.readAsync(started.process_id, outputMaxChars, false, false);
     await this.waitForDoneOrTimeout(state, boundedWaitMs, signal);
-    return await this.readAsync(started.process_id, outputMaxChars);
+    return await this.readAsync(started.process_id, outputMaxChars, false, false);
   }
 
   async startStructuredWithWait(
@@ -3973,9 +3978,9 @@ export class ProcessManager {
     emitTelemetry({ event: "process_wait_requested", action: "start_structured", process_id: started.process_id, requested_wait_ms: boundedWaitMs });
     if (boundedWaitMs === 0) return started;
     const state = this.processes.get(started.process_id);
-    if (!state || state.exitCode !== null) return await this.readAsync(started.process_id, outputMaxChars);
+    if (!state || state.exitCode !== null) return await this.readAsync(started.process_id, outputMaxChars, false, false);
     await this.waitForDoneOrTimeout(state, boundedWaitMs, signal);
-    return await this.readAsync(started.process_id, outputMaxChars);
+    return await this.readAsync(started.process_id, outputMaxChars, false, false);
   }
 
   async readOutput(processId: string, maxChars = MAX_READ_CHARS, waitMs?: number, signal?: AbortSignal): Promise<Record<string, unknown>> {

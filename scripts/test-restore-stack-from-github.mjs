@@ -26,6 +26,8 @@ for (const required of [
   "One healthy process binding is enough to regain control",
   "reconciliation_required = $true",
   "lossless COMPLETE bootstrap paging",
+  "Runtime mcp-restorer state is current topology evidence",
+  "Vault mcp-current-topology.json is historical/recovery evidence only",
   "correct receipt/control directory",
 ]) assert.ok(script.includes(required), `missing restore invariant: ${required}`);
 
@@ -36,6 +38,7 @@ for (const forbidden of [
   "Copy-Item -LiteralPath $oauth",
   "Restart-Computer",
   "RequireHealthyRuntime:(!",
+  "mcp-current-topology.json is current serving authority",
 ]) assert.equal(script.includes(forbidden), false, `unsafe recovery primitive present: ${forbidden}`);
 
 const planIndex = script.indexOf("if ($Plan)");

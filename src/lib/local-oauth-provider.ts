@@ -1,4 +1,4 @@
-﻿import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir as mkdirAsync, open as openAsync, readFile as readFileAsync, rename as renameAsync, stat as statAsync, unlink as unlinkAsync, writeFile as writeFileAsync } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -106,7 +106,9 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     private readonly resourceUrl: URL,
     private readonly ownerLogin: string,
     private readonly storePath: string,
-  ) { this.load(); }
+  ) {
+    this.load();
+  }
 
   private async loadAsync(): Promise<void> {
     try {
@@ -343,11 +345,17 @@ export class LocalOAuthProvider implements OAuthServerProvider {
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
-    // Access-token verification is the MCP request hot path. Durable state is
-    // loaded at construction and local mutations update memory before persist,
-    // so rereading oauth.json here only couples every tool call to disk latency.
+    // Known access tokens stay entirely in memory. A candidate backend that was
+    // started before another backend issued the token gets one async store refresh
+    // on the miss path so cross-generation handoff sees newly issued durable state.
     this.prune();
-    const rec = this.access.get(digest(token));
+    const key = digest(token);
+    let rec = this.access.get(key);
+    if (!rec || rec.expiresAt <= Date.now()) {
+      await this.loadAsync();
+      this.prune();
+      rec = this.access.get(key);
+    }
     if (!rec || rec.expiresAt <= Date.now()) {
       emitTelemetry({ event: "oauth_access_rejected", reason: "unknown_or_expired_token" });
       throw new InvalidTokenError("Invalid or expired access token");

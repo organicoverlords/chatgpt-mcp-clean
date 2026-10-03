@@ -79,25 +79,32 @@ function Read-JsonIfPresent([string]$Path) {
     catch { throw "invalid JSON: $Path :: $($_.Exception.Message)" }
 }
 
-function Read-CurrentTopology([string]$Root) {
-    $path = Join-Path $Root '04 Operating Contracts\mcp-current-topology.json'
+function Read-RuntimeTopology {
+    $path = Join-Path $env:LOCALAPPDATA 'ChatGPTMcpRust\admin\mcp-restorer\state\mcp-current-topology.json'
     $topology = Read-JsonIfPresent $path
     if (-not $topology) { return $null }
-    if ([string]$topology.schema -ne 'mcp-current-topology.v1' -or [string]$topology.authority -ne 'current_serving_topology') {
-        throw "Vault current-topology authority is invalid: $path"
+    $schema=[string]$topology.schema
+    $authority=[string]$topology.authority
+    $legacy=($schema -eq 'mcp-current-topology.v1' -and $authority -eq 'current_serving_topology')
+    $live=($schema -eq 'mcp-live-topology.v2' -and $authority -eq 'derived_live_snapshot')
+    if (-not $legacy -and -not $live) {
+        throw "runtime current-topology contract is invalid: $path"
     }
     return $topology
 }
 
 function Resolve-PublicOrigin([string]$Requested,$Topology,$ExistingConfig) {
     if (-not [string]::IsNullOrWhiteSpace($Requested)) { return $Requested.TrimEnd('/') }
+    if ($Topology -and [string]$Topology.schema -eq 'mcp-live-topology.v2' -and $Topology.serving.backend -and -not [string]::IsNullOrWhiteSpace([string]$Topology.serving.backend.public_origin)) {
+        return ([string]$Topology.serving.backend.public_origin).TrimEnd('/')
+    }
     if ($Topology -and $Topology.serving -and -not [string]::IsNullOrWhiteSpace([string]$Topology.serving.public_origin)) {
         return ([string]$Topology.serving.public_origin).TrimEnd('/')
     }
     if ($ExistingConfig -and -not [string]::IsNullOrWhiteSpace([string]$ExistingConfig.public_origin)) {
         return ([string]$ExistingConfig.public_origin).TrimEnd('/')
     }
-    throw 'PublicOrigin is required when it cannot be recovered from Vault current topology or an existing stack-config.json'
+    throw 'PublicOrigin is required when it cannot be recovered from runtime topology or an existing stack-config.json'
 }
 
 function Resolve-OwnerLogin([string]$Requested,$Topology,$ExistingConfig) {
@@ -137,7 +144,7 @@ $planResult = [ordered]@{
     )
     functional_restore = @('MCP process profile','local Caddy','BusyCoordinator','agent rules/contracts','PlanOnly','autostart')
     user_context_restore = $(if ($RestoreUserContext) { @('Vault checkout','durable user directives/operating contracts','Stack Atlas entrypoints','Vault checkout sync','bootstrap snapshot tasks') } else { @() })
-    redundant_bindings = 'second-stage only; read Vault mcp-current-topology.json and never hard-code historical ports/commits'
+    redundant_bindings = 'second-stage only; read runtime mcp-restorer topology first; Vault topology is historical/recovery evidence only; never hard-code historical ports/commits'
     completion_gate = @(
         'prove live route/runtime/task/OAuth/receipt identity and independent rollback',
         'prove runtime priority hardening and lossless COMPLETE bootstrap paging on restored serving bindings',
@@ -162,10 +169,9 @@ if (-not (Get-Command python.exe -ErrorAction SilentlyContinue) -and -not (Get-C
 }
 
 $mcpCommit = Ensure-Checkout $SourceRoot $McpRepository $McpRef
-$topology = $null
+$topology = Read-RuntimeTopology
 if ($RestoreUserContext) {
     $null = Ensure-Checkout $VaultRoot $VaultRepository $VaultRef
-    $topology = Read-CurrentTopology $VaultRoot
 }
 
 $existingConfigPath = Join-Path $InstallRoot 'stack-config.json'
@@ -212,7 +218,8 @@ if ($RestoreUserContext) {
     & (Join-Path $VaultRoot 'tools\install_bootstrap_snapshot_task.ps1') -RepoRoot $VaultRoot -StartNow
     if ($LASTEXITCODE -ne 0) { throw 'Vault bootstrap snapshot task restoration failed' }
     $userContext.stack_atlas = $atlasPath
-    $userContext.current_topology = Join-Path $VaultRoot '04 Operating Contracts\mcp-current-topology.json'
+    $userContext.current_topology = Join-Path $env:LOCALAPPDATA 'ChatGPTMcpRust\admin\mcp-restorer\state\mcp-current-topology.json'
+    $userContext.legacy_topology_evidence = Join-Path $VaultRoot '04 Operating Contracts\mcp-current-topology.json'
     $userContext.recovery_state = Join-Path $VaultRoot '04 Operating Contracts\mcp-recovery-state.json'
     $userContext.directive_authority = 'Vault durable memory/directive records; current user direction outranks stale history'
 }
@@ -244,7 +251,7 @@ $result = [ordered]@{
     user_context = $userContext
     preserved_existing_oauth_files = $preservedOauth
     oauth_policy = 'No OAuth/token backup was copied, restored, deleted, or merged. If authorization state is missing, reconnect/authorize the ChatGPT connector after the endpoint is healthy.'
-    current_topology_policy = 'If Vault is restored, mcp-current-topology.json is current serving authority; mcp-recovery-state.json is recovery metadata only.'
+    current_topology_policy = 'Runtime mcp-restorer state is current topology evidence. Vault mcp-current-topology.json is historical/recovery evidence only and must never overwrite live topology.'
     control_recovery = 'One healthy process binding is enough to regain control. Restore redundant/frozen bindings only as a second stage from current topology and current source with existing production gates.'
     reconciliation_required = $true
     completion_gate = @(
