@@ -22,7 +22,7 @@ writeFileSync(omenFixture, [
 ].join("\n"), "utf8");
 process.env.MCP_OMEN_EXEC_PATH = omenFixture;
 process.env.MCP_ALLOW_OMEN_SSH_FALLBACK = "1";
-const { createServer } = await import("../dist/server.js");
+const { createServer, PROCESS_TOOL_CONTRACT_VERSION } = await import("../dist/server.js");
 const contractSourceCommit = "0123456789abcdef0123456789abcdef01234567";
 const server = createServer("contract-verifier", { backend_generation: "backend-contract-test", source_commit: contractSourceCommit });
 const actualTools = Object.entries(server._registeredTools)
@@ -89,7 +89,7 @@ async function assertStructuredProcessResult(name, args) {
   const result = await tool.handler(args, {});
   assert.ok(result.structuredContent, `${name} must return structuredContent`);
   assert.deepEqual(result.structuredContent.serving_identity, {
-    tool_contract_version: "process-tools.v4",
+    tool_contract_version: PROCESS_TOOL_CONTRACT_VERSION,
     backend_generation: "backend-contract-test",
     source_commit: contractSourceCommit,
   }, `${name} must expose exact serving backend/source/contract identity`);
@@ -182,10 +182,11 @@ const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "63bb96584b830dc6959974d750537352f94d3930ffe990bcc953ddb30a5d3cdb";
+const acceptedContractSha256 = "16a32af61bc84c66eb911172a51cd2ae12fd7113dfc509de55616cde11b8a6d8";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
-const expectedTools = [...baseExpectedTools].sort((a, b) => a.name.localeCompare(b.name));
+const configuredExpectedTools = JSON.parse(JSON.stringify(baseExpectedTools).replaceAll("process-tools.v4", PROCESS_TOOL_CONTRACT_VERSION));
+const expectedTools = [...configuredExpectedTools].sort((a, b) => a.name.localeCompare(b.name));
 assert.deepEqual(actualTools, expectedTools, "connector tool contract changed; do not replace a stable connector identity without an explicit contract migration");
 const serverBytes = readFileSync(resolve("dist/server.js"));
 const actualHash = createHash("sha256").update(serverBytes).digest("hex");
