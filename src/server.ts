@@ -183,21 +183,10 @@ function localEngineProcessResult(
     ...(typeof value.exit_code === "number" || value.exit_code === null ? { exit_code: value.exit_code } : {}),
     ...(stdoutDropped > 0 ? { stdout_truncated: true, stdout_dropped_from_start: typeof value.stdout_dropped_chars === "number" ? value.stdout_dropped_chars : stdoutDropped } : {}),
     ...(stderrDropped > 0 ? { stderr_truncated: true, stderr_dropped_from_start: typeof value.stderr_dropped_chars === "number" ? value.stderr_dropped_chars : stderrDropped } : {}),
-    ...(typeof value.command === "string" ? { command: value.command } : {}),
-    ...(typeof value.cwd === "string" ? { cwd: value.cwd } : {}),
-    ...(typeof value.started_at === "string" ? { started_at: value.started_at } : {}),
-    ...(typeof value.finished_at === "string" || value.finished_at === null ? { finished_at: value.finished_at } : {}),
-    ...(typeof value.signal === "string" || value.signal === null ? { signal: value.signal } : {}),
-    ...(typeof value.request_id === "string" ? { request_id: value.request_id } : {}),
+    // Durable receipt/evidence metadata stays in local audit storage instead of being
+    // repeated into every model-visible ChatGPT tool node.
+    ...(typeof value.signal === "string" && value.signal ? { signal: value.signal } : {}),
     ...(typeof value.error === "string" ? { error: value.error } : {}),
-    ...(typeof value.stdout_sha256 === "string" ? {
-      audit_schema: "process-output-evidence.v1", stdout_sha256: value.stdout_sha256, stderr_sha256: value.stderr_sha256,
-      retained_stdout_bytes: value.retained_stdout_bytes, retained_stderr_bytes: value.retained_stderr_bytes,
-      retained_output_bytes: Number(value.retained_stdout_bytes) + Number(value.retained_stderr_bytes),
-      retained_stdout_chars: value.retained_stdout_chars, retained_stderr_chars: value.retained_stderr_chars,
-      retained_output_chars: Number(value.retained_stdout_chars) + Number(value.retained_stderr_chars),
-      evidence_completeness: value.evidence_completeness, execution_outcome: value.execution_outcome,
-    } : {}),
     output_page: {
       stdout_start: stdoutStart,
       stdout_end: stdoutEnd,

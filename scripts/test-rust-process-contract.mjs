@@ -10,12 +10,14 @@ await Promise.all([server.connect(a),client.connect(b)]);
 const owned=new Set();
 async function call(name,args){const r=await client.callTool({name,arguments:args});assert.notEqual(r.isError,true,JSON.stringify(r));return r.structuredContent;}
 const activity_target={type:'card',id:'contract-roundtrip',project:'fixture'};
+const modelVisibleReceiptOnlyFields=['command','cwd','started_at','finished_at','request_id','audit_schema','stdout_sha256','stderr_sha256','retained_stdout_bytes','retained_stderr_bytes','retained_output_bytes','retained_stdout_chars','retained_stderr_chars','retained_output_chars','evidence_completeness','execution_outcome'];
+function assertCompactModelVisible(value){for(const field of modelVisibleReceiptOnlyFields)assert.equal(field in value,false,'receipt-only field leaked into model-visible result: '+field);}
 try {
   const missing=await call('start_process',{executable:'mcp_missing_executable_contract_fixture_20261004',activity_target,wait_ms:1000});
   assert.equal(missing.process_state,'COMPLETED');assert.equal(missing.next_action,'STOP_READING');
-  assert.equal(missing.failure_diagnostic.kind,'spawn_error');assert.equal(missing.failure_diagnostic.code,'ENOENT');
+  assert.equal(missing.failure_diagnostic.kind,'spawn_error');assert.equal(missing.failure_diagnostic.code,'ENOENT');assertCompactModelVisible(missing);
   assert.deepEqual(missing.activity_target,activity_target);
-  const repeat=await call('read_output',{process_id:missing.process_id});assert.deepEqual(repeat.activity_target,activity_target);
+  const repeat=await call('read_output',{process_id:missing.process_id});assert.deepEqual(repeat.activity_target,activity_target);assertCompactModelVisible(repeat);
   assert.equal(repeat.failure_diagnostic.kind,'spawn_error');
   await Promise.all(Array.from({length:6},async (_,trial) => {
     const units=120000;
@@ -23,7 +25,7 @@ try {
     owned.add(v.process_id);let out='',err='',lastOut=0,lastErr=0,maxOut=0,maxErr=0,reads=0;
     const end=Date.now()+20000;
     while(true){
-      assert.deepEqual(v.activity_target,activity_target);
+      assert.deepEqual(v.activity_target,activity_target);assertCompactModelVisible(v);
       const p=v.output_page;
       assert.equal(p.stdout_start,lastOut);assert.equal(p.stderr_start,lastErr);
       assert.equal(p.stdout_end-p.stdout_start,v.stdout.length);assert.equal(p.stderr_end-p.stderr_start,v.stderr.length);
@@ -37,6 +39,6 @@ try {
     assert.equal(v.output_page.stdout_total,units*3);assert.equal(v.output_page.stderr_total,50005);assert.ok(reads>10);
     owned.delete(v.process_id);
   }));
-  console.log(JSON.stringify({result:'PASS',spawn_failure_structured:true,activity_roundtrip:true,authoritative_cumulative_pages:true,unicode_utf16_offsets:true,six_concurrent_finite_processes:true}));
+  console.log(JSON.stringify({result:'PASS',spawn_failure_structured:true,activity_roundtrip:true,model_visible_receipt_metadata_compact:true,authoritative_cumulative_pages:true,unicode_utf16_offsets:true,six_concurrent_finite_processes:true}));
 }finally{for(const process_id of owned)await client.callTool({name:'kill_process',arguments:{process_id}});await client.close();await server.close();}
 process.exit(0);
