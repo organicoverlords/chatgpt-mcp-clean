@@ -31,7 +31,18 @@ const localEngineUrl = process.env.MCP_LOCAL_ENGINE_URL?.trim()
     ? "http://127.0.0.1:" + localEnginePortByBindingPort[process.env.PORT] + "/mcp"
     : undefined);
 const LOCAL_ENGINE_PROCESS_PREFIX = "local-rust:";
+const previousLocalEngineUrl = process.env.MCP_LOCAL_ENGINE_PREVIOUS_URL?.trim();
+let previousLocalEngineClientPromise: Promise<Client> | undefined;
 let localEngineClientPromise: Promise<Client> | undefined;
+async function previousLocalEngineClient(): Promise<Client> {
+  if (!previousLocalEngineUrl) throw new Error("previous_process_engine_unavailable");
+  if (!previousLocalEngineClientPromise) {
+    const client = new Client({ name: "shell-mcp-retained-process-reader", version: "1" });
+    previousLocalEngineClientPromise = client.connect(new StreamableHTTPClientTransport(new URL(previousLocalEngineUrl)))
+      .then(() => client).catch(error => { previousLocalEngineClientPromise = undefined; throw error; });
+  }
+  return previousLocalEngineClientPromise;
+}
 
 function localEngineClient(): Promise<Client> {
   if (!localEngineUrl) throw new Error("local_process_engine_unavailable: MCP_LOCAL_ENGINE_URL is not configured");
@@ -51,8 +62,18 @@ async function callLocalEngineTool(
   args: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   const client = await localEngineClient();
-  const reply = await client.callTool({ name, arguments: args });
-  if (reply.isError) throw new Error("local_process_engine_tool_error:" + name);
+  let reply = await client.callTool({ name, arguments: args });
+  const errorText = (value: typeof reply) => Array.isArray(value.content)
+    ? value.content.filter((item): item is { type: "text"; text: string } =>
+        Boolean(item && typeof item === "object" && "type" in item && item.type === "text" && "text" in item && typeof item.text === "string"))
+      .map(item => item.text).join("\n") : "";
+  // IDs returned before cutover remain readable/killable on their original engine.
+  if (reply.isError && name !== "start_process" && previousLocalEngineUrl
+      && /^unknown process_id$/.test(errorText(reply).trim())) {
+    const previousClient = await previousLocalEngineClient();
+    reply = await previousClient.callTool({ name, arguments: args });
+  }
+  if (reply.isError) throw new Error("local_process_engine_tool_error:" + name + ": " + errorText(reply));
   if (reply.structuredContent && typeof reply.structuredContent === "object" && !Array.isArray(reply.structuredContent)) {
     return reply.structuredContent as Record<string, unknown>;
   }
