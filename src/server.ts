@@ -75,6 +75,17 @@ type LocalEngineProcessMeta = {
 
 const localEngineProcessMeta = new Map<string, LocalEngineProcessMeta>();
 const localEngineReplay = new Map<string, Record<string, unknown>>();
+const MAX_LOCAL_ENGINE_CACHE_ENTRIES = 512;
+
+function trimLocalEngineCaches(): void {
+  for (const cache of [localEngineProcessMeta, localEngineReplay]) {
+    while (cache.size > MAX_LOCAL_ENGINE_CACHE_ENTRIES) {
+      const oldest = cache.keys().next().value;
+      if (oldest === undefined) break;
+      cache.delete(oldest);
+    }
+  }
+}
 
 function localEngineProcessResult(
   value: Record<string, unknown>,
@@ -89,6 +100,10 @@ function localEngineProcessResult(
   const stdoutDropped = typeof value.stdout_truncated_bytes === "number" ? value.stdout_truncated_bytes : 0;
   const stderrDropped = typeof value.stderr_truncated_bytes === "number" ? value.stderr_truncated_bytes : 0;
   const more = value.next_action === "READ_SAME_PROCESS_ID";
+  if (!more && value.running !== true) {
+    localEngineProcessMeta.delete(rawProcessId);
+    localEngineReplay.delete(rawProcessId);
+  }
   const effectivePageLimit = Math.max(1, Math.min(30_000, pageLimit));
   return {
     mcp_status: "OK",
@@ -125,9 +140,10 @@ function rememberLocalEngineStart(
   meta: LocalEngineProcessMeta,
 ): Record<string, unknown> {
   const rawProcessId = typeof value.process_id === "string" ? value.process_id : "";
-  if (rawProcessId) {
+  if (rawProcessId && (value.running === true || value.next_action === "READ_SAME_PROCESS_ID")) {
     localEngineProcessMeta.set(rawProcessId, meta);
     localEngineReplay.set(rawProcessId, value);
+    trimLocalEngineCaches();
   }
   return localEngineProcessResult(value, 30_000, meta);
 }
@@ -624,10 +640,6 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
             ...(input.env !== undefined ? { env: input.env } : {}),
             wait_ms: Math.min(wait_ms ?? DEFAULT_INITIAL_WAIT_MS, 5000),
           });
-          if (wait_ms === undefined) {
-            const remainingInitialReadMs = DEFAULT_INITIAL_WAIT_MS - (Date.now() - localStartedAt);
-            if (remainingInitialReadMs > 0) await new Promise((resolve) => setTimeout(resolve, remainingInitialReadMs));
-          }
           value = rememberLocalEngineStart(localStarted, input.executable !== undefined
             ? { execution_mode: "native", execution_reason: "structured_argv" }
             : { execution_mode: "explicit_shell", execution_reason: "structured_script" });
@@ -727,6 +739,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       }
       const remoteId = localRemoteProcessId(process_id);
       const engineId = localEngineProcessId(process_id);
+      if (engineId !== undefined) localEngineReplay.delete(engineId);
       const value = remoteId !== undefined
         ? remoteProcessResult(await callRemoteOmenTool("read_output", { process_id: remoteId, max_chars: boundedMaxChars, ...(wait_ms !== undefined ? { wait_ms } : {}) }, callerId))
         : engineId !== undefined
