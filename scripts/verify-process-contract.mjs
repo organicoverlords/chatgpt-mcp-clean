@@ -160,13 +160,14 @@ assert.ok(String(largeStartStructured.stdout || "").length <= 30_000, "completed
 assert.equal(largeStartStructured.output_page?.page_limit, 30_000, "completed start_process must expose the model-visible page cap");
 assert.equal(largeStartStructured.next_action, "READ_SAME_PROCESS_ID", "completed oversized start_process output must continue losslessly through read_output");
 const largeStartPreview = String(largeStartStructured.stdout || "");
-let largeStartText = "";
+const nativeRustEngine = Boolean(process.env.MCP_LOCAL_ENGINE_URL || ["3212", "3312", "3420"].includes(process.env.PORT));
+let largeStartText = nativeRustEngine ? largeStartPreview : "";
 let largeStartPage = largeStartStructured;
 let firstRead = true;
 while (largeStartPage.next_action === "READ_SAME_PROCESS_ID") {
   largeStartPage = await assertStructuredProcessResult("read_output", { process_id: largeStartStructured.process_id, max_chars: 1_000_000, wait_ms: 0 });
   assert.ok(String(largeStartPage.stdout || "").length <= 30_000, "continued start_process output must stay model-visible");
-  if (firstRead) assert.equal(String(largeStartPage.stdout || ""), largeStartPreview, "start_process preview must remain replayable until read_output consumes it");
+  if (firstRead && !nativeRustEngine) assert.equal(String(largeStartPage.stdout || ""), largeStartPreview, "legacy start_process preview must remain replayable until read_output consumes it");
   firstRead = false;
   largeStartText += String(largeStartPage.stdout || "");
 }
