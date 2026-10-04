@@ -401,7 +401,12 @@ const snapshotFreshnessSchema = z.object({
 }).strict();
 
 // Public ChatGPT registration contract: keep stable; runtime identity is backend_generation/source_commit.
-export const PROCESS_TOOL_CONTRACT_VERSION = "process-tools.v4" as const;
+// Registration revisions are compatibility settings, not different implementations.
+const contractRevision = process.env.MCP_TOOL_CONTRACT_VERSION ?? "process-tools.v4";
+if (contractRevision !== "process-tools.v4" && contractRevision !== "process-tools.v6") {
+  throw new Error("MCP_TOOL_CONTRACT_VERSION must be process-tools.v4 or process-tools.v6");
+}
+export const PROCESS_TOOL_CONTRACT_VERSION = contractRevision;
 
 export type ProcessServingIdentity = {
   backend_generation?: string;
@@ -409,7 +414,7 @@ export type ProcessServingIdentity = {
 };
 
 const processServingIdentitySchema = z.object({
-  tool_contract_version: z.literal(PROCESS_TOOL_CONTRACT_VERSION),
+  tool_contract_version: z.literal(PROCESS_TOOL_CONTRACT_VERSION).describe("Registration schema revision; executable implementation is identified by source_commit."),
   backend_generation: z.string().min(1).optional(),
   source_commit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
 }).strict();
