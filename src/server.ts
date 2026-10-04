@@ -113,7 +113,7 @@ function localEngineProcessResult(
     process_id: processId,
     ...(typeof value.pid === "number" ? { pid: value.pid } : {}),
     running: value.running === true,
-    execution_target: "local",
+    execution_target: nativeOmenHost ? "omen" : "local",
     execution_transport: "native-mcp",
     ...(meta ? { execution_mode: meta.execution_mode, execution_reason: meta.execution_reason } : {}),
     stdout,
@@ -171,7 +171,7 @@ function localEngineKillResult(value: Record<string, unknown>): Record<string, u
     ...(!requested && !running ? { already_exited: true } : {}),
     ...(requested ? { kill_requested: true } : {}),
     running,
-    execution_target: "local",
+    execution_target: nativeOmenHost ? "omen" : "local",
     execution_transport: "native-mcp",
   };
 }
@@ -183,9 +183,9 @@ function localEngineProcessId(processId: string): string | undefined {
 }
 
 function scriptEngineInvocation(language: string, script: string): { executable: string; args: string[]; stdin: string } {
-  if (language === "powershell") return { executable: "powershell.exe", args: ["-NoProfile", "-NonInteractive", "-Command", "-"], stdin: script };
-  if (language === "python") return { executable: "python.exe", args: ["-"], stdin: script };
-  if (language === "node") return { executable: "node.exe", args: ["-"], stdin: script };
+  if (language === "powershell") return { executable: process.platform === "win32" ? "powershell.exe" : "pwsh", args: ["-NoProfile", "-NonInteractive", "-Command", "-"], stdin: script };
+  if (language === "python") return { executable: process.platform === "win32" ? "python.exe" : "python3", args: ["-"], stdin: script };
+  if (language === "node") return { executable: process.execPath, args: ["-"], stdin: script };
   if (language === "bash") return { executable: "bash", args: ["-s"], stdin: script };
   throw new Error("unsupported script language: " + language);
 }
@@ -554,7 +554,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       const { working_directory, execution_target, wait_ms, activity_target, action_class } = input;
       const target = execution_target ?? defaultExecutionTarget;
       let value: Record<string, unknown>;
-      if (target === "omen") {
+      if (target === "omen" && !(nativeOmenHost && localEngineUrl)) {
         if (nativeOmenHost) {
           if (process.platform === "win32") throw new Error("native_omen_host_misconfigured: MCP_NATIVE_OMEN_HOST requires a non-Windows host");
           const nativeWorkingDirectory = working_directory ?? process.env.HOME ?? process.cwd();
