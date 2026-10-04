@@ -6,6 +6,7 @@ import { isBootstrapSnapshot, readBootstrapSnapshot } from "./lib/bootstrap-snap
 import { z } from "zod";
 import { BusyStore } from "./lib/busy-store.js";
 import { ProcessManager } from "./lib/process-manager.js";
+import { structuredInvocation, scriptInvocation } from "./lib/structured-invocation.js";
 
 // The deployed ChatGPT connector surface is the process profile. Keep the broader
 // full profile explicit-only for internal/local tests so repo inspection without a
@@ -69,7 +70,7 @@ async function callLocalEngineTool(
 }
 
 type LocalEngineProcessMeta = {
-  execution_mode: "native" | "explicit_shell";
+  execution_mode: "native" | "explicit_shell" | "powershell";
   execution_reason: string;
 };
 
@@ -182,13 +183,6 @@ function localEngineProcessId(processId: string): string | undefined {
     : undefined;
 }
 
-function scriptEngineInvocation(language: string, script: string): { executable: string; args: string[]; stdin: string } {
-  if (language === "powershell") return { executable: process.platform === "win32" ? "powershell.exe" : "pwsh", args: ["-NoProfile", "-NonInteractive", "-Command", "-"], stdin: script };
-  if (language === "python") return { executable: process.platform === "win32" ? "python.exe" : "python3", args: ["-"], stdin: script };
-  if (language === "node") return { executable: process.execPath, args: ["-"], stdin: script };
-  if (language === "bash") return { executable: "bash", args: ["-s"], stdin: script };
-  throw new Error("unsupported script language: " + language);
-}
 type OmenClientEntry = { promise: Promise<Client>; active: number; lastUsedAt: number };
 const omenMcpClients = new Map<string, OmenClientEntry>();
 const OMEN_CLIENT_IDLE_MS = 10 * 60_000;
@@ -629,8 +623,8 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       } else {
         if (localEngineUrl) {
           const invocation = input.executable !== undefined
-            ? { executable: input.executable, args: input.args ?? [], ...(input.stdin !== undefined ? { stdin: input.stdin } : {}) }
-            : scriptEngineInvocation(input.language!, input.script!);
+            ? structuredInvocation(input.executable, input.args ?? [], input.stdin)
+            : scriptInvocation(input.language!, input.script!);
           const localStartedAt = Date.now();
           const localStarted = await callLocalEngineTool("start_process", {
             executable: invocation.executable,
@@ -640,9 +634,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
             ...(input.env !== undefined ? { env: input.env } : {}),
             wait_ms: Math.min(wait_ms ?? DEFAULT_INITIAL_WAIT_MS, 5000),
           });
-          value = rememberLocalEngineStart(localStarted, input.executable !== undefined
-            ? { execution_mode: "native", execution_reason: "structured_argv" }
-            : { execution_mode: "explicit_shell", execution_reason: "structured_script" });
+          value = rememberLocalEngineStart(localStarted, { execution_mode: invocation.execution_mode, execution_reason: invocation.execution_reason });
         } else {
           value = input.executable !== undefined
             ? await processManager.startStructuredWithWait(input.executable, input.args ?? [], working_directory, callerId, wait_ms ?? DEFAULT_INITIAL_WAIT_MS, activity_target, action_class, input.stdin, input.env, extra.signal, MODEL_VISIBLE_PAGE_MAX_CHARS)
