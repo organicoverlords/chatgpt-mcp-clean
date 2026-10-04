@@ -24,6 +24,100 @@ const nativeOmenHost = process.env.MCP_NATIVE_OMEN_HOST === "1";
 const omenMcpUrl = process.env.MCP_OMEN_MCP_URL?.trim() || undefined;
 const allowOmenSshFallback = process.env.MCP_ALLOW_OMEN_SSH_FALLBACK === "1";
 const OMEN_MCP_PROCESS_PREFIX = "omen-mcp:";
+const localEnginePortByBindingPort: Record<string, number> = { "3212": 3513, "3312": 3516, "3420": 3515 };
+const localEngineUrl = process.env.MCP_LOCAL_ENGINE_URL?.trim()
+  || (process.env.PORT && localEnginePortByBindingPort[process.env.PORT]
+    ? "http://127.0.0.1:" + localEnginePortByBindingPort[process.env.PORT] + "/mcp"
+    : undefined);
+const LOCAL_ENGINE_PROCESS_PREFIX = "local-rust:";
+let localEngineClientPromise: Promise<Client> | undefined;
+
+function localEngineClient(): Promise<Client> {
+  if (!localEngineUrl) throw new Error("local_process_engine_unavailable: MCP_LOCAL_ENGINE_URL is not configured");
+  if (!localEngineClientPromise) {
+    const client = new Client({ name: "shell-mcp-local-rust-engine", version: "1" });
+    const transport = new StreamableHTTPClientTransport(new URL(localEngineUrl));
+    localEngineClientPromise = client.connect(transport).then(() => client).catch((error) => {
+      localEngineClientPromise = undefined;
+      throw error;
+    });
+  }
+  return localEngineClientPromise;
+}
+
+async function callLocalEngineTool(
+  name: "start_process" | "read_output" | "kill_process",
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const client = await localEngineClient();
+  const reply = await client.callTool({ name, arguments: args });
+  if (reply.isError) throw new Error("local_process_engine_tool_error:" + name);
+  if (reply.structuredContent && typeof reply.structuredContent === "object" && !Array.isArray(reply.structuredContent)) {
+    return reply.structuredContent as Record<string, unknown>;
+  }
+  const text = Array.isArray(reply.content)
+    ? reply.content
+      .filter((item): item is { type: "text"; text: string } =>
+        Boolean(item && typeof item === "object" && "type" in item && item.type === "text" && "text" in item && typeof item.text === "string"))
+      .map((item) => item.text)
+      .join("\n")
+    : "";
+  if (!text) throw new Error("local_process_engine_invalid_result:" + name);
+  const parsed = JSON.parse(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("local_process_engine_invalid_result:" + name);
+  return parsed as Record<string, unknown>;
+}
+
+function localEngineProcessResult(value: Record<string, unknown>): Record<string, unknown> {
+  const processId = typeof value.process_id === "string" ? value.process_id : "";
+  const stdoutDropped = typeof value.stdout_truncated_bytes === "number" ? value.stdout_truncated_bytes : 0;
+  const stderrDropped = typeof value.stderr_truncated_bytes === "number" ? value.stderr_truncated_bytes : 0;
+  return {
+    mcp_status: "OK",
+    process_state: value.process_state === "RUNNING" ? "RUNNING" : "COMPLETED",
+    elapsed_ms: 0,
+    next_action: value.next_action === "READ_SAME_PROCESS_ID" ? "READ_SAME_PROCESS_ID" : "STOP_READING",
+    process_id: LOCAL_ENGINE_PROCESS_PREFIX + processId,
+    ...(typeof value.pid === "number" ? { pid: value.pid } : {}),
+    running: value.running === true,
+    execution_target: "local",
+    execution_transport: "native-mcp",
+    ...(typeof value.stdout === "string" ? { stdout: value.stdout } : {}),
+    ...(typeof value.stderr === "string" ? { stderr: value.stderr } : {}),
+    ...(typeof value.exit_code === "number" || value.exit_code === null ? { exit_code: value.exit_code } : {}),
+    ...(stdoutDropped > 0 ? { stdout_truncated: true, stdout_dropped_from_start: stdoutDropped } : {}),
+    ...(stderrDropped > 0 ? { stderr_truncated: true, stderr_dropped_from_start: stderrDropped } : {}),
+  };
+}
+
+function localEngineKillResult(value: Record<string, unknown>): Record<string, unknown> {
+  const processId = typeof value.process_id === "string" ? value.process_id : "";
+  const running = value.running === true;
+  const requested = value.kill_requested === true;
+  return {
+    process_id: LOCAL_ENGINE_PROCESS_PREFIX + processId,
+    pid: typeof value.pid === "number" ? value.pid : 0,
+    killed: requested && !running,
+    ...(requested ? { kill_requested: true } : {}),
+    running,
+    execution_target: "local",
+    execution_transport: "native-mcp",
+  };
+}
+
+function localEngineProcessId(processId: string): string | undefined {
+  return processId.startsWith(LOCAL_ENGINE_PROCESS_PREFIX)
+    ? processId.slice(LOCAL_ENGINE_PROCESS_PREFIX.length)
+    : undefined;
+}
+
+function scriptEngineInvocation(language: string, script: string): { executable: string; args: string[]; stdin: string } {
+  if (language === "powershell") return { executable: "powershell.exe", args: ["-NoProfile", "-NonInteractive", "-Command", "-"], stdin: script };
+  if (language === "python") return { executable: "python.exe", args: ["-"], stdin: script };
+  if (language === "node") return { executable: "node.exe", args: ["-"], stdin: script };
+  if (language === "bash") return { executable: "bash", args: ["-s"], stdin: script };
+  throw new Error("unsupported script language: " + language);
+}
 type OmenClientEntry = { promise: Promise<Client>; active: number; lastUsedAt: number };
 const omenMcpClients = new Map<string, OmenClientEntry>();
 const OMEN_CLIENT_IDLE_MS = 10 * 60_000;
@@ -462,9 +556,29 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
           value = { ...value, execution_target: "omen", execution_transport: "ssh-adapter" };
         }
       } else {
-        value = input.executable !== undefined
-          ? await processManager.startStructuredWithWait(input.executable, input.args ?? [], working_directory, callerId, wait_ms ?? DEFAULT_INITIAL_WAIT_MS, activity_target, action_class, input.stdin, input.env, extra.signal, MODEL_VISIBLE_PAGE_MAX_CHARS)
-          : await processManager.startScriptWithWait(input.language!, input.script!, working_directory, callerId, wait_ms ?? DEFAULT_INITIAL_WAIT_MS, activity_target, action_class, input.env, extra.signal, MODEL_VISIBLE_PAGE_MAX_CHARS);
+        if (localEngineUrl) {
+          const invocation = input.executable !== undefined
+            ? { executable: input.executable, args: input.args ?? [], ...(input.stdin !== undefined ? { stdin: input.stdin } : {}) }
+            : scriptEngineInvocation(input.language!, input.script!);
+          const localStartedAt = Date.now();
+          const localStarted = await callLocalEngineTool("start_process", {
+            executable: invocation.executable,
+            args: invocation.args,
+            ...(working_directory ? { cwd: working_directory } : {}),
+            ...("stdin" in invocation ? { stdin: invocation.stdin } : {}),
+            ...(input.env !== undefined ? { env: input.env } : {}),
+            wait_ms: Math.min(wait_ms ?? DEFAULT_INITIAL_WAIT_MS, 5000),
+          });
+          if (wait_ms === undefined) {
+            const remainingInitialReadMs = DEFAULT_INITIAL_WAIT_MS - (Date.now() - localStartedAt);
+            if (remainingInitialReadMs > 0) await new Promise((resolve) => setTimeout(resolve, remainingInitialReadMs));
+          }
+          value = localEngineProcessResult(localStarted);
+        } else {
+          value = input.executable !== undefined
+            ? await processManager.startStructuredWithWait(input.executable, input.args ?? [], working_directory, callerId, wait_ms ?? DEFAULT_INITIAL_WAIT_MS, activity_target, action_class, input.stdin, input.env, extra.signal, MODEL_VISIBLE_PAGE_MAX_CHARS)
+            : await processManager.startScriptWithWait(input.language!, input.script!, working_directory, callerId, wait_ms ?? DEFAULT_INITIAL_WAIT_MS, activity_target, action_class, input.env, extra.signal, MODEL_VISIBLE_PAGE_MAX_CHARS);
+        }
       }
       return structuredTextResult(value, callerId, servingIdentity);
     },
@@ -514,19 +628,27 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
         }
         if (message_id) args.push("--message-id", message_id);
         if (has_attachments === true) args.push("--has-attachments");
-        const started = await processManager.startStructuredWithWait(
-          command.executable,
-          args,
-          command.cwd,
-          callerId,
-          wait_ms ?? DEFAULT_INITIAL_WAIT_MS,
-          undefined,
-          "lifecycle",
-          stdin,
-          undefined,
-          extra.signal,
-          boundedMaxChars,
-        );
+        const started = localEngineUrl
+          ? localEngineProcessResult(await callLocalEngineTool("start_process", {
+              executable: command.executable,
+              args,
+              ...(command.cwd ? { cwd: command.cwd } : {}),
+              stdin,
+              wait_ms: Math.min(wait_ms ?? DEFAULT_INITIAL_WAIT_MS, 5000),
+            }))
+          : await processManager.startStructuredWithWait(
+              command.executable,
+              args,
+              command.cwd,
+              callerId,
+              wait_ms ?? DEFAULT_INITIAL_WAIT_MS,
+              undefined,
+              "lifecycle",
+              stdin,
+              undefined,
+              extra.signal,
+              boundedMaxChars,
+            );
         const actualProcessId = started.process_id;
         if (typeof actualProcessId !== "string" || !actualProcessId) throw new Error("bootstrap lifecycle start returned no process identity");
         if (started.next_action === "READ_SAME_PROCESS_ID") bootstrapAliasProcesses.set(callerId, actualProcessId);
@@ -535,16 +657,30 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       }
       const activeBootstrapProcessId = process_id === "bootstrap" ? bootstrapAliasProcesses.get(callerId) : undefined;
       if (activeBootstrapProcessId) {
-        const read = await processManager.readOutput(activeBootstrapProcessId, boundedMaxChars, wait_ms, extra.signal);
+        const engineBootstrapId = localEngineProcessId(activeBootstrapProcessId);
+        const read = engineBootstrapId !== undefined
+          ? localEngineProcessResult(await callLocalEngineTool("read_output", {
+              process_id: engineBootstrapId,
+              max_chars: boundedMaxChars,
+              wait_ms: Math.min(wait_ms ?? 0, 5000),
+            }))
+          : await processManager.readOutput(activeBootstrapProcessId, boundedMaxChars, wait_ms, extra.signal);
         if (read.next_action === "STOP_READING") bootstrapAliasProcesses.delete(callerId);
         return structuredTextResult(publicBootstrapAliasOutput(read), callerId, servingIdentity);
       }
       const remoteId = localRemoteProcessId(process_id);
+      const engineId = localEngineProcessId(process_id);
       const value = remoteId !== undefined
         ? remoteProcessResult(await callRemoteOmenTool("read_output", { process_id: remoteId, max_chars: boundedMaxChars, ...(wait_ms !== undefined ? { wait_ms } : {}) }, callerId))
-        : (isBootstrapSnapshot(process_id)
-          ? await readBootstrapSnapshot(boundedMaxChars, process_id, callerId, conversation_id, expected_room_head)
-          : await processManager.readOutput(process_id, boundedMaxChars, wait_ms, extra.signal));
+        : engineId !== undefined
+          ? localEngineProcessResult(await callLocalEngineTool("read_output", {
+              process_id: engineId,
+              max_chars: boundedMaxChars,
+              wait_ms: Math.min(wait_ms ?? 0, 5000),
+            }))
+          : (isBootstrapSnapshot(process_id)
+            ? await readBootstrapSnapshot(boundedMaxChars, process_id, callerId, conversation_id, expected_room_head)
+            : await processManager.readOutput(process_id, boundedMaxChars, wait_ms, extra.signal));
       return structuredTextResult(value, callerId, servingIdentity);
     },
   );
@@ -560,9 +696,12 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
     },
     async ({ process_id }) => {
       const remoteId = localRemoteProcessId(process_id);
+      const engineId = localEngineProcessId(process_id);
       const value = remoteId !== undefined
         ? remoteProcessResult(await callRemoteOmenTool("kill_process", { process_id: remoteId }, callerId))
-        : await processManager.kill(process_id);
+        : engineId !== undefined
+          ? localEngineKillResult(await callLocalEngineTool("kill_process", { process_id: engineId }))
+          : await processManager.kill(process_id);
       return structuredTextResult(value, callerId, servingIdentity);
     },
   );
