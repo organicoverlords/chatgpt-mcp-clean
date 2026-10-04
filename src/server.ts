@@ -24,7 +24,11 @@ const nativeOmenHost = process.env.MCP_NATIVE_OMEN_HOST === "1";
 const omenMcpUrl = process.env.MCP_OMEN_MCP_URL?.trim() || undefined;
 const allowOmenSshFallback = process.env.MCP_ALLOW_OMEN_SSH_FALLBACK === "1";
 const OMEN_MCP_PROCESS_PREFIX = "omen-mcp:";
-const localEngineUrl = process.env.MCP_LOCAL_ENGINE_URL?.trim() || undefined;
+const localEnginePortByBindingPort: Record<string, number> = { "3212": 3513, "3312": 3516, "3420": 3515 };
+const localEngineUrl = process.env.MCP_LOCAL_ENGINE_URL?.trim()
+  || (process.env.PORT && localEnginePortByBindingPort[process.env.PORT]
+    ? "http://127.0.0.1:" + localEnginePortByBindingPort[process.env.PORT] + "/mcp"
+    : undefined);
 const LOCAL_ENGINE_PROCESS_PREFIX = "local-rust:";
 let localEngineClientPromise: Promise<Client> | undefined;
 
