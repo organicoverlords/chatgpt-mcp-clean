@@ -99,6 +99,10 @@ type LocalEngineProcessMeta = {
   execution_mode: "native" | "explicit_shell" | "powershell";
   execution_reason: string;
   command?: string;
+  activity_target?: z.infer<typeof activityTargetSchema>;
+  action_class?: string;
+  stdout_cursor?: number;
+  stderr_cursor?: number;
   diagnostic_stdout?: string;
   diagnostic_stderr?: string;
 };
@@ -124,7 +128,8 @@ function localEngineProcessResult(
 ): Record<string, unknown> {
   const rawProcessId = typeof value.process_id === "string" ? value.process_id : "";
   const processId = LOCAL_ENGINE_PROCESS_PREFIX + rawProcessId;
-  const meta = metaOverride ?? localEngineProcessMeta.get(rawProcessId);
+  const context = value.context && typeof value.context === "object" ? value.context as LocalEngineProcessMeta : undefined;
+  const meta = metaOverride ?? localEngineProcessMeta.get(rawProcessId) ?? context;
   const stdout = typeof value.stdout === "string" ? value.stdout : "";
   const stderr = typeof value.stderr === "string" ? value.stderr : "";
   if (meta) {
@@ -132,14 +137,19 @@ function localEngineProcessResult(
     meta.diagnostic_stderr = ((meta.diagnostic_stderr ?? "") + stderr).slice(-8_000);
   }
   const failureDiagnostic = processFailureDiagnostic(meta?.command ?? "", meta?.diagnostic_stdout ?? stdout, meta?.diagnostic_stderr ?? stderr,
-    typeof value.exit_code === "number" ? value.exit_code : null, undefined, meta?.execution_reason);
+    typeof value.exit_code === "number" ? value.exit_code : null, typeof value.error_code === "string" ? stderr || value.error_code : undefined, meta?.execution_reason, typeof value.error_code === "string" ? value.error_code : undefined);
   const stdoutDropped = typeof value.stdout_truncated_bytes === "number" ? value.stdout_truncated_bytes : 0;
   const stderrDropped = typeof value.stderr_truncated_bytes === "number" ? value.stderr_truncated_bytes : 0;
   const more = value.next_action === "READ_SAME_PROCESS_ID";
   if (!more && value.running !== true) {
-    localEngineProcessMeta.delete(rawProcessId);
     localEngineReplay.delete(rawProcessId);
   }
+  const page = value.output_page && typeof value.output_page === "object" ? value.output_page as Record<string, unknown> : {};
+  const stdoutStart = typeof page.stdout_start === "number" ? page.stdout_start : (meta?.stdout_cursor ?? 0) + stdoutDropped;
+  const stderrStart = typeof page.stderr_start === "number" ? page.stderr_start : (meta?.stderr_cursor ?? 0) + stderrDropped;
+  const stdoutEnd = typeof page.stdout_end === "number" ? page.stdout_end : stdoutStart + stdout.length;
+  const stderrEnd = typeof page.stderr_end === "number" ? page.stderr_end : stderrStart + stderr.length;
+  if (meta) { meta.stdout_cursor = stdoutEnd; meta.stderr_cursor = stderrEnd; }
   const effectivePageLimit = Math.max(1, Math.min(30_000, pageLimit));
   return {
     mcp_status: "OK",
@@ -153,18 +163,21 @@ function localEngineProcessResult(
     execution_transport: "native-mcp",
     ...(meta ? { execution_mode: meta.execution_mode, execution_reason: meta.execution_reason } : {}),
     ...(failureDiagnostic ? { failure_diagnostic: failureDiagnostic } : {}),
+    ...(meta?.activity_target ? { activity_target: meta.activity_target } : {}),
+    ...(meta?.action_class ? { action_class: meta.action_class } : {}),
+    ...(typeof value.error_code === "string" ? { error_code: value.error_code } : {}),
     stdout,
     stderr,
     ...(typeof value.exit_code === "number" || value.exit_code === null ? { exit_code: value.exit_code } : {}),
     ...(stdoutDropped > 0 ? { stdout_truncated: true, stdout_dropped_from_start: stdoutDropped } : {}),
     ...(stderrDropped > 0 ? { stderr_truncated: true, stderr_dropped_from_start: stderrDropped } : {}),
     output_page: {
-      stdout_start: stdoutDropped,
-      stdout_end: stdoutDropped + stdout.length,
-      stdout_total: stdoutDropped + stdout.length,
-      stderr_start: stderrDropped,
-      stderr_end: stderrDropped + stderr.length,
-      stderr_total: stderrDropped + stderr.length,
+      stdout_start: stdoutStart,
+      stdout_end: stdoutEnd,
+      stdout_total: typeof page.stdout_total === "number" ? page.stdout_total : stdoutEnd,
+      stderr_start: stderrStart,
+      stderr_end: stderrEnd,
+      stderr_total: typeof page.stderr_total === "number" ? page.stderr_total : stderrEnd,
       page_chars: stdout.length + stderr.length,
       page_limit: effectivePageLimit,
       more,
@@ -177,9 +190,9 @@ function rememberLocalEngineStart(
   meta: LocalEngineProcessMeta,
 ): Record<string, unknown> {
   const rawProcessId = typeof value.process_id === "string" ? value.process_id : "";
-  if (rawProcessId && (value.running === true || value.next_action === "READ_SAME_PROCESS_ID")) {
+  if (rawProcessId) {
     localEngineProcessMeta.set(rawProcessId, meta);
-    localEngineReplay.set(rawProcessId, value);
+    if (value.running === true || value.next_action === "READ_SAME_PROCESS_ID") localEngineReplay.set(rawProcessId, value);
     trimLocalEngineCaches();
   }
   return localEngineProcessResult(value, 30_000, meta);
@@ -691,16 +704,17 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
             ?? replayStructuredHostPreflightError(invocation.executable, process.platform)
             ?? await commandPreflightAsync(preflightText, preflightPlan, input.script !== undefined ? "policy" : "full");
           if (preflightError) throw new Error(`start_process_preflight_failed: ${preflightError}`);
-          const localStartedAt = Date.now();
           const localStarted = await callLocalEngineTool("start_process", {
             executable: invocation.executable,
             args: invocation.args,
+            context: { execution_mode: invocation.execution_mode, execution_reason: invocation.execution_reason,
+              ...(activity_target ? { activity_target } : {}), ...(action_class ? { action_class } : {}) },
             ...(working_directory ? { cwd: working_directory } : {}),
             ...("stdin" in invocation ? { stdin: invocation.stdin } : {}),
             ...(input.env !== undefined ? { env: input.env } : {}),
             wait_ms: Math.min(wait_ms ?? DEFAULT_INITIAL_WAIT_MS, 5000),
           });
-          value = rememberLocalEngineStart(localStarted, { execution_mode: invocation.execution_mode, execution_reason: invocation.execution_reason,
+          value = rememberLocalEngineStart(localStarted, { ...(activity_target ? { activity_target } : {}), ...(action_class ? { action_class } : {}), execution_mode: invocation.execution_mode, execution_reason: invocation.execution_reason,
             command: (input.script !== undefined ? `[${input.language} script]\n${input.script}` : displayCommand).slice(0, 4_000) });
         } else {
           value = input.executable !== undefined
