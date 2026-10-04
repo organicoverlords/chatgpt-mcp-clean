@@ -31,17 +31,19 @@ const localEngineUrl = process.env.MCP_LOCAL_ENGINE_URL?.trim()
     ? "http://127.0.0.1:" + localEnginePortByBindingPort[process.env.PORT] + "/mcp"
     : undefined);
 const LOCAL_ENGINE_PROCESS_PREFIX = "local-rust:";
-const previousLocalEngineUrl = process.env.MCP_LOCAL_ENGINE_PREVIOUS_URL?.trim();
-let previousLocalEngineClientPromise: Promise<Client> | undefined;
+const previousLocalEngineUrls = [...new Set((process.env.MCP_LOCAL_ENGINE_PREVIOUS_URL || "")
+  .split(",").map(url => url.trim()).filter(Boolean))];
+const previousLocalEngineClients = new Map<string, Promise<Client>>();
 let localEngineClientPromise: Promise<Client> | undefined;
-async function previousLocalEngineClient(): Promise<Client> {
-  if (!previousLocalEngineUrl) throw new Error("previous_process_engine_unavailable");
-  if (!previousLocalEngineClientPromise) {
+async function previousLocalEngineClient(url: string): Promise<Client> {
+  let promise = previousLocalEngineClients.get(url);
+  if (!promise) {
     const client = new Client({ name: "shell-mcp-retained-process-reader", version: "1" });
-    previousLocalEngineClientPromise = client.connect(new StreamableHTTPClientTransport(new URL(previousLocalEngineUrl)))
-      .then(() => client).catch(error => { previousLocalEngineClientPromise = undefined; throw error; });
+    promise = client.connect(new StreamableHTTPClientTransport(new URL(url)))
+      .then(() => client).catch(error => { previousLocalEngineClients.delete(url); throw error; });
+    previousLocalEngineClients.set(url, promise);
   }
-  return previousLocalEngineClientPromise;
+  return promise;
 }
 
 function localEngineClient(): Promise<Client> {
@@ -68,10 +70,12 @@ async function callLocalEngineTool(
         Boolean(item && typeof item === "object" && "type" in item && item.type === "text" && "text" in item && typeof item.text === "string"))
       .map(item => item.text).join("\n") : "";
   // IDs returned before cutover remain readable/killable on their original engine.
-  if (reply.isError && name !== "start_process" && previousLocalEngineUrl
-      && /^unknown process_id$/.test(errorText(reply).trim())) {
-    const previousClient = await previousLocalEngineClient();
-    reply = await previousClient.callTool({ name, arguments: args });
+  if (name !== "start_process") {
+    for (const url of previousLocalEngineUrls) {
+      if (!reply.isError || !/^unknown process_id$/.test(errorText(reply).trim())) break;
+      const previousClient = await previousLocalEngineClient(url);
+      reply = await previousClient.callTool({ name, arguments: args });
+    }
   }
   if (reply.isError) throw new Error("local_process_engine_tool_error:" + name + ": " + errorText(reply));
   if (reply.structuredContent && typeof reply.structuredContent === "object" && !Array.isArray(reply.structuredContent)) {
@@ -544,7 +548,22 @@ async function structuredTextResult(value: unknown, id: string, servingIdentity:
   return { content: [], structuredContent: data };
 }
 
-export function processRuntimeStatus(): { live_process_count: number } {
+export async function processRuntimeStatus(): Promise<{ live_process_count: number | null; process_engine_available?: boolean }> {
+  if (localEngineUrl) {
+    try {
+      const counts = await Promise.all([...new Set([localEngineUrl, ...previousLocalEngineUrls])].map(async url => {
+        const healthUrl = new URL(url); healthUrl.pathname = "/health";
+        const response = await fetch(healthUrl, { signal: AbortSignal.timeout(500) });
+        if (!response.ok) throw new Error("engine health unavailable");
+        const value = await response.json() as { live_process_count?: number };
+        if (!Number.isSafeInteger(value.live_process_count) || value.live_process_count! < 0) throw new Error("invalid engine count");
+        return value.live_process_count!;
+      }));
+      return { live_process_count: counts.reduce((sum, count) => sum + count, 0), process_engine_available: true };
+    } catch {
+      return { live_process_count: null, process_engine_available: false };
+    }
+  }
   return { live_process_count: processManager.liveProcessCount() };
 }
 

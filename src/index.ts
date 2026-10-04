@@ -319,7 +319,7 @@ app.use("/mcp", (req, res, next) => {
 app.post("/mcp", mcpBearer, handleMcp);
 app.get("/mcp", mcpBearer, (_req, res) => res.status(405).set("Allow", "POST").send("Method not allowed."));
 app.delete("/mcp", mcpBearer, (_req, res) => res.status(405).set("Allow", "POST").send("Method not allowed."));
-app.get("/health", (_req, res) => res.json({ status: "ok", name: "shell-mcp", role: backendMode ? "backend" : "direct", ...(backendGeneration ? { backend_generation: backendGeneration } : {}), runtime_identity: runtimeIdentity, host: HOST, port: PORT, pid: process.pid, active_requests: activeRequests, total_requests: totalRequests, ...processRuntimeStatus(), wireguard_candidate: wireGuardCandidate, force_connection_close: forceConnectionClose }));
+app.get("/health", async (_req, res) => res.json({ status: "ok", name: "shell-mcp", role: backendMode ? "backend" : "direct", ...(backendGeneration ? { backend_generation: backendGeneration } : {}), runtime_identity: runtimeIdentity, host: HOST, port: PORT, pid: process.pid, active_requests: activeRequests, total_requests: totalRequests, ...await processRuntimeStatus(), wireguard_candidate: wireGuardCandidate, force_connection_close: forceConnectionClose }));
 
 const httpServer = app.listen(PORT, HOST, () => console.error(`shell-mcp listening on http://${HOST}:${PORT}/mcp`));
 httpServer.on("connection", (socket) => { observeSocket(socket); });
