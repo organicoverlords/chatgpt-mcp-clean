@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
@@ -170,7 +171,13 @@ function finalizeCoverage(target) {
   return target;
 }
 
-function verifyHashes(receipt) {
+async function verifyHashes(receipt) {
+  if(receipt.stdout_spool_path && receipt.stderr_spool_path){
+    try {
+      const digest=async (file,kind)=>{if(path.basename(file)!==`${receipt.process_id}.${kind}.utf8`) throw Error('Invalid spool filename');const h=createHash('sha256');for await(const chunk of createReadStream(file)) h.update(chunk);return h.digest('hex');};
+      return await digest(receipt.stdout_spool_path,'stdout')===receipt.stdout_sha256 && await digest(receipt.stderr_spool_path,'stderr')===receipt.stderr_sha256 ? 'verified':'mismatch';
+    }catch{return 'unavailable';}
+  }
   const hasHashes = typeof receipt.stdout_sha256 === "string" && typeof receipt.stderr_sha256 === "string";
   if (!hasHashes || typeof receipt.stdout !== "string" || typeof receipt.stderr !== "string") return "unavailable";
   return sha256(receipt.stdout) === receipt.stdout_sha256 && sha256(receipt.stderr) === receipt.stderr_sha256 ? "verified" : "mismatch";
@@ -241,7 +248,7 @@ async function summarize(receiptDir, since) {
     const bytes = retainedBytes(receipt);
     const completeness = deriveCompleteness(receipt);
     const outcome = deriveOutcome(receipt);
-    const hashState = verifyHashes(receipt);
+    const hashState = await verifyHashes(receipt);
     const hasIntegrity = typeof receipt.stdout_sha256 === "string" && typeof receipt.stderr_sha256 === "string";
     const hasAuditV1 = receipt.audit_schema === "process-output-evidence.v1";
 

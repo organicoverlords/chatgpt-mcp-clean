@@ -151,8 +151,32 @@ function jsonError(res: Response, status: number, message: string): void {
   res.status(status).json({ jsonrpc: "2.0", error: { code: -32000, message }, id: null });
 }
 
+const toolInflight = { start_process: 0, waiting_read: 0, immediate_read: 0, kill_process: 0 };
+const toolInflightLimits = { start_process: 32, waiting_read: 64, immediate_read: 64, kill_process: 32 };
 async function handleStateless(req: Request, res: Response, body: unknown): Promise<void> {
   const requestCallerId = callerId(req);
+  const call = body && typeof body === "object" ? body as { method?: unknown; id?: unknown; params?: { name?: unknown; arguments?: unknown } } : undefined;
+  let bucket: keyof typeof toolInflight | undefined;
+  if (call?.method === "tools/call") {
+    const name = call.params?.name;
+    const args = call.params?.arguments as { wait_ms?: unknown } | undefined;
+    if (name === "start_process" || name === "kill_process") bucket = name;
+    else if (name === "read_output") bucket = typeof args?.wait_ms === "number" && args.wait_ms > 0 ? "waiting_read" : "immediate_read";
+  }
+  if (bucket) {
+    if (toolInflight[bucket] >= toolInflightLimits[bucket]) {
+      const message = "mcp_transport_capacity: retry after another request finishes";
+      auditProcessRequest(String(call?.params?.name), call?.params?.arguments);
+      auditProcessResponse(String(call?.params?.name), { id: call?.id, error: { code: -32000, message } });
+      transportLog({ event: "transport_capacity_rejected", bucket, limit: toolInflightLimits[bucket], ...currentTelemetryContext() });
+      res.set("Retry-After", "1"); jsonError(res, 503, message); return;
+    }
+    const acquired = bucket;
+    toolInflight[acquired] += 1;
+    let released = false;
+    const release = () => { if (!released) { released = true; toolInflight[acquired] -= 1; } };
+    res.once("finish", release); res.once("close", release);
+  }
   const server: McpServer = createServer(requestCallerId, {
     ...(backendGeneration ? { backend_generation: backendGeneration } : {}),
     ...(runtimeIdentity.source_commit ? { source_commit: runtimeIdentity.source_commit } : {}),
@@ -164,7 +188,7 @@ async function handleStateless(req: Request, res: Response, body: unknown): Prom
     allowedOrigins: [...allowedMcpOrigins],
     enableDnsRebindingProtection: true,
   });
-  const call = body && typeof body === "object" ? body as { method?: unknown; id?: unknown; params?: { name?: unknown; arguments?: unknown } } : undefined;
+
   if (call?.method === "tools/call" && typeof call.params?.name === "string") {
     const tool = call.params.name;
     const context = currentTelemetryContext();
@@ -243,6 +267,24 @@ app.use((req, res, next) => {
   req.on("aborted", () => transportLog({ event: "request_aborted", request_id: requestId, caller_id: requestCallerId, connection_id: connectionId, session_id: sessionId, method: req.method, path: req.path, via_funnel: viaFunnel, mcp_method: res.locals.mcpMethod || null, mcp_tool: res.locals.mcpTool || null, duration_ms: Number(durationMs().toFixed(3)) }));
   req.once("error", (error) => transportLog({ event: "request_error", request_id: requestId, caller_id: requestCallerId, connection_id: connectionId, session_id: sessionId, method: req.method, path: req.path, via_funnel: viaFunnel, mcp_method: res.locals.mcpMethod || null, mcp_tool: res.locals.mcpTool || null, code: "code" in error ? error.code : null, duration_ms: Number(durationMs().toFixed(3)) }));
   withTelemetryContext({ request_id: requestId, caller_id: requestCallerId, connection_id: connectionId, session_id: sessionId }, next);
+});
+const MAX_INFLIGHT_MCP_REQUESTS = 32;
+let inflightMcpRequests = 0;
+app.use((req, res, next) => {
+  if (req.method !== "POST" || req.path !== "/mcp") return next();
+  if (inflightMcpRequests >= MAX_INFLIGHT_MCP_REQUESTS) {
+    res.status(503).set("Retry-After", "1").json({ error: "mcp_transport_capacity: retry after another request finishes" });
+    transportLog({ event: "transport_capacity_rejected", limit: MAX_INFLIGHT_MCP_REQUESTS });
+    return;
+  }
+  inflightMcpRequests += 1;
+  let released = false;
+  const release = () => { if (!released) { released = true; inflightMcpRequests -= 1; } };
+  const bodyTimer = setTimeout(() => { if (!req.complete) req.destroy(new Error("mcp_request_body_timeout")); }, 15_000);
+  bodyTimer.unref();
+  const bodyFinished = () => { clearTimeout(bodyTimer); release(); };
+  req.once("end", bodyFinished); res.once("finish", bodyFinished); res.once("close", bodyFinished);
+  next();
 });
 app.use(express.json({ limit: "4mb" }));
 app.use((req, res, next) => {
@@ -332,7 +374,7 @@ app.use("/mcp", (req, res, next) => {
 app.post("/mcp", mcpBearer, handleMcp);
 app.get("/mcp", mcpBearer, (_req, res) => res.status(405).set("Allow", "POST").send("Method not allowed."));
 app.delete("/mcp", mcpBearer, (_req, res) => res.status(405).set("Allow", "POST").send("Method not allowed."));
-app.get("/health", async (_req, res) => res.json({ status: "ok", name: "shell-mcp", role: backendMode ? "backend" : "direct", ...(backendGeneration ? { backend_generation: backendGeneration } : {}), runtime_identity: runtimeIdentity, host: HOST, port: PORT, pid: process.pid, active_requests: activeRequests, total_requests: totalRequests, ...await processRuntimeStatus(), wireguard_candidate: wireGuardCandidate, force_connection_close: forceConnectionClose }));
+app.get("/health", async (_req, res) => res.json({ status: "ok", name: "shell-mcp", role: backendMode ? "backend" : "direct", ...(backendGeneration ? { backend_generation: backendGeneration } : {}), runtime_identity: runtimeIdentity, host: HOST, port: PORT, pid: process.pid, active_requests: activeRequests, transport_body_inflight: inflightMcpRequests, transport_body_limit: MAX_INFLIGHT_MCP_REQUESTS, tool_inflight: { ...toolInflight }, tool_inflight_limits: toolInflightLimits, total_requests: totalRequests, ...await processRuntimeStatus(), wireguard_candidate: wireGuardCandidate, force_connection_close: forceConnectionClose }));
 
 const httpServer = app.listen(PORT, HOST, () => console.error(`shell-mcp listening on http://${HOST}:${PORT}/mcp`));
 httpServer.on("connection", (socket) => { observeSocket(socket); });

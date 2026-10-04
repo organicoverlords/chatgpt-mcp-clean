@@ -7,6 +7,7 @@ import { z } from "zod";
 import { BusyStore } from "./lib/busy-store.js";
 import { ProcessManager, commandPreflightAsync, processFailureDiagnostic, structuredCommandDisplay, structuredPolicyText, replayStructuredArgvTransportError, replayStructuredHostPreflightError } from "./lib/process-manager.js";
 import { planStructuredExecution, planStructuredScript, type StructuredScriptLanguage } from "./lib/command-execution-plan.js";
+import { currentTelemetryContext } from "./lib/transport-telemetry.js";
 import { structuredInvocation, scriptInvocation } from "./lib/structured-invocation.js";
 
 // The deployed ChatGPT connector surface is the process profile. Keep the broader
@@ -35,13 +36,19 @@ const LOCAL_ENGINE_PROCESS_PREFIX = "local-rust:";
 const previousLocalEngineUrls = [...new Set((process.env.MCP_LOCAL_ENGINE_PREVIOUS_URL || "")
   .split(",").map(url => url.trim()).filter(Boolean))];
 const previousLocalEngineClients = new Map<string, Promise<Client>>();
+const previousEngineReadShapes = new Map<string, { readers: boolean; wait: number }>();
 let localEngineClientPromise: Promise<Client> | undefined;
 async function previousLocalEngineClient(url: string): Promise<Client> {
   let promise = previousLocalEngineClients.get(url);
   if (!promise) {
     const client = new Client({ name: "shell-mcp-retained-process-reader", version: "1" });
-    promise = client.connect(new StreamableHTTPClientTransport(new URL(url)))
-      .then(() => client).catch(error => { previousLocalEngineClients.delete(url); throw error; });
+    promise = client.connect(new StreamableHTTPClientTransport(new URL(url)), { timeout: 2000 })
+      .then(async () => {
+        const listed = await client.listTools({}, { timeout: 2000 });
+        const read = listed.tools.find(tool => tool.name === "read_output")?.inputSchema as any;
+        previousEngineReadShapes.set(url, { readers: Boolean(read?.properties?.reader_id), wait: Number(read?.$defs?.WaitMs?.maximum ?? 5000) });
+        return client;
+      }).catch(error => { previousLocalEngineClients.delete(url); throw error; });
     previousLocalEngineClients.set(url, promise);
   }
   return promise;
@@ -52,7 +59,7 @@ function localEngineClient(): Promise<Client> {
   if (!localEngineClientPromise) {
     const client = new Client({ name: "shell-mcp-local-rust-engine", version: "1" });
     const transport = new StreamableHTTPClientTransport(new URL(localEngineUrl));
-    localEngineClientPromise = client.connect(transport).then(() => client).catch((error) => {
+    localEngineClientPromise = client.connect(transport, { timeout: 2000 }).then(() => client).catch((error) => {
       localEngineClientPromise = undefined;
       throw error;
     });
@@ -63,9 +70,10 @@ function localEngineClient(): Promise<Client> {
 async function callLocalEngineTool(
   name: "start_process" | "read_output" | "kill_process",
   args: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   const client = await localEngineClient();
-  let reply = await client.callTool({ name, arguments: args });
+  let reply = await client.callTool({ name, arguments: args }, undefined, { timeout: Math.max(10_000, Number(args.wait_ms ?? 0) + 10_000), maxTotalTimeout: 250_000, ...(signal ? { signal } : {}) });
   const errorText = (value: typeof reply) => Array.isArray(value.content)
     ? value.content.filter((item): item is { type: "text"; text: string } =>
         Boolean(item && typeof item === "object" && "type" in item && item.type === "text" && "text" in item && typeof item.text === "string"))
@@ -74,8 +82,16 @@ async function callLocalEngineTool(
   if (name !== "start_process") {
     for (const url of previousLocalEngineUrls) {
       if (!reply.isError || !/^unknown process_id$/.test(errorText(reply).trim())) break;
-      const previousClient = await previousLocalEngineClient(url);
-      reply = await previousClient.callTool({ name, arguments: args });
+      try {
+        const previousClient = await previousLocalEngineClient(url);
+        const shape = previousEngineReadShapes.get(url);
+        const forwarded = { ...args, ...(name === "read_output" ? { wait_ms: Math.min(Number(args.wait_ms ?? 0), shape?.wait ?? 5000), ...(shape?.readers ? {} : { reader_id: undefined }) } : {}) };
+        reply = await previousClient.callTool({ name, arguments: forwarded }, undefined, { timeout: Math.max(10_000, Number(forwarded.wait_ms ?? 0) + 10_000), maxTotalTimeout: 250_000, ...(signal ? { signal } : {}) });
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        previousLocalEngineClients.delete(url);
+        console.error("retained engine unavailable:", url, error instanceof Error ? error.message : String(error));
+      }
     }
   }
   if (reply.isError) throw new Error("local_process_engine_tool_error:" + name + ": " + errorText(reply));
@@ -135,13 +151,11 @@ function localEngineProcessResult(
     meta.diagnostic_stdout = ((meta.diagnostic_stdout ?? "") + stdout).slice(-8_000);
     meta.diagnostic_stderr = ((meta.diagnostic_stderr ?? "") + stderr).slice(-8_000);
   }
-  const failureDiagnostic = processFailureDiagnostic(meta?.command ?? "", meta?.diagnostic_stdout ?? stdout, meta?.diagnostic_stderr ?? stderr,
+  const failureDiagnostic = processFailureDiagnostic(meta?.command ?? (typeof value.command === "string" ? value.command : ""), meta?.diagnostic_stdout ?? stdout, meta?.diagnostic_stderr ?? stderr,
     typeof value.exit_code === "number" ? value.exit_code : null, typeof value.error_code === "string" ? stderr || value.error_code : undefined, meta?.execution_reason, typeof value.error_code === "string" ? value.error_code : undefined);
   const stdoutDropped = typeof value.stdout_truncated_bytes === "number" ? value.stdout_truncated_bytes : 0;
   const stderrDropped = typeof value.stderr_truncated_bytes === "number" ? value.stderr_truncated_bytes : 0;
   const more = value.next_action === "READ_SAME_PROCESS_ID";
-  if (!more && value.running !== true) {
-  }
   const page = value.output_page && typeof value.output_page === "object" ? value.output_page as Record<string, unknown> : {};
   const stdoutStart = typeof page.stdout_start === "number" ? page.stdout_start : (meta?.stdout_cursor ?? 0) + stdoutDropped;
   const stderrStart = typeof page.stderr_start === "number" ? page.stderr_start : (meta?.stderr_cursor ?? 0) + stderrDropped;
@@ -152,7 +166,7 @@ function localEngineProcessResult(
   return {
     mcp_status: "OK",
     process_state: value.process_state === "RUNNING" ? "RUNNING" : "COMPLETED",
-    elapsed_ms: 0,
+    elapsed_ms: typeof value.elapsed_ms === "number" ? value.elapsed_ms : 0,
     next_action: more ? "READ_SAME_PROCESS_ID" : "STOP_READING",
     process_id: processId,
     ...(typeof value.pid === "number" ? { pid: value.pid } : {}),
@@ -167,8 +181,23 @@ function localEngineProcessResult(
     stdout,
     stderr,
     ...(typeof value.exit_code === "number" || value.exit_code === null ? { exit_code: value.exit_code } : {}),
-    ...(stdoutDropped > 0 ? { stdout_truncated: true, stdout_dropped_from_start: stdoutDropped } : {}),
-    ...(stderrDropped > 0 ? { stderr_truncated: true, stderr_dropped_from_start: stderrDropped } : {}),
+    ...(stdoutDropped > 0 ? { stdout_truncated: true, stdout_dropped_from_start: typeof value.stdout_dropped_chars === "number" ? value.stdout_dropped_chars : stdoutDropped } : {}),
+    ...(stderrDropped > 0 ? { stderr_truncated: true, stderr_dropped_from_start: typeof value.stderr_dropped_chars === "number" ? value.stderr_dropped_chars : stderrDropped } : {}),
+    ...(typeof value.command === "string" ? { command: value.command } : {}),
+    ...(typeof value.cwd === "string" ? { cwd: value.cwd } : {}),
+    ...(typeof value.started_at === "string" ? { started_at: value.started_at } : {}),
+    ...(typeof value.finished_at === "string" || value.finished_at === null ? { finished_at: value.finished_at } : {}),
+    ...(typeof value.signal === "string" || value.signal === null ? { signal: value.signal } : {}),
+    ...(typeof value.request_id === "string" ? { request_id: value.request_id } : {}),
+    ...(typeof value.error === "string" ? { error: value.error } : {}),
+    ...(typeof value.stdout_sha256 === "string" ? {
+      audit_schema: "process-output-evidence.v1", stdout_sha256: value.stdout_sha256, stderr_sha256: value.stderr_sha256,
+      retained_stdout_bytes: value.retained_stdout_bytes, retained_stderr_bytes: value.retained_stderr_bytes,
+      retained_output_bytes: Number(value.retained_stdout_bytes) + Number(value.retained_stderr_bytes),
+      retained_stdout_chars: value.retained_stdout_chars, retained_stderr_chars: value.retained_stderr_chars,
+      retained_output_chars: Number(value.retained_stdout_chars) + Number(value.retained_stderr_chars),
+      evidence_completeness: value.evidence_completeness, execution_outcome: value.execution_outcome,
+    } : {}),
     output_page: {
       stdout_start: stdoutStart,
       stdout_end: stdoutEnd,
@@ -701,11 +730,15 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
             args: invocation.args,
             context: { execution_mode: invocation.execution_mode, execution_reason: invocation.execution_reason,
               ...(activity_target ? { activity_target } : {}), ...(action_class ? { action_class } : {}) },
-            ...(working_directory ? { cwd: working_directory } : {}),
+            cwd: working_directory ?? process.cwd(),
+            owner_id: callerId,
+            ...(currentTelemetryContext().session_id ? { scope_id: currentTelemetryContext().session_id } : {}),
+            ...(currentTelemetryContext().request_id ? { request_id: currentTelemetryContext().request_id } : {}),
+            display_command: Array.from(input.script !== undefined ? `[${input.language} script]\n${input.script}` : displayCommand).slice(0, 4000).join(""),
             ...("stdin" in invocation ? { stdin: invocation.stdin } : {}),
             ...(input.env !== undefined ? { env: input.env } : {}),
-            wait_ms: Math.min(wait_ms ?? DEFAULT_INITIAL_WAIT_MS, 5000),
-          });
+            wait_ms: wait_ms ?? DEFAULT_INITIAL_WAIT_MS,
+          }, extra.signal);
           value = rememberLocalEngineStart(localStarted, { ...(activity_target ? { activity_target } : {}), ...(action_class ? { action_class } : {}), execution_mode: invocation.execution_mode, execution_reason: invocation.execution_reason,
             command: (input.script !== undefined ? `[${input.language} script]\n${input.script}` : displayCommand).slice(0, 4_000) });
         } else {
@@ -768,8 +801,11 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
               args,
               ...(command.cwd ? { cwd: command.cwd } : {}),
               stdin,
-              wait_ms: Math.min(wait_ms ?? DEFAULT_INITIAL_WAIT_MS, 5000),
-            }), { execution_mode: "native", execution_reason: "structured_argv" })
+              owner_id: callerId,
+              ...(currentTelemetryContext().session_id ? { scope_id: currentTelemetryContext().session_id } : {}),
+              ...(currentTelemetryContext().request_id ? { request_id: currentTelemetryContext().request_id } : {}),
+              wait_ms: wait_ms ?? DEFAULT_INITIAL_WAIT_MS,
+            }, extra.signal), { execution_mode: "native", execution_reason: "structured_argv" })
           : await legacyProcesses().startStructuredWithWait(
               command.executable,
               args,
@@ -795,9 +831,10 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
         const read = engineBootstrapId !== undefined
           ? localEngineProcessResult(await callLocalEngineTool("read_output", {
               process_id: engineBootstrapId,
+              reader_id: callerId,
               max_chars: boundedMaxChars,
-              wait_ms: Math.min(wait_ms ?? 0, 5000),
-            }), boundedMaxChars)
+              wait_ms: wait_ms ?? 0,
+            }, extra.signal), boundedMaxChars)
           : await legacyProcesses().readOutput(activeBootstrapProcessId, boundedMaxChars, wait_ms, extra.signal);
         if (read.next_action === "STOP_READING") bootstrapAliasProcesses.delete(callerId);
         return structuredTextResult(publicBootstrapAliasOutput(read), callerId, servingIdentity);
@@ -809,9 +846,10 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
         : engineId !== undefined
           ? localEngineProcessResult(await callLocalEngineTool("read_output", {
               process_id: engineId,
+              reader_id: callerId,
               max_chars: boundedMaxChars,
-              wait_ms: Math.min(wait_ms ?? 0, 5000),
-            }), boundedMaxChars)
+              wait_ms: wait_ms ?? 0,
+            }, extra.signal), boundedMaxChars)
           : (isBootstrapSnapshot(process_id)
             ? await readBootstrapSnapshot(boundedMaxChars, process_id, callerId, conversation_id, expected_room_head)
             : await legacyProcesses().readOutput(process_id, boundedMaxChars, wait_ms, extra.signal));
