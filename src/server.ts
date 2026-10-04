@@ -68,36 +68,91 @@ async function callLocalEngineTool(
   return parsed as Record<string, unknown>;
 }
 
-function localEngineProcessResult(value: Record<string, unknown>): Record<string, unknown> {
-  const processId = typeof value.process_id === "string" ? value.process_id : "";
+type LocalEngineProcessMeta = {
+  execution_mode: "native" | "explicit_shell";
+  execution_reason: string;
+};
+
+const localEngineProcessMeta = new Map<string, LocalEngineProcessMeta>();
+const localEngineReplay = new Map<string, Record<string, unknown>>();
+
+function localEngineProcessResult(
+  value: Record<string, unknown>,
+  pageLimit = 30_000,
+  metaOverride?: LocalEngineProcessMeta,
+): Record<string, unknown> {
+  const rawProcessId = typeof value.process_id === "string" ? value.process_id : "";
+  const processId = LOCAL_ENGINE_PROCESS_PREFIX + rawProcessId;
+  const meta = metaOverride ?? localEngineProcessMeta.get(rawProcessId);
+  const stdout = typeof value.stdout === "string" ? value.stdout : "";
+  const stderr = typeof value.stderr === "string" ? value.stderr : "";
   const stdoutDropped = typeof value.stdout_truncated_bytes === "number" ? value.stdout_truncated_bytes : 0;
   const stderrDropped = typeof value.stderr_truncated_bytes === "number" ? value.stderr_truncated_bytes : 0;
+  const more = value.next_action === "READ_SAME_PROCESS_ID";
+  const effectivePageLimit = Math.max(1, Math.min(30_000, pageLimit));
   return {
     mcp_status: "OK",
     process_state: value.process_state === "RUNNING" ? "RUNNING" : "COMPLETED",
     elapsed_ms: 0,
-    next_action: value.next_action === "READ_SAME_PROCESS_ID" ? "READ_SAME_PROCESS_ID" : "STOP_READING",
-    process_id: LOCAL_ENGINE_PROCESS_PREFIX + processId,
+    next_action: more ? "READ_SAME_PROCESS_ID" : "STOP_READING",
+    process_id: processId,
     ...(typeof value.pid === "number" ? { pid: value.pid } : {}),
     running: value.running === true,
     execution_target: "local",
     execution_transport: "native-mcp",
-    ...(typeof value.stdout === "string" ? { stdout: value.stdout } : {}),
-    ...(typeof value.stderr === "string" ? { stderr: value.stderr } : {}),
+    ...(meta ? { execution_mode: meta.execution_mode, execution_reason: meta.execution_reason } : {}),
+    stdout,
+    stderr,
     ...(typeof value.exit_code === "number" || value.exit_code === null ? { exit_code: value.exit_code } : {}),
     ...(stdoutDropped > 0 ? { stdout_truncated: true, stdout_dropped_from_start: stdoutDropped } : {}),
     ...(stderrDropped > 0 ? { stderr_truncated: true, stderr_dropped_from_start: stderrDropped } : {}),
+    output_page: {
+      stdout_start: stdoutDropped,
+      stdout_end: stdoutDropped + stdout.length,
+      stdout_total: stdoutDropped + stdout.length,
+      stderr_start: stderrDropped,
+      stderr_end: stderrDropped + stderr.length,
+      stderr_total: stderrDropped + stderr.length,
+      page_chars: stdout.length + stderr.length,
+      page_limit: effectivePageLimit,
+      more,
+    },
   };
 }
 
+function rememberLocalEngineStart(
+  value: Record<string, unknown>,
+  meta: LocalEngineProcessMeta,
+): Record<string, unknown> {
+  const rawProcessId = typeof value.process_id === "string" ? value.process_id : "";
+  if (rawProcessId) {
+    localEngineProcessMeta.set(rawProcessId, meta);
+    localEngineReplay.set(rawProcessId, value);
+  }
+  return localEngineProcessResult(value, 30_000, meta);
+}
+
+function takeLocalEngineReplay(rawProcessId: string, pageLimit: number): Record<string, unknown> | undefined {
+  const replay = localEngineReplay.get(rawProcessId);
+  if (!replay) return undefined;
+  localEngineReplay.delete(rawProcessId);
+  return localEngineProcessResult(replay, pageLimit);
+}
+
 function localEngineKillResult(value: Record<string, unknown>): Record<string, unknown> {
-  const processId = typeof value.process_id === "string" ? value.process_id : "";
+  const rawProcessId = typeof value.process_id === "string" ? value.process_id : "";
+  const processId = LOCAL_ENGINE_PROCESS_PREFIX + rawProcessId;
   const running = value.running === true;
   const requested = value.kill_requested === true;
+  if (!running) {
+    localEngineReplay.delete(rawProcessId);
+    localEngineProcessMeta.delete(rawProcessId);
+  }
   return {
-    process_id: LOCAL_ENGINE_PROCESS_PREFIX + processId,
+    process_id: processId,
     pid: typeof value.pid === "number" ? value.pid : 0,
     killed: requested && !running,
+    ...(!requested && !running ? { already_exited: true } : {}),
     ...(requested ? { kill_requested: true } : {}),
     running,
     execution_target: "local",
@@ -573,7 +628,9 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
             const remainingInitialReadMs = DEFAULT_INITIAL_WAIT_MS - (Date.now() - localStartedAt);
             if (remainingInitialReadMs > 0) await new Promise((resolve) => setTimeout(resolve, remainingInitialReadMs));
           }
-          value = localEngineProcessResult(localStarted);
+          value = rememberLocalEngineStart(localStarted, input.executable !== undefined
+            ? { execution_mode: "native", execution_reason: "structured_argv" }
+            : { execution_mode: "explicit_shell", execution_reason: "structured_script" });
         } else {
           value = input.executable !== undefined
             ? await processManager.startStructuredWithWait(input.executable, input.args ?? [], working_directory, callerId, wait_ms ?? DEFAULT_INITIAL_WAIT_MS, activity_target, action_class, input.stdin, input.env, extra.signal, MODEL_VISIBLE_PAGE_MAX_CHARS)
@@ -629,13 +686,13 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
         if (message_id) args.push("--message-id", message_id);
         if (has_attachments === true) args.push("--has-attachments");
         const started = localEngineUrl
-          ? localEngineProcessResult(await callLocalEngineTool("start_process", {
+          ? rememberLocalEngineStart(await callLocalEngineTool("start_process", {
               executable: command.executable,
               args,
               ...(command.cwd ? { cwd: command.cwd } : {}),
               stdin,
               wait_ms: Math.min(wait_ms ?? DEFAULT_INITIAL_WAIT_MS, 5000),
-            }))
+            }), { execution_mode: "native", execution_reason: "structured_argv" })
           : await processManager.startStructuredWithWait(
               command.executable,
               args,
@@ -659,11 +716,11 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       if (activeBootstrapProcessId) {
         const engineBootstrapId = localEngineProcessId(activeBootstrapProcessId);
         const read = engineBootstrapId !== undefined
-          ? localEngineProcessResult(await callLocalEngineTool("read_output", {
+          ? (takeLocalEngineReplay(engineBootstrapId, boundedMaxChars) ?? localEngineProcessResult(await callLocalEngineTool("read_output", {
               process_id: engineBootstrapId,
               max_chars: boundedMaxChars,
               wait_ms: Math.min(wait_ms ?? 0, 5000),
-            }))
+            }), boundedMaxChars))
           : await processManager.readOutput(activeBootstrapProcessId, boundedMaxChars, wait_ms, extra.signal);
         if (read.next_action === "STOP_READING") bootstrapAliasProcesses.delete(callerId);
         return structuredTextResult(publicBootstrapAliasOutput(read), callerId, servingIdentity);
@@ -673,11 +730,11 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       const value = remoteId !== undefined
         ? remoteProcessResult(await callRemoteOmenTool("read_output", { process_id: remoteId, max_chars: boundedMaxChars, ...(wait_ms !== undefined ? { wait_ms } : {}) }, callerId))
         : engineId !== undefined
-          ? localEngineProcessResult(await callLocalEngineTool("read_output", {
+          ? (takeLocalEngineReplay(engineId, boundedMaxChars) ?? localEngineProcessResult(await callLocalEngineTool("read_output", {
               process_id: engineId,
               max_chars: boundedMaxChars,
               wait_ms: Math.min(wait_ms ?? 0, 5000),
-            }))
+            }), boundedMaxChars))
           : (isBootstrapSnapshot(process_id)
             ? await readBootstrapSnapshot(boundedMaxChars, process_id, callerId, conversation_id, expected_room_head)
             : await processManager.readOutput(process_id, boundedMaxChars, wait_ms, extra.signal));
