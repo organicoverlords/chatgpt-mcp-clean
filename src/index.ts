@@ -12,6 +12,8 @@ import { callerId } from "./lib/caller-id.js";
 import { BoundedJsonlWriter } from "./lib/bounded-jsonl.js";
 import { LocalOAuthProvider } from "./lib/local-oauth-provider.js";
 import { observeSocket, sessionFingerprint, setTelemetrySink, withTelemetryContext } from "./lib/transport-telemetry.js";
+import { auditProcessRequest, auditProcessResponse } from "./lib/process-call-audit.js";
+import { currentTelemetryContext } from "./lib/transport-telemetry.js";
 import { startStallWatchdog } from "./lib/stall-watchdog.js";
 import { createResponseByteCounter } from "./lib/response-bytes.js";
 import { createServer, processRuntimeStatus } from "./server.js";
@@ -162,6 +164,17 @@ async function handleStateless(req: Request, res: Response, body: unknown): Prom
     allowedOrigins: [...allowedMcpOrigins],
     enableDnsRebindingProtection: true,
   });
+  const call = body && typeof body === "object" ? body as { method?: unknown; id?: unknown; params?: { name?: unknown; arguments?: unknown } } : undefined;
+  if (call?.method === "tools/call" && typeof call.params?.name === "string") {
+    const tool = call.params.name;
+    const context = currentTelemetryContext();
+    auditProcessRequest(tool, call.params.arguments);
+    const send = transport.send.bind(transport);
+    transport.send = async (...args: Parameters<typeof transport.send>) => {
+      if ("id" in args[0] && args[0].id === call.id) auditProcessResponse(tool, args[0], context);
+      return await send(...args);
+    };
+  }
   let cleaned = false;
   const cleanup = async () => {
     if (cleaned) return;

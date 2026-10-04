@@ -113,13 +113,13 @@ function quoteStructuredArgument(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
 
-function structuredCommandDisplay(executable: string, args: string[]): string {
+export function structuredCommandDisplay(executable: string, args: string[]): string {
   const quotedExecutable = quoteStructuredArgument(executable);
   const head = /\s/.test(executable) ? `& ${quotedExecutable}` : quotedExecutable;
   return [head, ...args.map(quoteStructuredArgument)].join(" ");
 }
 
-function structuredPolicyText(base: string, environment?: Record<string, string>): string {
+export function structuredPolicyText(base: string, environment?: Record<string, string>): string {
   if (!environment || Object.keys(environment).length === 0) return base;
   const values = Object.entries(environment).map(([key, value]) => `[env:${key}]\n${value}`).join("\n");
   return `${base}\n${values}`;
@@ -1475,7 +1475,7 @@ function preflightWorker(): Worker {
   return worker;
 }
 
-async function commandPreflightAsync(
+export async function commandPreflightAsync(
   command: string,
   executionPlan: CommandExecutionPlan,
   mode: "full" | "policy",
@@ -1484,6 +1484,7 @@ async function commandPreflightAsync(
     return mode === "policy" ? commandPolicyError(command) : commandExecutionPreflightError(command, executionPlan);
   }
   const requestId = randomUUID();
+  if (preflightWorkerWaiters.size >= 128) throw new Error("process_preflight_capacity_exceeded");
   const worker = preflightWorker();
   worker.ref();
   return await new Promise<string | undefined>((resolvePreflight, rejectPreflight) => {
@@ -1590,7 +1591,7 @@ function parserFailureCode(origin: StructuredScriptLanguage, output: string): st
   return undefined;
 }
 
-function processFailureDiagnostic(
+export function processFailureDiagnostic(
   command: string,
   stdout: string,
   stderr: string,

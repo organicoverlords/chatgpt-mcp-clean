@@ -31,8 +31,8 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v4",
-              "description": "Registration schema revision; executable implementation is identified by source_commit."
+              "const": "process-tools.v6",
+              "description": "Shared process-tool contract; executable implementation is identified by source_commit."
             },
             "backend_generation": {
               "type": "string",
@@ -53,8 +53,8 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v4",
-              "description": "Registration schema revision; executable implementation is identified by source_commit."
+              "const": "process-tools.v6",
+              "description": "Shared process-tool contract; executable implementation is identified by source_commit."
             },
             "backend_generation": {
               "type": "string",
@@ -206,8 +206,8 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v4",
-              "description": "Registration schema revision; executable implementation is identified by source_commit."
+              "const": "process-tools.v6",
+              "description": "Shared process-tool contract; executable implementation is identified by source_commit."
             },
             "backend_generation": {
               "type": "string",
@@ -228,8 +228,8 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v4",
-              "description": "Registration schema revision; executable implementation is identified by source_commit."
+              "const": "process-tools.v6",
+              "description": "Shared process-tool contract; executable implementation is identified by source_commit."
             },
             "backend_generation": {
               "type": "string",
@@ -882,8 +882,8 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v4",
-              "description": "Registration schema revision; executable implementation is identified by source_commit."
+              "const": "process-tools.v6",
+              "description": "Shared process-tool contract; executable implementation is identified by source_commit."
             },
             "backend_generation": {
               "type": "string",
@@ -904,8 +904,8 @@
           "properties": {
             "tool_contract_version": {
               "type": "string",
-              "const": "process-tools.v4",
-              "description": "Registration schema revision; executable implementation is identified by source_commit."
+              "const": "process-tools.v6",
+              "description": "Shared process-tool contract; executable implementation is identified by source_commit."
             },
             "backend_generation": {
               "type": "string",

@@ -5,7 +5,8 @@ import { resolve } from "node:path";
 import { isBootstrapSnapshot, readBootstrapSnapshot } from "./lib/bootstrap-snapshot.js";
 import { z } from "zod";
 import { BusyStore } from "./lib/busy-store.js";
-import { ProcessManager } from "./lib/process-manager.js";
+import { ProcessManager, commandPreflightAsync, processFailureDiagnostic, structuredCommandDisplay, structuredPolicyText, replayStructuredArgvTransportError, replayStructuredHostPreflightError } from "./lib/process-manager.js";
+import { planStructuredExecution, planStructuredScript, type StructuredScriptLanguage } from "./lib/command-execution-plan.js";
 import { structuredInvocation, scriptInvocation } from "./lib/structured-invocation.js";
 
 // The deployed ChatGPT connector surface is the process profile. Keep the broader
@@ -97,6 +98,9 @@ async function callLocalEngineTool(
 type LocalEngineProcessMeta = {
   execution_mode: "native" | "explicit_shell" | "powershell";
   execution_reason: string;
+  command?: string;
+  diagnostic_stdout?: string;
+  diagnostic_stderr?: string;
 };
 
 const localEngineProcessMeta = new Map<string, LocalEngineProcessMeta>();
@@ -123,6 +127,12 @@ function localEngineProcessResult(
   const meta = metaOverride ?? localEngineProcessMeta.get(rawProcessId);
   const stdout = typeof value.stdout === "string" ? value.stdout : "";
   const stderr = typeof value.stderr === "string" ? value.stderr : "";
+  if (meta) {
+    meta.diagnostic_stdout = ((meta.diagnostic_stdout ?? "") + stdout).slice(-8_000);
+    meta.diagnostic_stderr = ((meta.diagnostic_stderr ?? "") + stderr).slice(-8_000);
+  }
+  const failureDiagnostic = processFailureDiagnostic(meta?.command ?? "", meta?.diagnostic_stdout ?? stdout, meta?.diagnostic_stderr ?? stderr,
+    typeof value.exit_code === "number" ? value.exit_code : null, undefined, meta?.execution_reason);
   const stdoutDropped = typeof value.stdout_truncated_bytes === "number" ? value.stdout_truncated_bytes : 0;
   const stderrDropped = typeof value.stderr_truncated_bytes === "number" ? value.stderr_truncated_bytes : 0;
   const more = value.next_action === "READ_SAME_PROCESS_ID";
@@ -142,6 +152,7 @@ function localEngineProcessResult(
     execution_target: nativeOmenHost ? "omen" : "local",
     execution_transport: "native-mcp",
     ...(meta ? { execution_mode: meta.execution_mode, execution_reason: meta.execution_reason } : {}),
+    ...(failureDiagnostic ? { failure_diagnostic: failureDiagnostic } : {}),
     stdout,
     stderr,
     ...(typeof value.exit_code === "number" || value.exit_code === null ? { exit_code: value.exit_code } : {}),
@@ -425,13 +436,13 @@ const snapshotFreshnessSchema = z.object({
   read_mode: z.enum(["MATERIALIZED_ONLY", "V3_ROOM_BOUND_READ"]),
 }).strict();
 
-// Public ChatGPT registration contract: keep stable; runtime identity is backend_generation/source_commit.
-// Registration revisions are compatibility settings, not different implementations.
-const contractRevision = process.env.MCP_TOOL_CONTRACT_VERSION ?? "process-tools.v4";
-if (contractRevision !== "process-tools.v4" && contractRevision !== "process-tools.v6") {
+// One public contract for every binding. Accept old launch configuration without
+// letting it change the advertised schema or returned implementation identity.
+const legacyContractRevision = process.env.MCP_TOOL_CONTRACT_VERSION;
+if (legacyContractRevision && legacyContractRevision !== "process-tools.v4" && legacyContractRevision !== "process-tools.v6") {
   throw new Error("MCP_TOOL_CONTRACT_VERSION must be process-tools.v4 or process-tools.v6");
 }
-export const PROCESS_TOOL_CONTRACT_VERSION = contractRevision;
+export const PROCESS_TOOL_CONTRACT_VERSION = "process-tools.v6";
 
 export type ProcessServingIdentity = {
   backend_generation?: string;
@@ -439,7 +450,7 @@ export type ProcessServingIdentity = {
 };
 
 const processServingIdentitySchema = z.object({
-  tool_contract_version: z.literal(PROCESS_TOOL_CONTRACT_VERSION).describe("Registration schema revision; executable implementation is identified by source_commit."),
+  tool_contract_version: z.literal(PROCESS_TOOL_CONTRACT_VERSION).describe("Shared process-tool contract; executable implementation is identified by source_commit."),
   backend_generation: z.string().min(1).optional(),
   source_commit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
 }).strict();
@@ -670,6 +681,16 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
           const invocation = input.executable !== undefined
             ? structuredInvocation(input.executable, input.args ?? [], input.stdin)
             : scriptInvocation(input.language!, input.script!);
+          const preflightPlan = input.executable !== undefined
+            ? planStructuredExecution(invocation.executable, invocation.args, invocation.stdin, "powershell.exe")
+            : planStructuredScript(input.language as StructuredScriptLanguage, input.script!, "powershell.exe");
+          const displayCommand = structuredCommandDisplay(invocation.executable, invocation.args);
+          const preflightText = structuredPolicyText(displayCommand +
+            (invocation.stdin !== undefined ? "\n" + invocation.stdin : ""), input.env);
+          const preflightError = replayStructuredArgvTransportError(invocation.executable, invocation.args)
+            ?? replayStructuredHostPreflightError(invocation.executable, process.platform)
+            ?? await commandPreflightAsync(preflightText, preflightPlan, input.script !== undefined ? "policy" : "full");
+          if (preflightError) throw new Error(`start_process_preflight_failed: ${preflightError}`);
           const localStartedAt = Date.now();
           const localStarted = await callLocalEngineTool("start_process", {
             executable: invocation.executable,
@@ -679,7 +700,8 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
             ...(input.env !== undefined ? { env: input.env } : {}),
             wait_ms: Math.min(wait_ms ?? DEFAULT_INITIAL_WAIT_MS, 5000),
           });
-          value = rememberLocalEngineStart(localStarted, { execution_mode: invocation.execution_mode, execution_reason: invocation.execution_reason });
+          value = rememberLocalEngineStart(localStarted, { execution_mode: invocation.execution_mode, execution_reason: invocation.execution_reason,
+            command: (input.script !== undefined ? `[${input.language} script]\n${input.script}` : displayCommand).slice(0, 4_000) });
         } else {
           value = input.executable !== undefined
             ? await processManager.startStructuredWithWait(input.executable, input.args ?? [], working_directory, callerId, wait_ms ?? DEFAULT_INITIAL_WAIT_MS, activity_target, action_class, input.stdin, input.env, extra.signal, MODEL_VISIBLE_PAGE_MAX_CHARS)

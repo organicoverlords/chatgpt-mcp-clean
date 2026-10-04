@@ -187,7 +187,7 @@ const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "16a32af61bc84c66eb911172a51cd2ae12fd7113dfc509de55616cde11b8a6d8";
+const acceptedContractSha256 = "93527155137b90fe7f561fb36d2383d9c36f3678e64427cb135ad3412d066ffb";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 const configuredExpectedTools = JSON.parse(JSON.stringify(baseExpectedTools).replaceAll("process-tools.v4", PROCESS_TOOL_CONTRACT_VERSION));
