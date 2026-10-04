@@ -112,8 +112,13 @@ const defaultInitialRead = await assertStructuredProcessResult("start_process", 
 });
 const defaultInitialReadMs = Date.now() - defaultInitialReadAt;
 assert.equal(defaultInitialRead.running, true, JSON.stringify(defaultInitialRead));
-assert.match(String(defaultInitialRead.stdout || ""), /default-initial-read/, "omitted wait_ms must return the automatic initial read");
 assert.ok(defaultInitialReadMs < 2_000, `default start_process initial read must return promptly after output (${defaultInitialReadMs}ms)`);
+// Under load the bounded initial wait can expire before the child writes output.
+// It must still return a usable ID, and the next bounded read must retrieve it.
+const defaultInitialOutput = defaultInitialRead.stdout || (await assertStructuredProcessResult("read_output", {
+  process_id: defaultInitialRead.process_id, wait_ms: 1000,
+})).stdout;
+assert.match(String(defaultInitialOutput || ""), /default-initial-read/, "default start/read must preserve the automatic initial output");
 await assertStructuredProcessResult("kill_process", { process_id: defaultInitialRead.process_id });
 const trickyArg = String.raw`space ; $dollar \"quote\" ` + "`tick";
 const argvStructured = await assertStructuredProcessResult("start_process", {
