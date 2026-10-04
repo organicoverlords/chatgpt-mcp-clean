@@ -146,7 +146,7 @@ const processEnvironmentSchema = z.record(
 
 const startProcessCommonShape = {
   working_directory: z.string().describe("Working directory on the selected execution target.").optional(),
-  execution_target: z.enum(["local", "omen"]).describe("Execution target; local by default, or OMEN. On a native OMEN MCP host, OMEN executes locally without SSH.").optional(),
+  execution_target: z.enum(["local", "omen"]).describe("Compatibility routing selector. Routing policy, topology, ownership, preference, and fallback are defined outside this schema.").optional(),
   wait_ms: z.number().int().min(0).max(240_000).describe("Optional initial-read wait. Omit to use the 750 ms owner default; 0 returns the launch receipt immediately; positive values are honored up to 240 s and return early when the process exits.").optional(),
   activity_target: activityTargetSchema.optional(),
   action_class: actionClassSchema.optional(),
@@ -351,7 +351,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
   server.registerTool(
     "start_process",
     {
-      description: "Execute a process locally or on the configured OMEN target and return structured process output.",
+      description: "Execute a structured process through this MCP binding and return bounded process output.",
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
       inputSchema: startProcessInputSchema,
       outputSchema: processOutputSchema,

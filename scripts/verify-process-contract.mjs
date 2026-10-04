@@ -75,6 +75,14 @@ const startInputJson = z.toJSONSchema(startInputSchema);
 const readInputJson = z.toJSONSchema(readInputSchema);
 assert.match(startInputJson.properties?.wait_ms?.description || "", /750 ms owner default/, "start_process wait_ms schema must expose the owner default needed for correct invocation");
 assert.match(startInputJson.properties?.wait_ms?.description || "", /honored up to 240 s/, "start_process wait_ms schema must expose the explicit wait contract");
+const startToolDescription = String(server._registeredTools.start_process?.description || "");
+const executionTargetDescription = String(startInputJson.properties?.execution_target?.description || "");
+assert.doesNotMatch(startToolDescription, /\blocal(?:ly)?\b|\bOMEN\b/i, "start_process description must not teach machine-specific routing policy");
+assert.doesNotMatch(executionTargetDescription, /\blocal\b|\bOMEN\b/i, "execution_target description must not teach machine-specific routing policy");
+assert.equal(startToolDescription, "Execute a structured process through this MCP binding and return bounded process output.", "start_process description must stay capability-only");
+assert.match(executionTargetDescription, /Compatibility routing selector/, "execution_target description must remain compatibility-only");
+assert.match(executionTargetDescription, /defined outside this schema/, "execution_target description must keep routing policy external");
+
 assert.match(readInputJson.properties?.wait_ms?.description || "", /adaptive 2\/5\/10\/30\/60 s/, "read_output wait_ms schema must expose adaptive omitted-wait semantics");
 assert.match(readInputJson.properties?.wait_ms?.description || "", /0 reads immediately/, "read_output wait_ms schema must expose the nonblocking form");
 assert.equal((await startInputSchema.safeParseAsync({ executable: process.execPath, wait_ms: 240_000 })).success, true, "start_process must accept 240s explicit waits");
@@ -180,7 +188,7 @@ const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "4e5413c45b547b2a9991c42dc7392d055c57a6540704aba79db4005301c43f71";
+const acceptedContractSha256 = "ea0a7c584d800c7552a069892b585129f09d55b2f63ff7618948c6a1dd6a544f";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 const expectedTools = [...baseExpectedTools].sort((a, b) => a.name.localeCompare(b.name));
