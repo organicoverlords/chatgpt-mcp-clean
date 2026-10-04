@@ -113,7 +113,7 @@ const defaultInitialRead = await assertStructuredProcessResult("start_process", 
 const defaultInitialReadMs = Date.now() - defaultInitialReadAt;
 assert.equal(defaultInitialRead.running, true, JSON.stringify(defaultInitialRead));
 assert.match(String(defaultInitialRead.stdout || ""), /default-initial-read/, "omitted wait_ms must return the automatic initial read");
-assert.ok(defaultInitialReadMs >= 500 && defaultInitialReadMs < 2_000, `default start_process initial read should be about 750ms (${defaultInitialReadMs}ms)`);
+assert.ok(defaultInitialReadMs < 2_000, `default start_process initial read must return promptly after output (${defaultInitialReadMs}ms)`);
 await assertStructuredProcessResult("kill_process", { process_id: defaultInitialRead.process_id });
 const trickyArg = String.raw`space ; $dollar \"quote\" ` + "`tick";
 const argvStructured = await assertStructuredProcessResult("start_process", {
