@@ -63,11 +63,7 @@ const startInputSchema = server._registeredTools.start_process?.inputSchema;
 assert.ok(startInputSchema, "start_process input schema missing");
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output LEGACY" })).success, false, "legacy command input must be rejected");
 assert.equal((await startInputSchema.safeParseAsync({ executable: "node", args: ["--version"], stdin: "" })).success, true, "structured executable+args+stdin input must be valid");
-assert.equal((await startInputSchema.safeParseAsync({ execution_target: "omen", executable: "node", args: ["--version"], working_directory: "/tmp" })).success, true, "OMEN executable+args input must be valid");
-assert.equal((await startInputSchema.safeParseAsync({ execution_target: "omen", language: "bash", script: "pwd" })).success, true, "OMEN script input must match the structured script contract");
-assert.equal((await startInputSchema.safeParseAsync({ execution_target: "omen", executable: "node", stdin: "x" })).success, true, "OMEN stdin must match the structured executable contract");
-assert.equal((await startInputSchema.safeParseAsync({ execution_target: "omen", executable: "node", env: { X: "1" } })).success, true, "OMEN env overrides must match the structured execution contract");
-assert.equal((await startInputSchema.safeParseAsync({ execution_target: "mars", executable: "node" })).success, false, "unknown execution targets must be rejected");
+assert.equal((await startInputSchema.safeParseAsync({ execution_target: "omen", executable: "node", args: ["--version"] })).success, false, "model-visible start_process must not expose machine-routing selection; routing belongs to the MCP binding");
 
 const readInputSchema = server._registeredTools.read_output?.inputSchema;
 assert.ok(readInputSchema, "read_output input schema missing");
@@ -129,18 +125,6 @@ const argvStructured = await assertStructuredProcessResult("start_process", {
 assert.equal(argvStructured.execution_mode, "native", "structured executable mode must bypass PowerShell");
 assert.equal(argvStructured.execution_reason, "structured_argv", "structured executable mode must expose its routing reason");
 assert.deepEqual(JSON.parse(String(argvStructured.stdout || "").trim()), [trickyArg], "structured argv must survive without shell reinterpretation");
-const omenStructured = await assertStructuredProcessResult("start_process", {
-  execution_target: "omen",
-  executable: contractNodeExecutable,
-  args: ["-e", "console.log('omen-target-contract')"],
-  working_directory: "/tmp",
-  wait_ms: 10_000,
-});
-assert.equal(omenStructured.execution_target, "omen", "OMEN execution must identify the selected target");
-assert.equal(omenStructured.execution_transport, nativeOmenProxy ? "native-mcp" : "ssh-adapter", nativeOmenProxy
-  ? "native OMEN MCP proxy must identify native MCP transport explicitly"
-  : "Windows legacy OMEN adapter must identify SSH transport explicitly");
-assert.match(String(omenStructured.stdout || ""), /omen-target-contract/, "OMEN target wrapper must execute the requested argv");
 const stdinStructured = await assertStructuredProcessResult("start_process", {
   executable: contractNodeExecutable,
   args: ["-e", "process.stdin.pipe(process.stdout)"],
@@ -187,7 +171,7 @@ const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "93527155137b90fe7f561fb36d2383d9c36f3678e64427cb135ad3412d066ffb";
+const acceptedContractSha256 = "8efd248249effc21ac612ac2360d5e42bfb51f2d754b3ae2e9785586bbf86677";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 const configuredExpectedTools = JSON.parse(JSON.stringify(baseExpectedTools).replaceAll("process-tools.v4", PROCESS_TOOL_CONTRACT_VERSION));

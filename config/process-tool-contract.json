@@ -71,11 +71,8 @@
           "additionalProperties": false
         },
         "execution_target": {
-          "type": "string",
-          "enum": [
-            "local",
-            "omen"
-          ]
+          "description": "Opaque execution scope reported by the serving binding; diagnostic only.",
+          "type": "string"
         },
         "execution_transport": {
           "type": "string",
@@ -326,11 +323,8 @@
           "pattern": "^[A-Za-z0-9._/:_-]+$"
         },
         "execution_target": {
-          "type": "string",
-          "enum": [
-            "local",
-            "omen"
-          ]
+          "description": "Opaque execution scope reported by the serving binding; diagnostic only.",
+          "type": "string"
         },
         "execution_transport": {
           "type": "string",
@@ -758,7 +752,7 @@
   },
   {
     "name": "start_process",
-    "description": "Execute a process locally or on the configured OMEN target and return structured process output.",
+    "description": "Start a process through this MCP binding and return structured process output.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -813,15 +807,7 @@
         },
         "working_directory": {
           "type": "string",
-          "description": "Working directory on the selected execution target."
-        },
-        "execution_target": {
-          "type": "string",
-          "enum": [
-            "local",
-            "omen"
-          ],
-          "description": "Execution target; local by default, or OMEN. On a native OMEN MCP host, OMEN executes locally without SSH."
+          "description": "Working directory for the process on this MCP binding."
         },
         "wait_ms": {
           "type": "integer",
@@ -1002,11 +988,8 @@
           "pattern": "^[A-Za-z0-9._/:_-]+$"
         },
         "execution_target": {
-          "type": "string",
-          "enum": [
-            "local",
-            "omen"
-          ]
+          "description": "Opaque execution scope reported by the serving binding; diagnostic only.",
+          "type": "string"
         },
         "execution_transport": {
           "type": "string",

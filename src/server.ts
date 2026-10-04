@@ -391,8 +391,7 @@ const processEnvironmentSchema = z.record(
   .refine((value) => Object.entries(value).reduce((sum, [key, item]) => sum + key.length + item.length, 0) <= 1_000_000, "env payload exceeds 1000000 characters");
 
 const startProcessCommonShape = {
-  working_directory: z.string().describe("Working directory on the selected execution target.").optional(),
-  execution_target: z.enum(["local", "omen"]).describe("Execution target; local by default, or OMEN. On a native OMEN MCP host, OMEN executes locally without SSH.").optional(),
+  working_directory: z.string().describe("Working directory for the process on this MCP binding.").optional(),
   wait_ms: z.number().int().min(0).max(240_000).optional(),
   activity_target: activityTargetSchema.optional(),
   action_class: actionClassSchema.optional(),
@@ -498,7 +497,7 @@ const processOutputSchema = z.object({
   launching: z.literal(true).optional(),
   activity_target: activityTargetSchema.optional(),
   action_class: actionClassSchema.optional(),
-  execution_target: z.enum(["local", "omen"]).optional(),
+  execution_target: z.string().describe("Opaque execution scope reported by the serving binding; diagnostic only.").optional(),
   execution_transport: z.enum(["native-mcp", "ssh-adapter"]).optional(),
   execution_mode: z.enum(["powershell", "native", "explicit_shell", "native_sequence", "native_pipeline"]).optional(),
   execution_reason: z.string().optional(),
@@ -545,7 +544,7 @@ const killProcessOutputSchema = z.object({
   execution_caller_id: z.string().optional(),
   serving_identity: processServingIdentitySchema,
   execution_serving_identity: processServingIdentitySchema.optional(),
-  execution_target: z.enum(["local", "omen"]).optional(),
+  execution_target: z.string().describe("Opaque execution scope reported by the serving binding; diagnostic only.").optional(),
   execution_transport: z.enum(["native-mcp", "ssh-adapter"]).optional(),
   process_id: z.string(),
   pid: z.number().int().nonnegative(),
@@ -618,14 +617,14 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
   server.registerTool(
     "start_process",
     {
-      description: "Execute a process locally or on the configured OMEN target and return structured process output.",
+      description: "Start a process through this MCP binding and return structured process output.",
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
       inputSchema: startProcessInputSchema,
       outputSchema: processOutputSchema,
     },
     async (input, extra) => {
-      const { working_directory, execution_target, wait_ms, activity_target, action_class } = input;
-      const target = execution_target ?? defaultExecutionTarget;
+      const { working_directory, wait_ms, activity_target, action_class } = input;
+      const target = defaultExecutionTarget;
       let value: Record<string, unknown>;
       if (target === "omen" && !(nativeOmenHost && localEngineUrl)) {
         if (nativeOmenHost) {

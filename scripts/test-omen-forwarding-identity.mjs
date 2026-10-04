@@ -43,6 +43,7 @@ const mock = createHttpServer(async (request, response) => {
 await new Promise((resolve) => mock.listen(0, "127.0.0.1", resolve));
 const address = mock.address();
 process.env.MCP_TOOL_PROFILE = "process";
+process.env.MCP_DEFAULT_EXECUTION_TARGET = "omen";
 process.env.MCP_PROCESS_RECEIPT_DIR = root;
 process.env.MCP_OMEN_MCP_URL = `http://127.0.0.1:${address.port}/mcp`;
 const { createServer, closeRemoteOmenClients } = await import("../dist/server.js");
@@ -51,7 +52,7 @@ try {
   const first = createServer("caller-one");
   const second = createServer("caller-two");
   async function start(server, executable) {
-    return await server._registeredTools.start_process.handler({ executable, args: [], execution_target: "omen", wait_ms: 0 }, {});
+    return await server._registeredTools.start_process.handler({ executable, args: [], wait_ms: 0 }, {});
   }
   const a = (await start(first, "ok")).structuredContent;
   const b = (await start(second, "ok")).structuredContent;
