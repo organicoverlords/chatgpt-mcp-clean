@@ -108,11 +108,10 @@ type LocalEngineProcessMeta = {
 };
 
 const localEngineProcessMeta = new Map<string, LocalEngineProcessMeta>();
-const localEngineReplay = new Map<string, Record<string, unknown>>();
 const MAX_LOCAL_ENGINE_CACHE_ENTRIES = 512;
 
 function trimLocalEngineCaches(): void {
-  for (const cache of [localEngineProcessMeta, localEngineReplay]) {
+  for (const cache of [localEngineProcessMeta]) {
     while (cache.size > MAX_LOCAL_ENGINE_CACHE_ENTRIES) {
       const oldest = cache.keys().next().value;
       if (oldest === undefined) break;
@@ -142,7 +141,6 @@ function localEngineProcessResult(
   const stderrDropped = typeof value.stderr_truncated_bytes === "number" ? value.stderr_truncated_bytes : 0;
   const more = value.next_action === "READ_SAME_PROCESS_ID";
   if (!more && value.running !== true) {
-    localEngineReplay.delete(rawProcessId);
   }
   const page = value.output_page && typeof value.output_page === "object" ? value.output_page as Record<string, unknown> : {};
   const stdoutStart = typeof page.stdout_start === "number" ? page.stdout_start : (meta?.stdout_cursor ?? 0) + stdoutDropped;
@@ -192,17 +190,9 @@ function rememberLocalEngineStart(
   const rawProcessId = typeof value.process_id === "string" ? value.process_id : "";
   if (rawProcessId) {
     localEngineProcessMeta.set(rawProcessId, meta);
-    if (value.running === true || value.next_action === "READ_SAME_PROCESS_ID") localEngineReplay.set(rawProcessId, value);
     trimLocalEngineCaches();
   }
   return localEngineProcessResult(value, 30_000, meta);
-}
-
-function takeLocalEngineReplay(rawProcessId: string, pageLimit: number): Record<string, unknown> | undefined {
-  const replay = localEngineReplay.get(rawProcessId);
-  if (!replay) return undefined;
-  localEngineReplay.delete(rawProcessId);
-  return localEngineProcessResult(replay, pageLimit);
 }
 
 function localEngineKillResult(value: Record<string, unknown>): Record<string, unknown> {
@@ -211,7 +201,6 @@ function localEngineKillResult(value: Record<string, unknown>): Record<string, u
   const running = value.running === true;
   const requested = value.kill_requested === true;
   if (!running) {
-    localEngineReplay.delete(rawProcessId);
     localEngineProcessMeta.delete(rawProcessId);
   }
   return {
@@ -355,10 +344,13 @@ function remoteProcessResult(value: Record<string, unknown>): Record<string, unk
   };
 }
 
-const processManager = new ProcessManager({
+let processManager: ProcessManager | undefined;
+function legacyProcesses(): ProcessManager {
+  return processManager ??= new ProcessManager({
   receiptDirectory: resolve(process.env.MCP_PROCESS_RECEIPT_DIR || ".state/process-receipts"),
   ...(configuredMaxLiveProcesses !== undefined ? { maxLiveTotal: configuredMaxLiveProcesses } : {}),
 });
+}
 const defaultOmenExecPath = process.platform === "win32" && process.env.USERPROFILE
   ? resolve(process.env.USERPROFILE, "Desktop", "vault", "tools", "omen_exec.py")
   : undefined;
@@ -552,7 +544,7 @@ const killProcessOutputSchema = z.object({
 const liveSessions = new Set<string>();
 const busyStore = fullToolProfile ? new BusyStore((scope) => {
   const sessionId = scope.startsWith("session:") ? scope.slice("session:".length) : scope;
-  return liveSessions.has(sessionId) || processManager.hasLiveScope(scope);
+  return liveSessions.has(sessionId) || (processManager?.hasLiveScope(scope) ?? false);
 }) : undefined;
 
 function resultData(value: unknown, id: string, servingIdentity?: Record<string, unknown>): Record<string, unknown> {
@@ -588,7 +580,7 @@ export async function processRuntimeStatus(): Promise<{ live_process_count: numb
       return { live_process_count: null, process_engine_available: false };
     }
   }
-  return { live_process_count: processManager.liveProcessCount() };
+  return { live_process_count: legacyProcesses().liveProcessCount() };
 }
 
 export function markSessionLive(sessionId: string, live: boolean): void {
@@ -622,7 +614,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
           if (process.platform === "win32") throw new Error("native_omen_host_misconfigured: MCP_NATIVE_OMEN_HOST requires a non-Windows host");
           const nativeWorkingDirectory = working_directory ?? process.env.HOME ?? process.cwd();
           value = input.executable !== undefined
-            ? await processManager.startStructuredWithWait(
+            ? await legacyProcesses().startStructuredWithWait(
                 input.executable,
                 input.args ?? [],
                 nativeWorkingDirectory,
@@ -635,7 +627,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
                 extra.signal,
                 MODEL_VISIBLE_PAGE_MAX_CHARS,
               )
-            : await processManager.startScriptWithWait(
+            : await legacyProcesses().startScriptWithWait(
                 input.language!,
                 input.script!,
                 nativeWorkingDirectory,
@@ -674,7 +666,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
           if (input.executable === undefined || input.stdin !== undefined || input.env !== undefined) {
             throw new Error("omen_ssh_adapter_structured_fields_unsupported: native OMEN MCP is required for script, stdin, or env transport");
           }
-          value = await processManager.startStructuredWithWait(
+          value = await legacyProcesses().startStructuredWithWait(
             omenPython,
             [omenExecPath, "--invocation-source", "mcp", "--cwd", working_directory ?? "/home/aatuska", "--", input.executable, ...(input.args ?? [])],
             undefined,
@@ -718,8 +710,8 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
             command: (input.script !== undefined ? `[${input.language} script]\n${input.script}` : displayCommand).slice(0, 4_000) });
         } else {
           value = input.executable !== undefined
-            ? await processManager.startStructuredWithWait(input.executable, input.args ?? [], working_directory, callerId, wait_ms ?? DEFAULT_INITIAL_WAIT_MS, activity_target, action_class, input.stdin, input.env, extra.signal, MODEL_VISIBLE_PAGE_MAX_CHARS)
-            : await processManager.startScriptWithWait(input.language!, input.script!, working_directory, callerId, wait_ms ?? DEFAULT_INITIAL_WAIT_MS, activity_target, action_class, input.env, extra.signal, MODEL_VISIBLE_PAGE_MAX_CHARS);
+            ? await legacyProcesses().startStructuredWithWait(input.executable, input.args ?? [], working_directory, callerId, wait_ms ?? DEFAULT_INITIAL_WAIT_MS, activity_target, action_class, input.stdin, input.env, extra.signal, MODEL_VISIBLE_PAGE_MAX_CHARS)
+            : await legacyProcesses().startScriptWithWait(input.language!, input.script!, working_directory, callerId, wait_ms ?? DEFAULT_INITIAL_WAIT_MS, activity_target, action_class, input.env, extra.signal, MODEL_VISIBLE_PAGE_MAX_CHARS);
         }
       }
       return structuredTextResult(value, callerId, servingIdentity);
@@ -778,7 +770,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
               stdin,
               wait_ms: Math.min(wait_ms ?? DEFAULT_INITIAL_WAIT_MS, 5000),
             }), { execution_mode: "native", execution_reason: "structured_argv" })
-          : await processManager.startStructuredWithWait(
+          : await legacyProcesses().startStructuredWithWait(
               command.executable,
               args,
               command.cwd,
@@ -801,29 +793,28 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
       if (activeBootstrapProcessId) {
         const engineBootstrapId = localEngineProcessId(activeBootstrapProcessId);
         const read = engineBootstrapId !== undefined
-          ? (takeLocalEngineReplay(engineBootstrapId, boundedMaxChars) ?? localEngineProcessResult(await callLocalEngineTool("read_output", {
+          ? localEngineProcessResult(await callLocalEngineTool("read_output", {
               process_id: engineBootstrapId,
               max_chars: boundedMaxChars,
               wait_ms: Math.min(wait_ms ?? 0, 5000),
-            }), boundedMaxChars))
-          : await processManager.readOutput(activeBootstrapProcessId, boundedMaxChars, wait_ms, extra.signal);
+            }), boundedMaxChars)
+          : await legacyProcesses().readOutput(activeBootstrapProcessId, boundedMaxChars, wait_ms, extra.signal);
         if (read.next_action === "STOP_READING") bootstrapAliasProcesses.delete(callerId);
         return structuredTextResult(publicBootstrapAliasOutput(read), callerId, servingIdentity);
       }
       const remoteId = localRemoteProcessId(process_id);
       const engineId = localEngineProcessId(process_id);
-      if (engineId !== undefined) localEngineReplay.delete(engineId);
       const value = remoteId !== undefined
         ? remoteProcessResult(await callRemoteOmenTool("read_output", { process_id: remoteId, max_chars: boundedMaxChars, ...(wait_ms !== undefined ? { wait_ms } : {}) }, callerId))
         : engineId !== undefined
-          ? (takeLocalEngineReplay(engineId, boundedMaxChars) ?? localEngineProcessResult(await callLocalEngineTool("read_output", {
+          ? localEngineProcessResult(await callLocalEngineTool("read_output", {
               process_id: engineId,
               max_chars: boundedMaxChars,
               wait_ms: Math.min(wait_ms ?? 0, 5000),
-            }), boundedMaxChars))
+            }), boundedMaxChars)
           : (isBootstrapSnapshot(process_id)
             ? await readBootstrapSnapshot(boundedMaxChars, process_id, callerId, conversation_id, expected_room_head)
-            : await processManager.readOutput(process_id, boundedMaxChars, wait_ms, extra.signal));
+            : await legacyProcesses().readOutput(process_id, boundedMaxChars, wait_ms, extra.signal));
       return structuredTextResult(value, callerId, servingIdentity);
     },
   );
@@ -844,7 +835,7 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
         ? remoteProcessResult(await callRemoteOmenTool("kill_process", { process_id: remoteId }, callerId))
         : engineId !== undefined
           ? localEngineKillResult(await callLocalEngineTool("kill_process", { process_id: engineId }))
-          : await processManager.kill(process_id);
+          : await legacyProcesses().kill(process_id);
       return structuredTextResult(value, callerId, servingIdentity);
     },
   );

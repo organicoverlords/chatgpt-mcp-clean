@@ -1,6 +1,6 @@
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -45,6 +45,7 @@ try {
   const first = await runTurn("first exact user message");
   assert.match(first, /^ARGS:\nBEGIN:first exact user message\n/);
   assert.match(first, /END:first exact user message$/);
+  assert.equal(first,"ARGS:\nBEGIN:first exact user message\n"+"x".repeat(45000)+"\nEND:first exact user message");
   const second = await runTurn("second exact user message", true, "turn-same-message");
   assert.match(second, /^ARGS:--message-id,turn-same-message,--has-attachments\nBEGIN:second exact user message\n/);
   assert.match(second, /END:second exact user message$/);
@@ -55,11 +56,13 @@ try {
   assert.equal((await schema.safeParseAsync({ process_id: "not-bootstrap", stdin: "no" })).success, false);
   assert.equal((await schema.safeParseAsync({ process_id: "not-bootstrap", has_attachments: true })).success, false);
   assert.equal((await schema.safeParseAsync({ process_id: "not-bootstrap", message_id: "turn-no" })).success, false);
+  if (process.env.MCP_LOCAL_ENGINE_URL) assert.equal(existsSync(join(root,"receipts")),false,"Rust lane must not initialize legacy Node process manager");
   console.log("PASS bootstrap lifecycle alias uses one public process id across paged turns");
 } catch (error) {
   console.error(error);
   failed = true;
 } finally {
+  assert.ok(root.startsWith(join(tmpdir(), "mcp-bootstrap-lifecycle-alias-")));
   rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 process.exit(failed ? 1 : 0);
