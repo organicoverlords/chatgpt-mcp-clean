@@ -9,7 +9,6 @@ param(
     [string]$EnvFilePath = '',
     [string]$CandidateRoot = '',
     [string]$EdgeOwnerPath = '',
-    [string]$RecoveryStatePath = '',
     [string]$GateReceiptPath = '',
     [switch]$Apply,
     [switch]$ValidateOnly
@@ -50,7 +49,6 @@ $oauthStore = if ($OAuthStorePath) { Full-Path $OAuthStorePath } else { Join-Pat
 $envFile = if ($EnvFilePath) { Full-Path $EnvFilePath } else { Join-Path $source '.env' }
 $candidate = Full-Path $CandidateRoot
 $edgeOwner = Full-Path $EdgeOwnerPath
-$recoveryState = Full-Path $RecoveryStatePath
 $gateReceipt = Full-Path $GateReceiptPath
 
 $resolvedSid = ''
@@ -90,7 +88,6 @@ $plan = @(
 )
 if ($candidate) { $plan += [ordered]@{ path=$candidate; kind='directory'; rights='RX'; purpose='off-path candidate source/build' } }
 if ($edgeOwner) { $plan += [ordered]@{ path=$edgeOwner; kind='file'; rights='R'; purpose='edge route renderer source' } }
-if ($recoveryState) { $plan += [ordered]@{ path=$recoveryState; kind='file'; rights='R'; purpose='canonical recovery-state read' } }
 if ($gateReceipt) { $plan += [ordered]@{ path=$gateReceipt; kind='file'; rights='R'; purpose='fresh production-change gate receipt read' } }
 
 if ($Apply) {
@@ -102,7 +99,6 @@ if ($Apply) {
     if (Test-Path -LiteralPath $envFile -PathType Leaf) { Grant-File $envFile $resolvedSid 'R' }
     if ($candidate) { Grant-Directory $candidate $resolvedSid 'RX' }
     if ($edgeOwner) { Grant-File $edgeOwner $resolvedSid 'R' }
-    if ($recoveryState) { Grant-File $recoveryState $resolvedSid 'R' }
     if ($gateReceipt) { Grant-File $gateReceipt $resolvedSid 'R' }
 
     $oauthHelper = Join-Path $source 'scripts\protect-oauth-state.ps1'

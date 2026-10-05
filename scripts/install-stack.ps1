@@ -138,7 +138,7 @@ $completionGate = @(
     'verify AboveNormal CPU, memory priority 5, and execution-speed throttling disabled on newly serving backends',
     'for large bootstrap aliases, follow lossless continuation pages through bootstrap_end.status=COMPLETE',
     'preserve previous backends until running-process continuity is proved against the correct receipt/control directory',
-    'reconcile current topology, recovery metadata, Atlas/Vault and current install/restore/update documentation'
+    'reconcile current topology and current install/update documentation; Caddy and OAuth are not recovery targets'
 )
 $actions = @(
     "install MCP runtime on loopback 127.0.0.1:$Port with exactly three connector tools",
