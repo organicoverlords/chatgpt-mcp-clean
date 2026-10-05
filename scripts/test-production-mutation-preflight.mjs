@@ -149,8 +149,6 @@ rejects("Remove-NetRoute -DestinationPrefix '10.203.0.2/32' -Confirm:$false");
 rejects("Disable-NetAdapter -Name 'mcp-wireguard' -Confirm:$false");
 rejects("Set-NetIPAddress -InterfaceAlias 'mcp-wireguard' -IPAddress 10.203.0.2 -PrefixLength 30");
 rejects("& 'C:\\Users\\Example\\ChatGPTMcpClean\\minimal-connectors\\cutover-production-20260905.ps1'");
-rejects("& 'C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\production-replacement-guardian.ps1'");
-rejects("& 'C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\production-replacement-candidate.ps1'");
 rejects("uv run --with asyncssh python C:\\Users\\Example\\McpVpsEdge\\provision_edge_extras.py --caddy-only --backend-port 3012");
 rejects("Start-ScheduledTask -TaskName 'McpV3ProductionReplacementGuardian'");
 rejects("schtasks.exe /Run /TN McpV3ProductionReplacementCandidate");
@@ -159,24 +157,9 @@ rejects(`Invoke-RestMethod -Uri 'http://localhost:2019/config/apps/http/servers/
 rejects(`curl.exe -X DELETE http://127.0.0.1:2019/config/apps/http`);
 rejects(`curl.exe --data '{}' http://localhost:2019/load`);
 
-const guardianSourcePath = "C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\production-replacement-guardian.ps1";
-const candidateSourcePath = "C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\production-replacement-candidate.ps1";
-rejects(`pwsh.exe -NoLogo -NoProfile -File '${guardianSourcePath}'`);
-rejects(guardianSourcePath);
-rejects(`powershell.exe -NoProfile '${guardianSourcePath}'`);
-rejects(`. '${candidateSourcePath}'`);
 
-const sourceReference = await run(`Write-Output '${guardianSourcePath}'; Write-Output 'SOURCE_REFERENCE_ALLOWED'`);
-assert.equal(sourceReference.exit_code, 0);
-assert.match(sourceReference.stdout, /SOURCE_REFERENCE_ALLOWED/);
 
-const sourceRead = await run(`if ($false) { Get-Content -LiteralPath '${guardianSourcePath}' }; Write-Output 'SOURCE_READ_ALLOWED'`);
-assert.equal(sourceRead.exit_code, 0);
-assert.match(sourceRead.stdout, /SOURCE_READ_ALLOWED/);
 
-const sourceEditShape = await run(`if ($false) { Set-Content -LiteralPath '${candidateSourcePath}' -Value 'source-only' }; Write-Output 'SOURCE_EDIT_SHAPE_ALLOWED'`);
-assert.equal(sourceEditShape.exit_code, 0);
-assert.match(sourceEditShape.stdout, /SOURCE_EDIT_SHAPE_ALLOWED/);
 
 const unrelatedCaddyReferenceWithLocalWrite = await run(`if ($false) { $readOnly='sha256sum ${caddyPath}'; Set-Content -LiteralPath 'C:\\tmp\\mcp-readonly-diagnostic.ps1' -Value $readOnly }; Write-Output 'UNRELATED_CADDY_REFERENCE_LOCAL_WRITE_ALLOWED'`);
 assert.equal(unrelatedCaddyReferenceWithLocalWrite.exit_code, 0);

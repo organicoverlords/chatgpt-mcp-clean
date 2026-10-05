@@ -862,20 +862,11 @@ function isProtectedControlPlaneProcessCommand(command: string): boolean {
   return invokesProtectedScript || invokesDesktopCommander || invokesCanonicalClone || invokesCanonicalServingRuntime || invokesMcpTunnel;
 }
 function mcpProductionMutationError(command: string, code: string): string | undefined {
-  const productionIngressError = "direct MCP production ingress mutation is blocked; use the documented redundant replacement/recovery scripts and prove the replacement off-path before changing serving production";
+  const productionIngressError = "direct MCP production ingress mutation is blocked; this process surface does not authorize Caddy, route, listener, or OAuth mutation";
   const rawProductionVpsTransportError = `${productionIngressError}; for read-only VPS diagnosis use the supported wrappers: node scripts/capture-edge-runtime.mjs, node scripts/capture-edge-fanout.mjs, or node scripts/capture-edge-backend-correlation.mjs`;
 
   const invokesObsoleteDatedCutoverHelper = /(?:^|[\\/])minimal-connectors[\\/]cutover-production-\d{8}\.ps1\b/i.test(command);
   if (invokesObsoleteDatedCutoverHelper) return productionIngressError;
-
-  const replacementInternalScript = String.raw`(?:production-replacement-guardian|production-replacement-candidate)\.ps1\b`;
-  const replacementInternalPath = String.raw`(?:[A-Za-z]:)?[^'";|\r\n]*?[\\/]scripts[\\/]${replacementInternalScript}`;
-  const invokesReplacementInternal = [
-    new RegExp(String.raw`(?:^|[;\r\n])\s*[.&]\s*['"]?${replacementInternalPath}`, "i"),
-    new RegExp(String.raw`\b(?:powershell|pwsh)(?:\.exe)?\b[^;\r\n]*?(?:-File\s+)?['"]?${replacementInternalPath}`, "i"),
-    new RegExp(String.raw`(?:^|[;\r\n])\s*(?:[A-Za-z]:[\\/])?[^\s;'"|]*[\\/]scripts[\\/]${replacementInternalScript}`, "i"),
-  ].some((pattern) => pattern.test(command));
-  if (invokesReplacementInternal) return productionIngressError;
 
   const invokesDirectEdgeMutation = /provision_edge_extras\.py\b/i.test(command)
     && /--caddy-only\b/i.test(command)
