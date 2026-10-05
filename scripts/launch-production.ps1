@@ -29,7 +29,7 @@ if ($listener) {
     } catch {
         # An occupied target port cannot be recovered by starting another listener on the same port.
     }
-    Write-Error ("MCP_PRODUCTION_PORT_OCCUPIED_UNHEALTHY port={0}: refusing duplicate bind; preserve the current listener and let the existing recovery policy retry." -f $Port)
+    Write-Error ("MCP_PRODUCTION_PORT_OCCUPIED_UNHEALTHY port={0}: refusing duplicate bind; preserve the current listener and let the serving owner retry." -f $Port)
     exit 1
 }
 

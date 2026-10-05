@@ -194,25 +194,10 @@ const supportedLauncher = await run("if ($false) { & 'C:\\Users\\Example\\ChatGP
 assert.equal(supportedLauncher.exit_code, 0);
 assert.match(supportedLauncher.stdout, /SUPPORTED_PRODUCTION_LAUNCHER_ALLOWED/);
 
-const supportedOffpathProof = await run("if ($false) { node scripts/prove-offpath-backend-replacement.mjs }; Write-Output 'SUPPORTED_OFFPATH_PROOF_ALLOWED'");
-assert.equal(supportedOffpathProof.exit_code, 0);
-assert.match(supportedOffpathProof.stdout, /SUPPORTED_OFFPATH_PROOF_ALLOWED/);
-
 const cloneIdentityValidation = await run("if ($false) { & .\\scripts\\start-minimal-clone.ps1 -InstanceId clone-a -Port 3011 -PublicOrigin https://example.test -ValidateOnly }; Write-Output 'CLONE_IDENTITY_VALIDATION_ALLOWED'");
 assert.equal(cloneIdentityValidation.exit_code, 0);
 assert.match(cloneIdentityValidation.stdout, /CLONE_IDENTITY_VALIDATION_ALLOWED/);
 
-const supportedReplacementRequest = await run("if ($false) { & 'C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\replace-wireguard-production.ps1' }; Write-Output 'SUPPORTED_WIREGUARD_REPLACEMENT_REQUEST_ALLOWED'");
-assert.equal(supportedReplacementRequest.exit_code, 0);
-assert.match(supportedReplacementRequest.stdout, /SUPPORTED_WIREGUARD_REPLACEMENT_REQUEST_ALLOWED/);
-
-const supportedRecoveryRequest = await run("if ($false) { & 'C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\recover-wireguard-production.ps1' }; Write-Output 'SUPPORTED_WIREGUARD_RECOVERY_REQUEST_ALLOWED'");
-assert.equal(supportedRecoveryRequest.exit_code, 0);
-assert.match(supportedRecoveryRequest.stdout, /SUPPORTED_WIREGUARD_RECOVERY_REQUEST_ALLOWED/);
-
-const supportedReplacementInstaller = await run("if ($false) { & 'C:\\Users\\Example\\ChatGPTMcpClean\\scripts\\install-production-replacement-task.ps1' }; Write-Output 'SUPPORTED_REPLACEMENT_TASK_INSTALLER_ALLOWED'");
-assert.equal(supportedReplacementInstaller.exit_code, 0);
-assert.match(supportedReplacementInstaller.stdout, /SUPPORTED_REPLACEMENT_TASK_INSTALLER_ALLOWED/);
 const supportedEdgeSnapshot = await run("if ($false) { node scripts/capture-edge-runtime.mjs }; Write-Output 'SUPPORTED_EDGE_SNAPSHOT_ALLOWED'");
 assert.equal(supportedEdgeSnapshot.exit_code, 0);
 assert.match(supportedEdgeSnapshot.stdout, /SUPPORTED_EDGE_SNAPSHOT_ALLOWED/);
