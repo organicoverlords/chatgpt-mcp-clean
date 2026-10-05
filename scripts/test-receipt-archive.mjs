@@ -104,10 +104,16 @@ try {
   // its 30-minute handoff window. Constructor pruning must migrate before deleting.
   rmSync(join(receiptDirectory, "archive"), { recursive: true, force: true });
   const hotReceiptPath = join(receiptDirectory, `${started.process_id}.json`);
+  const stdoutSpoolPath = join(receiptDirectory, ".output", `${started.process_id}.stdout.utf16le`);
+  const stderrSpoolPath = join(receiptDirectory, ".output", `${started.process_id}.stderr.utf16le`);
   const expiredHotReceiptTime = new Date(Date.now() - 31 * 60 * 1000);
   utimesSync(hotReceiptPath, expiredHotReceiptTime, expiredHotReceiptTime);
+  utimesSync(stdoutSpoolPath, expiredHotReceiptTime, expiredHotReceiptTime);
+  utimesSync(stderrSpoolPath, expiredHotReceiptTime, expiredHotReceiptTime);
 
   const afterHotExpiry = new ProcessManager({ receiptDirectory });
+  assert.equal(existsSync(stdoutSpoolPath), false, "expired stdout spool should leave the 30-minute hot handoff window");
+  assert.equal(existsSync(stderrSpoolPath), false, "expired stderr spool should leave the 30-minute hot handoff window");
   assert.equal(existsSync(hotReceiptPath), false, "expired hot receipt should leave the flat directory only after archival");
   assert.equal(existsSync(archivedPath), true, "legacy flat receipt must be migrated to the durable archive");
   const recovered = afterHotExpiry.read(started.process_id);
