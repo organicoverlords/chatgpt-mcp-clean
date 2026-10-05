@@ -63,7 +63,8 @@ const startInputSchema = server._registeredTools.start_process?.inputSchema;
 assert.ok(startInputSchema, "start_process input schema missing");
 assert.equal((await startInputSchema.safeParseAsync({ command: "Write-Output LEGACY" })).success, false, "legacy command input must be rejected");
 assert.equal((await startInputSchema.safeParseAsync({ executable: "node", args: ["--version"], stdin: "" })).success, true, "structured executable+args+stdin input must be valid");
-assert.equal((await startInputSchema.safeParseAsync({ execution_target: "omen", executable: "node", args: ["--version"] })).success, false, "model-visible start_process must not expose machine-routing selection; routing belongs to the MCP binding");
+assert.equal((await startInputSchema.safeParseAsync({ execution_target: "local", executable: "node", args: ["--version"] })).success, true, "cached clients may still submit the binding's execution target");
+await assert.rejects(() => server._registeredTools.start_process.handler({ execution_target: "omen", executable: "node", args: ["--version"] }, {}), /execution_target_binding_mismatch/, "compatibility selector must not reroute a process to a different host");
 
 const readInputSchema = server._registeredTools.read_output?.inputSchema;
 assert.ok(readInputSchema, "read_output input schema missing");
@@ -171,7 +172,7 @@ const baseExpectedTools = JSON.parse(contractBytes.toString("utf8"));
 // Freeze the semantic JSON contract, not checkout-specific CRLF/LF bytes. The previous raw-byte
 // hash produced false failures in clean Windows worktrees even when the registered schema and
 // descriptions were identical.
-const acceptedContractSha256 = "8efd248249effc21ac612ac2360d5e42bfb51f2d754b3ae2e9785586bbf86677";
+const acceptedContractSha256 = "5a672438d237ef775967680cae7e3323c9e358301613d970d4b12cfb642d0084";
 const actualContractSha256 = createHash("sha256").update(JSON.stringify(baseExpectedTools)).digest("hex");
 assert.equal(actualContractSha256, acceptedContractSha256, "accepted production connector-tool contract changed; descriptions/schema are frozen and must not be used as an instruction channel without an explicit contract migration approved by the user");
 const configuredExpectedTools = JSON.parse(JSON.stringify(baseExpectedTools).replaceAll("process-tools.v4", PROCESS_TOOL_CONTRACT_VERSION));

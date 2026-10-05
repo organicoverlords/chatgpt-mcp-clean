@@ -71,8 +71,8 @@
           "additionalProperties": false
         },
         "execution_target": {
-          "description": "Opaque execution scope reported by the serving binding; diagnostic only.",
-          "type": "string"
+          "type": "string",
+          "description": "Opaque execution scope reported by the serving binding; diagnostic only."
         },
         "execution_transport": {
           "type": "string",
@@ -323,8 +323,8 @@
           "pattern": "^[A-Za-z0-9._/:_-]+$"
         },
         "execution_target": {
-          "description": "Opaque execution scope reported by the serving binding; diagnostic only.",
-          "type": "string"
+          "type": "string",
+          "description": "Opaque execution scope reported by the serving binding; diagnostic only."
         },
         "execution_transport": {
           "type": "string",
@@ -809,6 +809,14 @@
           "type": "string",
           "description": "Working directory for the process on this MCP binding."
         },
+        "execution_target": {
+          "type": "string",
+          "enum": [
+            "local",
+            "omen"
+          ],
+          "description": "Compatibility selector for older clients. The selected target must match this binding; it cannot reroute execution."
+        },
         "wait_ms": {
           "type": "integer",
           "minimum": 0,
@@ -988,8 +996,8 @@
           "pattern": "^[A-Za-z0-9._/:_-]+$"
         },
         "execution_target": {
-          "description": "Opaque execution scope reported by the serving binding; diagnostic only.",
-          "type": "string"
+          "type": "string",
+          "description": "Opaque execution scope reported by the serving binding; diagnostic only."
         },
         "execution_transport": {
           "type": "string",
