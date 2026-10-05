@@ -392,6 +392,7 @@ const processEnvironmentSchema = z.record(
 
 const startProcessCommonShape = {
   working_directory: z.string().describe("Working directory for the process on this MCP binding.").optional(),
+  execution_target: z.enum(["local", "omen"]).describe("Compatibility selector for older clients. The selected target must match this binding; it cannot reroute execution.").optional(),
   wait_ms: z.number().int().min(0).max(240_000).optional(),
   activity_target: activityTargetSchema.optional(),
   action_class: actionClassSchema.optional(),
@@ -625,6 +626,9 @@ export function createServer(callerId: string, runtimeIdentity: ProcessServingId
     async (input, extra) => {
       const { working_directory, wait_ms, activity_target, action_class } = input;
       const target = defaultExecutionTarget;
+      if (input.execution_target !== undefined && input.execution_target !== target) {
+        throw new Error(`execution_target_binding_mismatch: this binding executes on ${target}; use the binding for the requested target`);
+      }
       let value: Record<string, unknown>;
       if (target === "omen" && !(nativeOmenHost && localEngineUrl)) {
         if (nativeOmenHost) {
