@@ -362,6 +362,13 @@ if (publicBasePath) {
 // falling back to the issuer root. The root-origin compatibility route stays
 // available for the existing production connector.
 app.get("/.well-known/oauth-authorization-server/mcp", (_req, res) => res.json(oauthMetadata));
+const protectedResourceMetadata = {
+  resource: resource.href,
+  authorization_servers: [publicOrigin.href],
+  scopes_supported: ["mcp", "offline_access"],
+  resource_name: "Shell MCP",
+};
+app.get("/.well-known/oauth-protected-resource", (_req, res) => res.json(protectedResourceMetadata));
 app.use(mcpAuthRouter({ provider: oauth, issuerUrl: publicOrigin, resourceServerUrl: resource, scopesSupported: ["mcp", "offline_access"], resourceName: "Shell MCP", clientRegistrationOptions: { rateLimit: { windowMs: 60 * 60 * 1000, max: 300 } } }));
 
 const allowedMcpHosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, frontDoorHost, ...publicAllowedHosts]);

@@ -98,6 +98,12 @@ try {
   assert.equal(rfc8414Metadata.body.token_endpoint, `${publicOrigin}/token`);
   assert.equal(rfc8414Metadata.body.registration_endpoint, `${publicOrigin}/register`);
 
+  const protectedResource = await jsonFetch(`${origin}/.well-known/oauth-protected-resource`);
+  assert.equal(protectedResource.response.status, 200, protectedResource.text);
+  assert.equal(protectedResource.body.resource, resource);
+  assert.deepEqual(protectedResource.body.authorization_servers, [`${publicOrigin}/`]);
+  assert.deepEqual(protectedResource.body.scopes_supported, ["mcp", "offline_access"]);
+
   const metadata = await jsonFetch(`${origin}/.well-known/openid-configuration`);
   assert.equal(metadata.response.status, 200, metadata.text);
   assert.equal(metadata.body.authorization_endpoint, `${ownerAuthOrigin}/authorize`);
