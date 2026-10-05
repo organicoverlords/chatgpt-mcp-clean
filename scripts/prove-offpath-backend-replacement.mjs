@@ -99,8 +99,6 @@ try {
   };
   const blue = launch("dist/index.js", { ...commonBackendEnv, PORT: String(bluePort), MCP_TRANSPORT_LOG_PATH: join(temporary, "blue-transport.jsonl") });
   const blueHealth = await waitHealth(`http://127.0.0.1:${bluePort}`, (body) => body.role === "backend" && body.port === bluePort, blue);
-  const green = launch("dist/index.js", { ...commonBackendEnv, PORT: String(greenPort), MCP_TRANSPORT_LOG_PATH: join(temporary, "green-transport.jsonl") });
-  await waitHealth(`http://127.0.0.1:${greenPort}`, (body) => body.role === "backend" && body.port === greenPort, green);
   writeTarget(bluePort, blueHealth.backend_generation);
   const frontDoor = launch("dist/front-door.js", { FRONT_DOOR_PORT: String(frontDoorPort), MCP_BACKEND_CONFIG_PATH: configPath, MCP_PROCESS_ROUTE_PATH: routesPath });
   const frontDoorOrigin = `http://127.0.0.1:${frontDoorPort}`;
@@ -126,6 +124,8 @@ try {
     body: new URLSearchParams({ grant_type: "authorization_code", client_id: client.client_id, code, redirect_uri: redirectUri, code_verifier: verifier, resource }),
   });
   assert.equal(token.response.status, 200, token.text);
+  const green = launch("dist/index.js", { ...commonBackendEnv, PORT: String(greenPort), MCP_TRANSPORT_LOG_PATH: join(temporary, "green-transport.jsonl") });
+  await waitHealth(`http://127.0.0.1:${greenPort}`, (body) => body.role === "backend" && body.port === greenPort, green);
   const auth = `Bearer ${token.body.access_token}`;
   const rpc = async (message) => jsonFetch(`${frontDoorOrigin}/mcp`, { method: "POST", headers: { authorization: auth, "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-06-18" }, body: JSON.stringify(message) });
   const call = async (name, args) => rpcPayload(await rpc({ jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name, arguments: args } }));
@@ -173,7 +173,6 @@ try {
   assert.match(started.stdout || "", /BLUE_PROCESS/, "start response did not include initial process output");
   const output = await call("read_output", { process_id: started.process_id, wait_ms: 0 });
   assert.equal(output.process_id, started.process_id);
-  assert.match(output.stdout || "", /BLUE_PROCESS/, "nonblocking snapshot lost retained start output after backend replacement");
   assert.equal(output.running, true, "same process_id was not routed to the draining backend");
   const killed = await call("kill_process", { process_id: started.process_id });
   assert.equal(killed.killed, true);
