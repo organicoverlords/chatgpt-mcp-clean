@@ -102,11 +102,15 @@ export class LocalOAuthProvider implements OAuthServerProvider {
   // store continues to hold refresh-token digests, never plaintext tokens.
   private recentRefreshSuccessors = new Map<string, { token: string; digest: string; issuedAt: number }>();
 
+  private readonly acceptedResources: Set<string>;
+
   constructor(
     private readonly resourceUrl: URL,
     private readonly ownerLogin: string,
     private readonly storePath: string,
+    resourceAliases: URL[] = [],
   ) {
+    this.acceptedResources = new Set([canonical(resourceUrl), ...resourceAliases.map((alias) => canonical(alias))]);
     this.load();
   }
 
@@ -259,9 +263,12 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     return await this.withStoreMutation(() => {
       const rec = this.getCode(client, code);
       if (redirectUri && redirectUri !== rec.redirectUri) throw new InvalidGrantError("redirect_uri mismatch");
-      if (resource && canonical(resource) !== rec.resource) throw new InvalidTargetError("resource mismatch");
+      const normalizedResource = this.validateResource(resource, "resource mismatch");
+      const storedResource = this.validateStoredResource(rec.resource);
+      if (normalizedResource !== storedResource) throw new InvalidTargetError("resource mismatch");
+      rec.resource = normalizedResource;
       this.codes.delete(digest(code));
-      return this.issuePair(client.client_id, rec.scopes, rec.resource);
+      return this.issuePair(client.client_id, rec.scopes, normalizedResource);
     });
   }
 
@@ -274,7 +281,10 @@ export class LocalOAuthProvider implements OAuthServerProvider {
           emitTelemetry({ event: "oauth_refresh_rejected", reason: !rec ? "unknown_token" : rec.clientId !== client.client_id ? "client_mismatch" : "expired_token" });
           throw new InvalidGrantError("Invalid refresh token");
         }
-        if (resource && canonical(resource) !== rec.resource) throw new InvalidTargetError("resource mismatch");
+        const normalizedResource = this.validateResource(resource, "resource mismatch");
+        const storedResource = this.validateStoredResource(rec.resource);
+        if (normalizedResource !== storedResource) throw new InvalidTargetError("resource mismatch");
+        rec.resource = normalizedResource;
         const nextScopes = scopes?.length ? this.validateScopes(scopes) : rec.scopes;
         if (nextScopes.some((s) => !rec.scopes.includes(s))) throw new InvalidScopeError("scope escalation denied");
 
@@ -384,9 +394,15 @@ export class LocalOAuthProvider implements OAuthServerProvider {
     return rec;
   }
 
-  private validateResource(resource?: URL): string {
+  private validateResource(resource?: URL, errorMessage = "Unknown resource"): string {
     const expected = canonical(this.resourceUrl);
-    if (resource && canonical(resource) !== expected) throw new InvalidTargetError("Unknown resource");
+    if (resource && !this.acceptedResources.has(canonical(resource))) throw new InvalidTargetError(errorMessage);
+    return expected;
+  }
+
+  private validateStoredResource(resource: string): string {
+    const expected = canonical(this.resourceUrl);
+    if (!this.acceptedResources.has(canonical(resource))) throw new InvalidTargetError("resource mismatch");
     return expected;
   }
 

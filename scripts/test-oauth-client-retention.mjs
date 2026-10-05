@@ -8,6 +8,7 @@ import { LocalOAuthProvider } from "../dist/lib/local-oauth-provider.js";
 const tempDir = await mkdtemp(path.join(os.tmpdir(), "shell-mcp-oauth-retention-"));
 const storePath = path.join(tempDir, "oauth.json");
 const resourceUrl = new URL("https://shell-mcp-retention-test.ts.net/mcp");
+const legacyResourceUrl = new URL("https://legacy-shell-mcp-retention-test.example/mcp");
 const redirectUri = "https://chatgpt.com/connector/oauth/retained-client";
 
 function metadata(name, redirect = redirectUri) {
@@ -80,6 +81,23 @@ try {
   const tokens = await issueTokens(provider, retained);
   assert.ok(tokens.access_token);
   assert.ok(tokens.refresh_token);
+
+  const aliasProvider = new LocalOAuthProvider(resourceUrl, "owner@example.com", storePath, [legacyResourceUrl]);
+  let aliasLocation = "";
+  await aliasProvider.authorize(retained, {
+    redirectUri, codeChallenge: "legacy-resource-challenge", scopes: ["mcp", "offline_access"], resource: legacyResourceUrl, state: "legacy-resource",
+  }, { redirect(status, nextLocation) { assert.equal(status, 302); aliasLocation = nextLocation; } });
+  const aliasCode = new URL(aliasLocation).searchParams.get("code");
+  assert.ok(aliasCode);
+  const aliasTokens = await aliasProvider.exchangeAuthorizationCode(retained, aliasCode, undefined, redirectUri, legacyResourceUrl);
+  const aliasAuth = await aliasProvider.verifyAccessToken(aliasTokens.access_token);
+  assert.equal(aliasAuth.resource?.href, resourceUrl.href, "legacy resource alias must canonicalize to the current resource");
+  await mutateRefreshRecord(aliasTokens.refresh_token, (record) => { record.resource = legacyResourceUrl.href; });
+  const aliasReloaded = new LocalOAuthProvider(resourceUrl, "owner@example.com", storePath, [legacyResourceUrl]);
+  const aliasRefreshed = await aliasReloaded.exchangeRefreshToken(retained, aliasTokens.refresh_token, ["mcp", "offline_access"], legacyResourceUrl);
+  assert.ok(aliasRefreshed.refresh_token);
+  const aliasState = JSON.parse(await readFile(storePath, "utf8"));
+  assert.equal(aliasState.refresh[tokenDigest(aliasRefreshed.refresh_token)].resource, resourceUrl.href, "legacy refresh state must migrate to the current resource");
 
   let restartLocation = "";
   await provider.authorize(retained, {

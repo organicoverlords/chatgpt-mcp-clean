@@ -25,6 +25,7 @@ const OWNER_AUTH_ORIGIN = (process.env.MCP_OWNER_AUTH_ORIGIN || "").trim();
 const OWNER_AUTH_MODE = (process.env.MCP_OWNER_AUTH_MODE || "tailscale").trim().toLowerCase();
 const OWNER = (process.env.TAILSCALE_OWNER_LOGIN || "").trim().toLowerCase();
 const STORE = process.env.MCP_OAUTH_STORE_PATH || ".state/oauth.json";
+const OAUTH_RESOURCE_ALIASES = (process.env.MCP_OAUTH_RESOURCE_ALIASES || "").split(",").map((value) => value.trim()).filter(Boolean);
 
 const runtimeIdentityRaw = {
   instanceId: (process.env.MCP_RUNTIME_INSTANCE_ID || "").trim(),
@@ -90,7 +91,13 @@ const publicUrl = (path: string): URL => new URL(path.replace(/^\/+/, ""), publi
 const authorizationUrl = OWNER_AUTH_MODE === "local-edge" ? publicUrl("authorize") : (ownerAuthOrigin ? new URL("authorize", ownerAuthOrigin) : publicUrl("authorize"));
 const authorizationHost = OWNER_AUTH_MODE === "local-edge" ? publicOrigin.host.toLowerCase() : (ownerAuthOrigin?.host.toLowerCase() || null);
 const resource = publicUrl("mcp");
-const oauth = new LocalOAuthProvider(resource, OWNER, STORE);
+const resourceAliases = OAUTH_RESOURCE_ALIASES.map((value) => new URL(value));
+for (const alias of resourceAliases) {
+  if (alias.protocol !== "https:" || !alias.hostname || alias.username || alias.password || alias.search || alias.hash) {
+    throw new Error("MCP_OAUTH_RESOURCE_ALIASES entries must be HTTPS URLs without credentials, query, or fragment");
+  }
+}
+const oauth = new LocalOAuthProvider(resource, OWNER, STORE, resourceAliases);
 const bearer = requireBearerAuth({ verifier: oauth, requiredScopes: ["mcp"], resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resource) });
 
 function isPrivateOrLocalClientAddress(raw: string | undefined): boolean {
