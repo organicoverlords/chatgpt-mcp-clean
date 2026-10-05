@@ -2824,7 +2824,7 @@ export class ProcessManager {
         if (!entry.isFile() || !/^[0-9a-f-]{36}\.(?:stdout|stderr)\.utf16le$/i.test(entry.name)) continue;
         const path = join(this.outputSpoolDirectory, entry.name);
         try {
-          if (now - (await statAsync(path)).mtimeMs > RECEIPT_ARCHIVE_RETENTION_MS) await unlinkAsync(path);
+          if (now - (await statAsync(path)).mtimeMs > COMPLETED_RETENTION_MS) await unlinkAsync(path);
         } catch {
           // best-effort retention cleanup
         }
