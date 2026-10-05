@@ -13,10 +13,12 @@ const first = await manager.startWithWait(
 );
 assert.equal(first.running, false, "process exits");
 
+assert.equal(first.next_action, "STOP_READING", "completed process must not require post-completion draining");
+assert.equal(first.output_page?.more, true, "completed process may retain optional unread output pages");
 const pages = [first];
-while (pages.at(-1).next_action === "READ_SAME_PROCESS_ID") {
+while (pages.at(-1).output_page?.more === true) {
   pages.push(manager.read(first.process_id, 256_000));
-  assert.ok(pages.length < 20, "paging terminates");
+  assert.ok(pages.length < 20, "optional paging terminates");
 }
 
 for (const page of pages) {

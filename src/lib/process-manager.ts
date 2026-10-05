@@ -2359,7 +2359,7 @@ export class ProcessManager {
     delete base.stderr_truncated;
     const result = {
       ...base,
-      next_action: moreCaptured || running ? "READ_SAME_PROCESS_ID" : "STOP_READING",
+      next_action: running ? "READ_SAME_PROCESS_ID" : "STOP_READING",
       stdout: stdoutText,
       stderr: stderrText,
       output_page: {
@@ -2862,7 +2862,7 @@ export class ProcessManager {
 
     const result = {
       ...base,
-      next_action: moreCaptured || running ? "READ_SAME_PROCESS_ID" : "STOP_READING",
+      next_action: running ? "READ_SAME_PROCESS_ID" : "STOP_READING",
       stdout: remainingStdout.slice(0, stdoutCount),
       stderr: remainingStderr.slice(0, stderrCount),
       output_page: {

@@ -170,10 +170,11 @@ const largeStartStructured = await assertStructuredProcessResult("start_process"
 });
 assert.ok(String(largeStartStructured.stdout || "").length <= 30_000, "completed start_process output must stay inside the model-visible page cap");
 assert.equal(largeStartStructured.output_page?.page_limit, 30_000, "completed start_process must expose the model-visible page cap");
-assert.equal(largeStartStructured.next_action, "READ_SAME_PROCESS_ID", "completed oversized start_process output must continue losslessly through read_output");
+assert.equal(largeStartStructured.next_action, "STOP_READING", "completed oversized start_process output must not force post-completion draining");
+assert.equal(largeStartStructured.output_page?.more, true, "completed oversized start_process must expose optional retained pages");
 let largeStartText = String(largeStartStructured.stdout || "");
 let largeStartPage = largeStartStructured;
-while (largeStartPage.next_action === "READ_SAME_PROCESS_ID") {
+while (largeStartPage.output_page?.more === true) {
   largeStartPage = await assertStructuredProcessResult("read_output", { process_id: largeStartStructured.process_id, max_chars: 1_000_000, wait_ms: 0 });
   assert.ok(String(largeStartPage.stdout || "").length <= 30_000, "continued start_process output must stay model-visible");
   largeStartText += String(largeStartPage.stdout || "");
